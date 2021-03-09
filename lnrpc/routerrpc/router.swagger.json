@@ -860,6 +860,20 @@
         }
       }
     },
+    "routerrpcCancelPaymentResponse": {
+      "type": "object",
+      "properties": {
+        "payment_canceled": {
+          "type": "boolean",
+          "format": "boolean",
+          "description": "Indicates whether we sucessfully requested\nthat the payment be canceled."
+        },
+        "error": {
+          "type": "string",
+          "description": "An optional error to inform the client why the payment could not be\ncancelled. This field is intended to notify the client if they attempt\nto cancel a payment which does not exist or has already been settled.\nThis field should only be set if payment_canceled is false."
+        }
+      }
+    },
     "routerrpcCircuitKey": {
       "type": "object",
       "properties": {

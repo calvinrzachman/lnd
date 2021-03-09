@@ -59,6 +59,10 @@ var (
 			Entity: "offchain",
 			Action: "write",
 		}},
+		"/routerrpc.Router/CancelPayment": {{
+			Entity: "offchain",
+			Action: "write",
+		}},
 		"/routerrpc.Router/SendToRouteV2": {{
 			Entity: "offchain",
 			Action: "write",
@@ -287,6 +291,29 @@ func (s *Server) SendPaymentV2(req *SendPaymentRequest,
 	}
 
 	return s.trackPayment(payment.PaymentHash, stream, req.NoInflightUpdates)
+}
+
+// CancelPayment marks the specified payment to indicate
+// the user has requested that the payment be canceled.
+func (s *Server) CancelPayment(ctx context.Context,
+	req *CancelPaymentRequest) (*CancelPaymentResponse, error) {
+
+	var hash [32]byte
+	copy(hash[:], req.PaymentHash[:32])
+
+	// This will block as of right now. Do we want to
+	// wait for the cancellation to complete? Or do we
+	// want to just return and have the user inspect that
+	// the failure went through via a different RPC?
+	p, err := s.cfg.Router.CancelPayment(hash)
+	if err != nil {
+		return nil, err
+	}
+
+	return &CancelPaymentResponse{
+		PaymentCanceled: p.Cancel,
+		Error:           err.Error(),
+	}, nil
 }
 
 // EstimateRouteFee allows callers to obtain a lower bound w.r.t how much it

@@ -560,6 +560,47 @@ func (p *PaymentControl) FetchPayment(paymentHash lntypes.Hash) (
 	return payment, nil
 }
 
+// CancelPayment marks the payment for cancelation in the database.
+func (p *PaymentControl) CancelPayment(paymentHash lntypes.Hash) (
+	*MPPayment, error) {
+
+	var b bytes.Buffer
+	if err := serializePaymentCancelInfo(&b, true); err != nil {
+		return nil, err
+	}
+	cancelBytes := b.Bytes()
+
+	var payment *MPPayment
+	err := kvdb.Batch(p.db, func(tx kvdb.RwTx) error {
+		payment = nil
+
+		// Grab payment
+		bucket, err := fetchPaymentBucketUpdate(tx, paymentHash)
+		if err != nil {
+			return err
+		}
+
+		err = bucket.Put(paymentCancelKey, cancelBytes)
+		if err != nil {
+			fmt.Println("[inside CancelPayment]: Encountered Error")
+			return err
+		}
+
+		// Retrieve attempt info for the notification, if available.
+		payment, err = fetchPayment(bucket)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return payment, nil
+}
+
 // createPaymentBucket creates or fetches the sub-bucket assigned to this
 // payment hash.
 func createPaymentBucket(tx kvdb.RwTx, paymentHash lntypes.Hash) (

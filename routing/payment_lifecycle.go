@@ -26,6 +26,7 @@ type paymentLifecycle struct {
 	paymentHash   lntypes.Hash
 	paySession    PaymentSession
 	timeoutChan   <-chan time.Time
+	cancel        <-chan struct{}
 	currentHeight int32
 }
 
@@ -36,6 +37,7 @@ type paymentState struct {
 	remainingAmt      lnwire.MilliSatoshi
 	remainingFees     lnwire.MilliSatoshi
 	terminate         bool
+	// cancel            bool
 }
 
 // paymentState uses the passed payment to find the latest information we need
@@ -77,7 +79,12 @@ func (p *paymentLifecycle) paymentState(payment *channeldb.MPPayment) (
 		remainingAmt:      p.totalAmount - sentAmt,
 		remainingFees:     feeBudget,
 		terminate:         terminate,
+		// cancel:            payment.Cancel,
 	}, nil
+}
+
+func (p *paymentLifecycle) shouldCancel(payment *channeldb.MPPayment) bool {
+	return payment.Cancel
 }
 
 // resumePayment resumes the paymentLifecycle from the current state.
@@ -118,9 +125,12 @@ func (p *paymentLifecycle) resumePayment() ([32]byte, *route.Route, error) {
 	for {
 		// Start by quickly checking if there are any outcomes already
 		// available to handle before we reevaluate our state.
+		// NOTE: We bail if any shard came back with an error here
 		if err := shardHandler.checkShards(); err != nil {
 			return [32]byte{}, nil, err
 		}
+
+		fmt.Println("[inside PaymentLifecycle State Machine (loop)]: Another go around.")
 
 		// We start every iteration by fetching the lastest state of
 		// the payment from the ControlTower. This ensures that we will
@@ -132,6 +142,8 @@ func (p *paymentLifecycle) resumePayment() ([32]byte, *route.Route, error) {
 		if err != nil {
 			return [32]byte{}, nil, err
 		}
+
+		fmt.Printf("[inside PaymentLifecycle State Machine (loop)]: Fetched payment - %+v\n", payment)
 
 		// Using this latest state of the payment, calculate
 		// information about our active shards and terminal conditions.
@@ -147,8 +159,15 @@ func (p *paymentLifecycle) resumePayment() ([32]byte, *route.Route, error) {
 
 		switch {
 
-		// We have a terminal condition and no active shards, we are
-		// ready to exit.
+		// We have a terminal condition (partial settle/irrecoverable failure)
+		// and no active shards, we are ready to exit.
+		//
+		// NOTE: If none of the HTLCS settled, then the payment is
+		// considered failed. If any HTLC has settled we'll consider
+		// it a success. Not sure why our recipient would accept one
+		// shard but not all. They would be accepting partial payment
+		// but giving us proof of entire payment (all shards bound
+		// to the same preimage).
 		case state.terminate && state.numShardsInFlight == 0:
 			// Find the first successful shard and return
 			// the preimage and route.
@@ -158,13 +177,29 @@ func (p *paymentLifecycle) resumePayment() ([32]byte, *route.Route, error) {
 				}
 			}
 
+			fmt.Println("[inside PaymentLifecycle State Machine (loop)]: the payment has failed")
+
 			// Payment failed.
 			return [32]byte{}, nil, *payment.FailureReason
 
 		// If we either reached a terminal error condition (but had
 		// active shards still) or there is no remaining value to send,
 		// we'll wait for a shard outcome.
+		//
+		// NOTE: We have either a partial settle or irrecoverable failure
+		// while shards are still INFLIGHT. Or outstanding shards are already
+		// carrying the entire payment value, no need to send another.
+		// Wait for a shard result.
+		// QUESTION: What about the case where we have received termination
+		// but we have some outstanding shards?
 		case state.terminate || state.remainingAmt == 0:
+			if state.remainingAmt == 0 {
+				fmt.Println("[inside PaymentLifecycle State Machine (loop)]: the payment is completely en route. about to wait on a shard result!")
+			}
+			if state.terminate {
+				fmt.Println("[inside PaymentLifecycle State Machine (loop)]: the payment should be terminated but we have outstanding shards!")
+			}
+
 			// We still have outstanding shards, so wait for a new
 			// outcome to be available before re-evaluating our
 			// state.
@@ -172,13 +207,41 @@ func (p *paymentLifecycle) resumePayment() ([32]byte, *route.Route, error) {
 				return [32]byte{}, nil, err
 			}
 			continue
+
+			// NOTE: As of right now we can get stuck here and not notice that our payment was
+			// canceled. This is probably okay as we cannot cancel when there are outstanding
+			// HTLCs anyways. We must wait on a shard result
 		}
 
 		// Before we attempt any new shard, we'll check to see if
-		// either we've gone past the payment attempt timeout, or the
-		// router is exiting. In either case, we'll stop this payment
-		// attempt short. If a timeout is not applicable, timeoutChan
-		// will be nil.
+		// either we've gone past the payment attempt timeout, received
+		// request for cancelation, or whether the router is exiting.
+		// If so, we'll stop this payment attempt short.
+		// If a timeout is not applicable, timeoutChan will be nil.
+
+		// Bail if the payment has been marked for cancelation
+		if p.shouldCancel(payment) {
+			fmt.Println("[inside PaymentLifecycle State Machine (loop)]: Noticed payment was marked for cancelation. Aborting...")
+			// By marking the payment failed with the control
+			// tower, no further shards will be launched and we'll
+			// return with an error the moment all active shards
+			// have finished.
+			saveErr := p.router.cfg.Control.Fail(
+				p.paymentHash, channeldb.FailureReasonCanceled,
+			)
+			if saveErr != nil {
+				return [32]byte{}, nil, saveErr
+			}
+
+			log.Infof("payment attempt cancelled for %v", p.paymentHash)
+
+			// NOTE: Failing the payment will ensure we do not continue pathfinding
+			// /HTLC Attempts. Won't we just be left waiting on a shard until
+			// people start failing channels along the route? Cancelation seems to invoke
+			// channel failure. If so, maybe we don't add this feature.
+			continue
+		}
+
 		select {
 		case <-p.timeoutChan:
 			log.Warnf("payment attempt not completed before " +
@@ -244,6 +307,8 @@ func (p *paymentLifecycle) resumePayment() ([32]byte, *route.Route, error) {
 			}
 			continue
 		}
+
+		fmt.Println("[inside PaymentLifecycle State Machine (loop)]: Found route. Launching shard...")
 
 		// We found a route to try, launch a new shard.
 		attempt, outcome, err := shardHandler.launchShard(rt)
@@ -701,6 +766,8 @@ func (p *shardHandler) handleSendError(attempt *channeldb.HTLCAttemptInfo,
 // failAttempt calls control tower to fail the current payment attempt.
 func (p *shardHandler) failAttempt(attempt *channeldb.HTLCAttemptInfo,
 	sendError error) (*channeldb.HTLCAttempt, error) {
+
+	fmt.Println("[inside failAttempt]: About to register the HTLC attempt as failed with the control tower so that we can try again")
 
 	log.Warnf("Attempt %v for payment %v failed: %v", attempt.AttemptID,
 		p.paymentHash, sendError)

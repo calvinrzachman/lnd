@@ -130,6 +130,31 @@ func TestSentPaymentSerialization(t *testing.T) {
 	}
 }
 
+func TestPaymentCancelationSerialization(t *testing.T) {
+	t.Parallel()
+	var b bytes.Buffer
+
+	if err := serializePaymentCancelInfo(&b, true); err != nil {
+		t.Fatalf("unable to serialize cancelation info (bool): %v", err)
+	}
+
+	cancel, err := deserializePaymentCancelInfo(&b)
+	if !cancel || err != nil {
+		t.Fatalf("unexpected serialization of boolean true: %v", err)
+	}
+
+	b.Reset()
+	if err := serializePaymentCancelInfo(&b, false); err != nil {
+		t.Fatalf("unable to serialize cancelation info (bool): %v", err)
+	}
+
+	cancel, err = deserializePaymentCancelInfo(&b)
+	if cancel || err != nil {
+		t.Fatalf("unexpected serialization of boolean false: %v", err)
+	}
+
+}
+
 // assertRouteEquals compares to routes for equality and returns an error if
 // they are not equal.
 func assertRouteEqual(a, b *route.Route) error {

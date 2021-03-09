@@ -217,6 +217,7 @@ type failPaymentArgs struct {
 type testPayment struct {
 	info     channeldb.PaymentCreationInfo
 	attempts []channeldb.HTLCAttempt
+	cancel   bool
 }
 
 type mockControlTower struct {
@@ -227,6 +228,7 @@ type mockControlTower struct {
 	init            chan initArgs
 	registerAttempt chan registerAttemptArgs
 	settleAttempt   chan settleAttemptArgs
+	cancelPayment   chan bool
 	failAttempt     chan failAttemptArgs
 	failPayment     chan failPaymentArgs
 	fetchInFlight   chan struct{}
@@ -407,6 +409,29 @@ func (m *mockControlTower) Fail(phash lntypes.Hash,
 	return nil
 }
 
+func (m *mockControlTower) CancelPayment(phash lntypes.Hash) (
+	*channeldb.MPPayment, error) {
+
+	m.Lock()
+	defer m.Unlock()
+
+	// Payment must be known.
+	p, ok := m.payments[phash]
+	if !ok {
+		return nil, channeldb.ErrPaymentNotInitiated
+	}
+
+	if m.cancelPayment != nil {
+		m.cancelPayment <- true
+	}
+
+	// Mark the payment as canceled
+	p.cancel = true
+	m.payments[phash] = p
+
+	return nil, nil
+}
+
 func (m *mockControlTower) FetchPayment(phash lntypes.Hash) (
 	*channeldb.MPPayment, error) {
 
@@ -419,7 +444,8 @@ func (m *mockControlTower) FetchPayment(phash lntypes.Hash) (
 	}
 
 	mp := &channeldb.MPPayment{
-		Info: &p.info,
+		Info:   &p.info,
+		Cancel: p.cancel,
 	}
 
 	reason, ok := m.failed[phash]

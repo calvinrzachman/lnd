@@ -317,6 +317,7 @@ func main() {
 		getRecoveryInfoCommand,
 		pendingChannelsCommand,
 		sendPaymentCommand,
+		cancelPaymentCommand,
 		payInvoiceCommand,
 		sendToRouteCommand,
 		addInvoiceCommand,

@@ -249,7 +249,7 @@ func TestFindRoutesWithFeeLimit(t *testing.T) {
 // TestSendPaymentRouteFailureFallback tests that when sending a payment, if
 // one of the target routes is seen as unavailable, then the next route in the
 // queue is used instead. This process should continue until either a payment
-// succeeds, or all routes have been exhausted.
+// succeeds, or all routes have been exhausted. (or the payment is canceled)
 func TestSendPaymentRouteFailureFallback(t *testing.T) {
 	t.Parallel()
 

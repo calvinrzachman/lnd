@@ -128,6 +128,11 @@ type MPPayment struct {
 	// altogether.
 	FailureReason *FailureReason
 
+	// Cancel reflects user intent to cancel the payment
+	// TODO: See what it would take to do this without the
+	// DB changes.
+	Cancel bool
+
 	// Status is the current PaymentStatus of this payment.
 	Status PaymentStatus
 }

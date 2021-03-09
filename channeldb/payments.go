@@ -32,6 +32,7 @@ var (
 	//      |        |--sequence-key: <sequence number>
 	//      |        |--creation-info-key: <creation info>
 	//      |        |--fail-info-key: <(optional) fail info>
+	//      |        |--cancel-key: <(optional)>
 	//      |        |
 	//      |        |--payment-htlcs-bucket (shard-bucket)
 	//      |        |        |
@@ -93,6 +94,10 @@ var (
 	// store information about the reason a payment failed.
 	paymentFailInfoKey = []byte("payment-fail-info")
 
+	// paymentCancelKey is a key used in the payment's sub-bucket to
+	// indicate the user has requested that the payment be canceled.
+	paymentCancelKey = []byte("cancel-payment")
+
 	// paymentsIndexBucket is the name of the top-level bucket within the
 	// database that stores an index of payment sequence numbers to its
 	// payment hash.
@@ -147,7 +152,8 @@ const (
 	// balance to complete the payment.
 	FailureReasonInsufficientBalance FailureReason = 4
 
-	// TODO(halseth): cancel state.
+	// FailureReasonCanceled indicates that the payment was canceled.
+	FailureReasonCanceled FailureReason = 5
 
 	// TODO(joostjager): Add failure reasons for:
 	// LocalLiquidityInsufficient, RemoteCapacityInsufficient.
@@ -171,6 +177,8 @@ func (r FailureReason) String() string {
 		return "incorrect_payment_details"
 	case FailureReasonInsufficientBalance:
 		return "insufficient_balance"
+	case FailureReasonCanceled:
+		return "user_canceled"
 	}
 
 	return "unknown"
@@ -294,6 +302,31 @@ func fetchCreationInfo(bucket kvdb.RBucket) (*PaymentCreationInfo, error) {
 	return deserializePaymentCreationInfo(r)
 }
 
+// fetchPaymentCancelInfo obtains cancel information if available
+func fetchPaymentCancelInfo(bucket kvdb.RBucket) (bool, error) {
+	b := bucket.Get(paymentCancelKey)
+	if b == nil {
+		// Payment cancel info is optional - set by user via RPC
+		return false, nil
+	}
+
+	r := bytes.NewReader(b)
+	return deserializePaymentCancelInfo(r)
+}
+
+// serializePaymentCancelInfo serializes the boolean which indicates
+// the user has requested a payment be canceled.
+func serializePaymentCancelInfo(w io.Writer, cancel bool) error {
+
+	return WriteElement(w, cancel)
+}
+
+func deserializePaymentCancelInfo(r io.Reader) (bool, error) {
+	var b bool
+	err := ReadElement(r, &b)
+	return b, err
+}
+
 func fetchPayment(bucket kvdb.RBucket) (*MPPayment, error) {
 	seqBytes := bucket.Get(paymentSequenceKey)
 	if seqBytes == nil {
@@ -317,6 +350,12 @@ func fetchPayment(bucket kvdb.RBucket) (*MPPayment, error) {
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	// Check for cancelation.
+	cancel, err := fetchPaymentCancelInfo(bucket)
+	if err != nil {
+		return nil, err
 	}
 
 	// Get failure reason if available.
@@ -370,6 +409,7 @@ func fetchPayment(bucket kvdb.RBucket) (*MPPayment, error) {
 		Info:          creationInfo,
 		HTLCs:         htlcs,
 		FailureReason: failureReason,
+		Cancel:        cancel,
 		Status:        paymentStatus,
 	}, nil
 }

@@ -315,7 +315,7 @@ func TestPaymentControlSuccessesWithoutInFlight(t *testing.T) {
 }
 
 // TestPaymentControlFailsWithoutInFlight checks that a strict payment
-// control will disallow calls to Fail when no payment is in flight.
+// control will disallow calls to Fail/Cancel when no payment is in flight.
 func TestPaymentControlFailsWithoutInFlight(t *testing.T) {
 	t.Parallel()
 
@@ -340,6 +340,50 @@ func TestPaymentControlFailsWithoutInFlight(t *testing.T) {
 	}
 
 	assertPaymentStatus(t, pControl, info.PaymentHash, StatusUnknown)
+
+	// Calling CancelPayment should return an error.
+	_, err = pControl.CancelPayment(info.PaymentHash)
+	if err != ErrPaymentNotInitiated {
+		t.Fatalf("expected ErrPaymentNotInitiated during cancelation attempt, got %v", err)
+	}
+}
+
+// TestPaymentCancelation checks that a payment is marked
+// for cancellation.
+func TestPaymentCancelation(t *testing.T) {
+	t.Parallel()
+
+	db, cleanup, err := MakeTestDB()
+	defer cleanup()
+
+	if err != nil {
+		t.Fatalf("unable to init db: %v", err)
+	}
+
+	pControl := NewPaymentControl(db)
+
+	info, _, _, err := genInfo()
+	if err != nil {
+		t.Fatalf("unable to generate htlc message: %v", err)
+	}
+
+	// Sends base htlc message which initiate base status and move it to
+	// StatusInFlight and verifies that it was changed.
+	err = pControl.InitPayment(info.PaymentHash, info)
+	if err != nil {
+		t.Fatalf("unable to send htlc message: %v", err)
+	}
+
+	// Cancel the payment
+	p, err := pControl.CancelPayment(info.PaymentHash)
+	if err != nil {
+		t.Fatalf("unable to cancel payment hash: %v", err)
+	}
+
+	// Verify that the payment has been marked for cancelation
+	// NOTE: The payment will be failed eventually by the lifecycle state
+	// machine with a failure reason indicating that it has been canceled.
+	assertCancelationRequested(t, p)
 }
 
 // TestPaymentControlDeleteNonInFlight checks that calling DeletePayments only
@@ -871,6 +915,19 @@ func TestPaymentControlMPPRecordValidation(t *testing.T) {
 	if err != ErrNonMPPayment {
 		t.Fatalf("expected ErrNonMPPayment, got: %v", err)
 	}
+}
+
+func assertCancelationRequested(t *testing.T, payment *MPPayment) {
+
+	t.Helper()
+
+	if payment.Cancel {
+		return
+	}
+
+	t.Fatalf("payment expected to be marked for cancelation: %v",
+		payment.Cancel,
+	)
 }
 
 // assertPaymentStatus retrieves the status of the payment referred to by hash

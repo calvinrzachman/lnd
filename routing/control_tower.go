@@ -1,8 +1,10 @@
 package routing
 
 import (
+	"fmt"
 	"sync"
 
+	"github.com/go-errors/errors"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/multimutex"
@@ -40,6 +42,13 @@ type ControlTower interface {
 	// FetchPayment fetches the payment corresponding to the given payment
 	// hash.
 	FetchPayment(paymentHash lntypes.Hash) (*channeldb.MPPayment, error)
+
+	// CancelPayment cancels the payment corresponding to the given payment
+	// hash. No further HTLC attempts will be made.
+	//
+	// NOTE: A payment with outstanding shards/HTLCs is not terminated
+	// immediately.
+	CancelPayment(paymentHash lntypes.Hash) (*channeldb.MPPayment, error)
 
 	// Fail transitions a payment into the Failed state, and records the
 	// ultimate reason the payment failed. Note that this should only be
@@ -189,6 +198,25 @@ func (p *controlTower) FetchPayment(paymentHash lntypes.Hash) (
 	*channeldb.MPPayment, error) {
 
 	return p.db.FetchPayment(paymentHash)
+}
+
+// CancelPayment terminates the payment corresponding to a given payment hash.
+func (p *controlTower) CancelPayment(paymentHash lntypes.Hash) (
+	*channeldb.MPPayment, error) {
+
+	// Should we return early if the payment hash does not
+	// correspond to an active payment?
+	payment, err := p.FetchPayment(paymentHash)
+	if err != nil {
+		return nil, err
+	}
+
+	if payment.Status != channeldb.StatusInFlight {
+		return nil, errors.New(fmt.Sprintf("cannot cancel payment that"+
+			"is not IN-FLIGHT. payment status: %s", payment.Status.String()))
+	}
+
+	return p.db.CancelPayment(paymentHash)
 }
 
 // Fail transitions a payment into the Failed state, and records the reason the
