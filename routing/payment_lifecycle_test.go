@@ -629,6 +629,11 @@ func TestRouterPaymentStateMachine(t *testing.T) {
 			steps: []string{
 				routerInitPayment,
 
+				// // shard -1
+				// routeRelease,
+				// routerRegisterAttempt,
+				// sendToSwitchSuccess,
+
 				// shard 0
 				routeRelease,
 				routerRegisterAttempt,
@@ -647,7 +652,7 @@ func TestRouterPaymentStateMachine(t *testing.T) {
 				paymentError,
 			},
 			routes: []*route.Route{
-				shard, shard,
+				shard, shard, shard,
 			},
 			paymentErr: channeldb.FailureReasonPaymentDetails,
 		},

@@ -236,6 +236,17 @@ type testPayment struct {
 	attempts []channeldb.HTLCAttempt
 }
 
+func (t *testPayment) htlcsInflight() bool {
+	var inflight bool = false
+	for _, htlc := range t.attempts {
+		if htlc.Settle != nil || htlc.Failure != nil {
+			continue
+		}
+		inflight = true
+	}
+	return inflight
+}
+
 type mockControlTower struct {
 	payments   map[lntypes.Hash]*testPayment
 	successful map[lntypes.Hash]struct{}
@@ -307,14 +318,27 @@ func (m *mockControlTower) RegisterAttempt(phash lntypes.Hash,
 		return channeldb.ErrPaymentAlreadySucceeded
 	}
 
-	if _, ok := m.failed[phash]; ok {
-		return channeldb.ErrPaymentAlreadyFailed
-	}
-
 	p, ok := m.payments[phash]
 	if !ok {
 		return channeldb.ErrPaymentNotInitiated
 	}
+
+	// Simulate the payment status we'd receive from fetchPayment()
+	// which will NOT report a payment as FAILED if there are
+	// outstanding HTLCs (not sure why this is).
+	// if _, ok := m.failed[phash]; ok {
+	if _, ok := m.failed[phash]; ok && !p.htlcsInflight() {
+		fmt.Println("Error: Payment Already Failed")
+		return channeldb.ErrPaymentAlreadyFailed
+	}
+
+	// // We cannot register a new attempt if the payment already has
+	// // reached a terminal condition:
+	// // settle, fail := p.terminalInfo()
+	// if _, ok := m.failed[phash]; ok {
+	// 	fmt.Println("Got ErrPaymentTerminal")
+	// 	return channeldb.ErrPaymentTerminal
+	// }
 
 	p.attempts = append(p.attempts, channeldb.HTLCAttempt{
 		HTLCAttemptInfo: *a,
