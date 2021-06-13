@@ -90,6 +90,8 @@ func (s *SessionInfo) Decode(r io.Reader) error {
 // are updated with the latest values presented by the client. Any errors
 // returned from this method are converted into an appropriate
 // wtwire.StateUpdateCode.
+// NOTE: This is the function where the server validates the MaxUpdates parameter,
+// sending ErrSessionConsumed in the case that the client has used up all of their negotiated justice updates.
 func (s *SessionInfo) AcceptUpdateSequence(seqNum, lastApplied uint16) error {
 	switch {
 

@@ -94,6 +94,14 @@ func (s *Server) handleCreateSession(peer Peer, id *wtdb.SessionID,
 	}
 
 	// TODO(conner): create invoice for upfront payment
+	// The invoice needs to be communicated to the client.
+	// The wtwire message sent will need to optionally include one.
+	if s.cfg.UpfrontPayment {
+		// if s.cfg.EnableLSAT {
+
+		// Create and block (for some configurable timeout) awaiting PoP
+
+	}
 
 	// Assemble the session info using the agreed upon parameters, reward
 	// address, and session id.

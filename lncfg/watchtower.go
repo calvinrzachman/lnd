@@ -9,5 +9,7 @@ type Watchtower struct {
 
 	TowerDir string `long:"towerdir" description:"Directory of the watchtower.db"`
 
+	UpfrontPayment bool `long:"upfront-payment" description:"Require payment for client session establishment"`
+
 	watchtower.Conf
 }

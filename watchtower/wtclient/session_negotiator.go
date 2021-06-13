@@ -326,6 +326,9 @@ retryWithBackoff:
 				tower.IdentityKey.SerializeCompressed(), err)
 
 			goto retryWithBackoff
+
+			// If error indicates 'Payment Requested', then pay the invoice
+			// and retry.
 		}
 
 		// Success.
@@ -433,6 +436,8 @@ func (n *sessionNegotiator) tryAddress(sessionKey keychain.SingleKeyECDH,
 	}
 
 	// Receive CreateSessionReply message.
+	// *** RIGHT HERE ***
+	// This will need to be parsed for an invoice.
 	remoteMsg, err = n.cfg.ReadMessage(conn)
 	if err != nil {
 		return fmt.Errorf("unable to read CreateSessionReply: %v", err)

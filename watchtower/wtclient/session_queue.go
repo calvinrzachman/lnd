@@ -204,6 +204,10 @@ func (q *sessionQueue) AcceptTask(task *backupTask) (reserveStatus, bool) {
 		q.ID(), task.id, q.seqNum, numPending, maxUpdates)
 
 	// Examine the current reserve status of the session queue.
+	// NOTE: This is the Watchtower client validating. The server will
+	// no doubt perform its own check, and it is that check which we
+	// wish to incorporate the support session establishment conditional on
+	// for LSAT/Proof-of-Payment acceptance.
 	curStatus := q.reserveStatus()
 
 	switch curStatus {
