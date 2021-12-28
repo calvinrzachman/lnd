@@ -36,6 +36,7 @@ VOLUME /root/.lnd
 # curl and gpg for the signature verification script.
 RUN apk --no-cache add \
     bash \
+    su-exec \
     jq \
     ca-certificates \
     gnupg \
@@ -53,7 +54,17 @@ RUN sha256sum /bin/lnd /bin/lncli > /shasums.txt \
   && cat /shasums.txt
 
 # Expose lnd ports (p2p, rpc).
-EXPOSE 9735 10009
+# EXPOSE 9735 10009
+
+COPY docker-entrypoint.sh /entrypoint.sh
+
+RUN chmod a+x /entrypoint.sh
+# Expose lnd ports (p2p, rpc).
+VOLUME ["/home/lnd/.lnd"]
+
+EXPOSE 9735 8080 10009
 
 # Specify the start command and entrypoint as the lnd daemon.
-ENTRYPOINT ["lnd"]
+ENTRYPOINT ["/entrypoint.sh"]
+
+CMD ["lnd"]

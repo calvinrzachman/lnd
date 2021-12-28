@@ -22,13 +22,13 @@ COPY . /go/src/github.com/lightningnetwork/lnd
 
 RUN cd /go/src/github.com/lightningnetwork/lnd \
 &&  make \
-&&  make install tags="signrpc walletrpc chainrpc invoicesrpc peersrpc"
+&&  make install tags="watchtowerrpc signrpc walletrpc chainrpc invoicesrpc peersrpc"
 
 # Start a new, final image to reduce size.
 FROM alpine as final
 
 # Expose lnd ports (server, rpc).
-EXPOSE 9735 10009
+EXPOSE 9735 8080 10009
 
 # Copy the binaries and entrypoint from the builder image.
 COPY --from=builder /go/bin/lncli /bin/
@@ -36,8 +36,24 @@ COPY --from=builder /go/bin/lnd /bin/
 
 # Add bash.
 RUN apk add --no-cache \
-    bash
+    bash \
+    su-exec \
+    jq \
+    ca-certificates \
+    gnupg \
+    curl
 
-# Copy the entrypoint script.
-COPY "docker/lnd/start-lnd.sh" .
-RUN chmod +x start-lnd.sh
+# # Copy the entrypoint script.
+# COPY "docker/lnd/start-lnd.sh" .
+# RUN chmod +x start-lnd.sh
+
+COPY docker-entrypoint.sh /entrypoint.sh
+
+RUN chmod a+x /entrypoint.sh
+# Expose lnd ports (p2p, rpc).
+VOLUME ["/home/lnd/.lnd"]
+
+# Specify the start command and entrypoint as the lnd daemon.
+ENTRYPOINT ["/entrypoint.sh"]
+
+CMD ["lnd"]
