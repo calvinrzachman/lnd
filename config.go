@@ -43,6 +43,7 @@ import (
 	"github.com/lightningnetwork/lnd/signal"
 	"github.com/lightningnetwork/lnd/sweep"
 	"github.com/lightningnetwork/lnd/tor"
+	"github.com/lightningnetwork/lnd/watchtower/wtpolicy"
 )
 
 const (
@@ -576,7 +577,16 @@ func DefaultConfig() Config {
 		},
 		Prometheus: lncfg.DefaultPrometheus(),
 		Watchtower: &lncfg.Watchtower{
-			TowerDir: defaultTowerDir,
+			TowerDir:     defaultTowerDir,
+			EnableReward: true,
+			// DisableReward: false,
+			RewardBase: wtpolicy.DefaultRewardBase,
+			RewardRate: wtpolicy.DefaultRewardRate,
+		},
+		WtClient: &lncfg.WtClient{
+			EnableReward: false,
+			RewardBase:   0,
+			RewardRate:   0,
 		},
 		HealthChecks: &lncfg.HealthCheckConfig{
 			ChainCheck: &lncfg.CheckConfig{
@@ -975,6 +985,22 @@ func ValidateConfig(cfg Config, interceptor signal.Interceptor, fileParser,
 		return nil, mkErr("invalid max commit fee rate anchors: %v, "+
 			"must be at least 1 sat/vByte",
 			cfg.MaxCommitFeeRateAnchors)
+	}
+
+	if cfg.Watchtower.RewardRate > wtpolicy.RewardScale {
+		return nil, mkErr("invalid watchtower reward parameters: "+
+			"reward rate is in parts per %d (channel percentage terms). maximum value "+
+			"is %d which instructs tower to claim entire justice output",
+			wtpolicy.RewardScale, wtpolicy.RewardScale, cfg.Watchtower.RewardRate,
+		)
+	}
+
+	if cfg.WtClient.RewardRate > wtpolicy.RewardScale {
+		return nil, mkErr("invalid watchtower client reward parameters: "+
+			"reward rate is in parts per %d (channel percentage terms). maximum value "+
+			"is %d which instructs tower to claim entire justice output",
+			wtpolicy.RewardScale, wtpolicy.RewardScale, cfg.WtClient.RewardRate,
+		)
 	}
 
 	// Validate the Tor config parameters.

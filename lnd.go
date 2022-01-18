@@ -465,8 +465,11 @@ func Main(cfg *Config, lisCfg ListenerCfg, implCfg *ImplementationCfg,
 			NodeKeyECDH: keychain.NewPubKeyECDH(
 				towerKeyDesc, activeChainControl.KeyRing,
 			),
-			PublishTx: activeChainControl.Wallet.PublishTransaction,
-			ChainHash: *cfg.ActiveNetParams.GenesisHash,
+			PublishTx:    activeChainControl.Wallet.PublishTransaction,
+			ChainHash:    *cfg.ActiveNetParams.GenesisHash,
+			EnableReward: cfg.Watchtower.EnableReward,
+			RewardBase:   cfg.Watchtower.RewardBase,
+			RewardRate:   cfg.Watchtower.RewardRate,
 		}
 
 		// If there is a tor controller (user wants auto hidden

@@ -65,6 +65,14 @@ const (
 	// TypeRewardCommit sweeps only commitment outputs to a sweep address
 	// controlled by the user, and pays a negotiated reward to the tower.
 	TypeRewardCommit = Type(FlagCommitOutputs | FlagReward)
+
+	// TypeRewardAnchorCommit sweeps only commitment outputs from an anchor
+	// commitment to a sweep address controlled by the user, and pays a
+	// negotiated reward to the tower.
+	// NOTE: This could be the item "to be worked out" before enabling reward towers
+	// TODO(czachman): ensure that reward towers work with anchor outputs.
+	// QUESTION: How do tower rewards play with anchor outputs?
+	TypeRewardAnchorCommit = Type(FlagCommitOutputs | FlagReward | FlagAnchorChannel)
 )
 
 // Has returns true if the Type has the passed flag enabled.
@@ -141,6 +149,7 @@ var supportedTypes = map[Type]struct{}{
 	TypeAltruistCommit:       {},
 	TypeRewardCommit:         {},
 	TypeAltruistAnchorCommit: {},
+	TypeRewardAnchorCommit:   {},
 }
 
 // IsSupportedType returns true if the given type is supported by the package.

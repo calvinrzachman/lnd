@@ -15,7 +15,51 @@ import (
 func (s *Server) handleCreateSession(peer Peer, id *wtdb.SessionID,
 	req *wtwire.CreateSession) error {
 
+	log.Infof("received request for session from %x@%v", peer.RemotePub().SerializeCompressed(), peer.RemoteAddr())
+	// log.Infof("tower policy - reward base %d\t reward rate: %d", s.cfg.RewardBase, s.cfg.RewardRate)
+	log.Infof("tower policy - reward base %d\t reward rate: %d", s.cfg.SessionValidator.Policy.RewardBase, s.cfg.SessionValidator.Policy.RewardRate)
+
 	// TODO(conner): validate accept against policy
+	policy := wtpolicy.Policy{
+		TxPolicy: wtpolicy.TxPolicy{
+			BlobType:     req.BlobType,
+			RewardBase:   req.RewardBase,
+			RewardRate:   req.RewardRate,
+			SweepFeeRate: req.SweepFeeRate,
+		},
+		MaxUpdates: req.MaxUpdates,
+	}
+
+	// Check client requested session parameters against
+	// our tower session policy.
+	log.Infof("validating requested parameters %s against tower session policy", policy)
+	err := s.cfg.SessionValidator.Validate(policy)
+	if err != nil {
+		var failureCode wtwire.ErrorCode
+
+		// Convert from wtpolicy error to wtwire error.
+		// Offer precise errors to clients so that they
+		// can adjust their requested session paramaters.
+		switch err {
+		case nil:
+			log.Debug("policy validation succeeded. client requested parameters accepted")
+		case wtpolicy.ErrRewardBaseTooLow:
+			failureCode = wtwire.CreateSessionCodeRejectRewardBase
+		case wtpolicy.ErrRewardRateTooLow:
+			failureCode = wtwire.CreateSessionCodeRejectRewardRate
+		case wtpolicy.ErrSessionSizeTooHigh:
+			failureCode = wtwire.CreateSessionCodeRejectMaxUpdates
+		default:
+			failureCode = wtwire.CodeTemporaryFailure
+		}
+
+		log.Infof("Rejecting CreateSession from %s, requested "+
+			"policy %s not accepted: %s", id, policy, err.Error())
+
+		return s.replyCreateSession(
+			peer, id, failureCode, 0, nil,
+		)
+	}
 
 	// Query the db for session info belonging to the client's session id.
 	existingInfo, err := s.cfg.DB.GetSessionInfo(id)
@@ -56,13 +100,32 @@ func (s *Server) handleCreateSession(peer Peer, id *wtdb.SessionID,
 
 	// If the request asks for a reward session and the tower has them
 	// disabled, we will reject the request.
-	if s.cfg.DisableReward && req.BlobType.Has(blob.FlagReward) {
+	if !s.cfg.EnableReward && req.BlobType.Has(blob.FlagReward) {
 		log.Debugf("Rejecting CreateSession from %s, reward "+
 			"sessions disabled", id)
+
+		// TODO(czachman): could we send our policy to the client
+		// so they can parse and modify their session request on retry?
 		return s.replyCreateSession(
 			peer, id, wtwire.CreateSessionCodeRejectBlobType, 0,
+			[]byte(s.cfg.Policy.String()),
+		)
+	}
+
+	// If the request asks for an altruist session and the tower has
+	// reward policy, we will reject the request.
+	if s.cfg.EnableReward && !req.BlobType.Has(blob.FlagReward) {
+		log.Debugf("Rejecting CreateSession from %s, missing "+
+			"required reward", id)
+
+		// TODO(czachman): clients assume altruistic tower by default.
+		// Return a more specific error indicating that a reward is required.
+		// I suppose a client could set a reward in policy but not in blob type.
+		return s.replyCreateSession(
+			peer, id, wtwire.CreateSessionCodeRejectAltruistClient, 0,
 			nil,
 		)
+		// NOTE: maybe reject altruist commit type?
 	}
 
 	// Now that we've established that this session does not exist in the
@@ -98,16 +161,8 @@ func (s *Server) handleCreateSession(peer Peer, id *wtdb.SessionID,
 	// Assemble the session info using the agreed upon parameters, reward
 	// address, and session id.
 	info := wtdb.SessionInfo{
-		ID: *id,
-		Policy: wtpolicy.Policy{
-			TxPolicy: wtpolicy.TxPolicy{
-				BlobType:     req.BlobType,
-				RewardBase:   req.RewardBase,
-				RewardRate:   req.RewardRate,
-				SweepFeeRate: req.SweepFeeRate,
-			},
-			MaxUpdates: req.MaxUpdates,
-		},
+		ID:            *id,
+		Policy:        policy,
 		RewardAddress: rewardScript,
 	}
 

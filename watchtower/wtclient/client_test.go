@@ -1300,6 +1300,11 @@ var clientTests = []clientTest{
 		// permits the client to continue using policies that differ in
 		// operational parameters, but don't manifest in different
 		// justice transactions.
+		// NOTE: We should add a test which confirms correct client
+		// behavior in the event that the user changes the client
+		// session policy. What about a test to confirm we handle
+		// a tower updating its session policy? Tower should not
+		// be able to update its session policy for ongoing sessions.
 		name: "create session change policy same txpolicy",
 		cfg: harnessCfg{
 			localBalance:  localBalance,

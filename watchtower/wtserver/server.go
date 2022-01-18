@@ -14,6 +14,7 @@ import (
 	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/watchtower/wtdb"
+	"github.com/lightningnetwork/lnd/watchtower/wtpolicy"
 	"github.com/lightningnetwork/lnd/watchtower/wtwire"
 )
 
@@ -64,9 +65,22 @@ type Config struct {
 	// should only be used for testing.
 	NoAckUpdates bool
 
-	// DisableReward causes the server to reject any session creation
+	// Policy is the session policy the tower will enforce when creating
+	// new sessions with clients.
+	Policy wtpolicy.Policy
+
+	// EnableReward permits the server to accept session creation
 	// attempts that request rewards.
-	DisableReward bool
+	EnableReward bool
+
+	// // DisableReward permits the server to accept session creation
+	// // attempts that do not pay a reward.
+	// DisableReward bool
+
+	// SessionValidator ensures that tower client's requested policy
+	// satisfies our session acceptance criteria.
+	SessionValidator wtpolicy.PolicyValidator
+	// SessionValidator wtpolicy.PolicyValidatorInt
 }
 
 // Server houses the state required to handle watchtower peers. It's primary job

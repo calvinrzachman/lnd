@@ -1448,7 +1448,11 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 	})
 
 	if cfg.WtClient.Active {
-		policy := wtpolicy.DefaultPolicy()
+		policy := wtpolicy.DefaultAltruistPolicy()
+		if cfg.WtClient.EnableReward {
+			policy.RewardBase = cfg.WtClient.RewardBase
+			policy.RewardRate = cfg.WtClient.RewardRate
+		}
 
 		if cfg.WtClient.SweepFeeRate != 0 {
 			// We expose the sweep fee rate in sat/vbyte, but the
@@ -1474,6 +1478,7 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 			)
 		}
 
+		srvrLog.Infof("tower client reward params: %t - %d - %d", cfg.WtClient.EnableReward, cfg.WtClient.RewardBase, cfg.WtClient.RewardRate)
 		s.towerClient, err = wtclient.New(&wtclient.Config{
 			Signer:         cc.Wallet.Cfg.Signer,
 			NewAddress:     newSweepPkScriptGen(cc.Wallet),
@@ -1481,6 +1486,7 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 			Dial:           cfg.net.Dial,
 			AuthDial:       authDial,
 			DB:             dbs.TowerClientDB,
+			EnableReward:   cfg.WtClient.EnableReward,
 			Policy:         policy,
 			ChainHash:      *s.cfg.ActiveNetParams.GenesisHash,
 			MinBackoff:     10 * time.Second,

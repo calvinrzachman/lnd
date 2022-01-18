@@ -15,6 +15,22 @@ type WtClient struct {
 	// SweepFeeRate specifies the fee rate in sat/byte to be used when
 	// constructing justice transactions sent to the tower.
 	SweepFeeRate uint64 `long:"sweep-fee-rate" description:"Specifies the fee rate in sat/byte to be used when constructing justice transactions sent to the watchtower."`
+
+	// EnableReward allows the watchtower client to negotiate sessions with reward towers.
+	EnableReward bool `long:"enablereward" description:"Allow watchtower client to negotiate sessions with reward towers."`
+
+	// RewardBase specifies the maximum accepted flat fee the tower
+	// client will pay any given tower.
+	RewardBase uint32 `long:"rewardbase" description:"Maximum flat fee paid to tower for justice transaction broadcast (in satoshis)."`
+
+	// RewardRate specifies the maximum accepted proportional fee the tower
+	// client will pay any given tower for justice broadcasts.
+	RewardRate uint32 `long:"rewardrate" description:"Maximum portion of justice transaction paid to tower as reward."`
+
+	// NOTE: Could consolidate the above to a single parameter which specifies the maximum total reward burden
+	// the tower client will accept in session negotiation. This would likely need to be specified in % of output
+	// terms (like total tax burden/effective tax rate) and would include base + proportional fee taken by the tower.
+	// MaxReward uint32 `long:"maxreward" description:"Maximum effective reward rate paid to tower for justice transaction broadcast (in % of channel)"`
 }
 
 // Validate ensures the user has provided a valid configuration.

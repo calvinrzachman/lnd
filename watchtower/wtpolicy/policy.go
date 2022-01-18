@@ -21,6 +21,11 @@ const (
 	// can send to the tower in a single session.
 	DefaultMaxUpdates = 1024
 
+	// DefaultRewardBase specifies the flat fee that the
+	// tower takes if it successfully sweeps a breach. The value is
+	// expressed in satoshis.
+	DefaultRewardBase = 10000
+
 	// DefaultRewardRate specifies the fraction of the channel that the
 	// tower takes if it successfully sweeps a breach. The value is
 	// expressed in millionths of the channel capacity.
@@ -59,15 +64,45 @@ var (
 	// ErrSweepFeeRateTooLow signals that the policy's fee rate is too low
 	// to get into the mempool during low congestion.
 	ErrSweepFeeRateTooLow = errors.New("sweep fee rate too low")
+
+	// ErrRewardBaseTooLow signals that a policy is invalid because it
+	// contains a base reward that is too low.
+	ErrRewardBaseTooLow = errors.New("reward base too low")
+
+	// ErrRewardRateTooLow signals that a policy is invalid because it
+	// contains a reward rate it too low.
+	ErrRewardRateTooLow = errors.New("reward rate too low")
+
+	// ErrRewardRateTooHigh signals that a policy is invalid because it
+	// contains a reward rate that is too high.
+	ErrRewardRateTooHigh = errors.New("reward rate too high")
+
+	// ErrRewardSessionSizeTooHigh signals that a policy in invalid because it
+	// requests too many session updates.
+	ErrSessionSizeTooHigh = errors.New("too many updates per session")
 )
 
-// DefaultPolicy returns a Policy containing the default parameters that can be
+// DefaultAltruistPolicy returns a Policy containing the default parameters that can be
 // used by clients or servers.
-func DefaultPolicy() Policy {
+func DefaultAltruistPolicy() Policy {
 	return Policy{
 		TxPolicy: TxPolicy{
 			BlobType:     blob.TypeAltruistCommit,
 			SweepFeeRate: DefaultSweepFeeRate,
+		},
+		MaxUpdates: DefaultMaxUpdates,
+	}
+}
+
+// DefaultRewardPolicy returns a Policy containing the default parameters that can be
+// used by clients or servers.
+func DefaultRewardPolicy() Policy {
+	return Policy{
+		TxPolicy: TxPolicy{
+			BlobType:     blob.TypeRewardCommit,
+			SweepFeeRate: DefaultSweepFeeRate,
+			RewardBase:   DefaultRewardBase,
+			RewardRate:   DefaultRewardRate,
 		},
 		MaxUpdates: DefaultMaxUpdates,
 	}
@@ -115,14 +150,73 @@ type Policy struct {
 
 // String returns a human-readable description of the current policy.
 func (p Policy) String() string {
-	return fmt.Sprintf("(blob-type=%b max-updates=%d reward-rate=%d "+
-		"sweep-fee-rate=%d)", p.BlobType, p.MaxUpdates, p.RewardRate,
+	return fmt.Sprintf("(blob-type=%b max-updates=%d reward-base=%d reward-rate=%d "+
+		"sweep-fee-rate=%d)", p.BlobType, p.MaxUpdates, p.RewardBase, p.RewardRate,
 		p.SweepFeeRate)
 }
 
 // IsAnchorChannel returns true if the session policy requires anchor channels.
 func (p Policy) IsAnchorChannel() bool {
 	return p.TxPolicy.BlobType.IsAnchorChannel()
+}
+
+// PolicyValidatorInt verifies a requested session policy
+// against a tower/client's specified policy (session acceptance criteria)
+type PolicyValidatorInt interface {
+	Validate(p Policy) bool
+}
+
+// // ValidationError provides detailed policy validation failure
+// // information to clients.
+// type ValidationError struct {
+// 	Code wtwire.ErrorCode
+// }
+
+// // Error displays the SessionID and Code that caused the connection failure.
+// func (f *ValidationError) Error() string {
+// 	return fmt.Sprintf("policy validation failed with code=%s",
+// 		f.Code,
+// 	)
+// }
+
+// PolicyValidator verifies that tower client's requested policy
+// satisfies our specified policy (tower session acceptance criteria).
+//
+// NOTE: This is inherently a tower side function as written.
+type PolicyValidator struct {
+	Policy Policy
+}
+
+// type PolicyValidator interface {
+// 	Validate(p Policy) bool, error
+// }
+
+// NewValidator instantiates a new PolicyValidator
+func NewValidator(p Policy) PolicyValidator {
+	v := PolicyValidator{
+		Policy: p,
+	}
+	return v
+}
+
+// Validate enforces adherance to the tower's specified policy
+func (v PolicyValidator) Validate(p Policy) error {
+
+	// Check the requested reward base/rate
+	if p.RewardBase < v.Policy.RewardBase {
+		return ErrRewardBaseTooLow
+	}
+
+	if p.RewardRate < v.Policy.RewardRate {
+		return ErrRewardRateTooLow
+	}
+
+	// Check max updates
+	if p.MaxUpdates > v.Policy.MaxUpdates {
+		return ErrSessionSizeTooHigh
+	}
+
+	return nil
 }
 
 // Validate ensures that the policy satisfies some minimal correctness
@@ -134,6 +228,13 @@ func (p Policy) Validate() error {
 		(p.RewardBase != 0 || p.RewardRate != 0) {
 
 		return ErrAltruistReward
+	}
+
+	// RewardRate must be specified within the reward scale.
+	if p.BlobType.Has(blob.FlagReward) &&
+		p.RewardRate > RewardScale {
+
+		return ErrRewardRateTooHigh
 	}
 
 	// MaxUpdates must be positive.

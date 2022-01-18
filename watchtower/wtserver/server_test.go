@@ -14,6 +14,7 @@ import (
 	"github.com/lightningnetwork/lnd/watchtower/blob"
 	"github.com/lightningnetwork/lnd/watchtower/wtdb"
 	"github.com/lightningnetwork/lnd/watchtower/wtmock"
+	"github.com/lightningnetwork/lnd/watchtower/wtpolicy"
 	"github.com/lightningnetwork/lnd/watchtower/wtserver"
 	"github.com/lightningnetwork/lnd/watchtower/wtwire"
 	"github.com/stretchr/testify/require"
@@ -46,12 +47,17 @@ func randPubKey(t *testing.T) *btcec.PublicKey {
 // initServer creates and starts a new server using the server.DB and timeout.
 // If the provided database is nil, a mock db will be used.
 func initServer(t *testing.T, db wtserver.DB,
-	timeout time.Duration) wtserver.Interface {
+	timeout time.Duration, reward bool) wtserver.Interface {
 
 	t.Helper()
 
 	if db == nil {
 		db = wtmock.NewTowerDB()
+	}
+
+	sessionValidator := wtpolicy.NewValidator(wtpolicy.DefaultAltruistPolicy())
+	if reward {
+		sessionValidator = wtpolicy.NewValidator(wtpolicy.DefaultRewardPolicy())
 	}
 
 	s, err := wtserver.New(&wtserver.Config{
@@ -61,7 +67,10 @@ func initServer(t *testing.T, db wtserver.DB,
 		NewAddress: func() (btcutil.Address, error) {
 			return addr, nil
 		},
-		ChainHash: testnetChainHash,
+		ChainHash:    testnetChainHash,
+		EnableReward: reward,
+		// DisableReward: !reward
+		SessionValidator: sessionValidator,
 	})
 	require.NoError(t, err, "unable to create server")
 
@@ -85,7 +94,8 @@ func TestServerOnlyAcceptOnePeer(t *testing.T) {
 
 	const timeoutDuration = 500 * time.Millisecond
 
-	s := initServer(t, nil, timeoutDuration)
+	s := initServer(t, nil, timeoutDuration, true)
+	defer s.Stop()
 
 	localPub := randPubKey(t)
 
@@ -156,6 +166,7 @@ type createSessionTestCase struct {
 	expReply        *wtwire.CreateSessionReply
 	expDupReply     *wtwire.CreateSessionReply
 	sendStateUpdate bool
+	rewardTower     bool
 }
 
 var createSessionTests = []createSessionTestCase{
@@ -180,6 +191,7 @@ var createSessionTests = []createSessionTestCase{
 			Code: wtwire.CodeOK,
 			Data: []byte{},
 		},
+		rewardTower: false,
 	},
 	{
 		name: "duplicate session create",
@@ -202,6 +214,7 @@ var createSessionTests = []createSessionTestCase{
 			Code: wtwire.CodeOK,
 			Data: []byte{},
 		},
+		rewardTower: false,
 	},
 	{
 		name: "duplicate session create after use",
@@ -226,6 +239,7 @@ var createSessionTests = []createSessionTestCase{
 			Data:        []byte{},
 		},
 		sendStateUpdate: true,
+		rewardTower:     false,
 	},
 	{
 		name: "duplicate session create reward",
@@ -236,8 +250,8 @@ var createSessionTests = []createSessionTestCase{
 		createMsg: &wtwire.CreateSession{
 			BlobType:     blob.TypeRewardCommit,
 			MaxUpdates:   1000,
-			RewardBase:   0,
-			RewardRate:   0,
+			RewardBase:   10000,
+			RewardRate:   10000,
 			SweepFeeRate: 10000,
 		},
 		expReply: &wtwire.CreateSessionReply{
@@ -248,6 +262,7 @@ var createSessionTests = []createSessionTestCase{
 			Code: wtwire.CodeOK,
 			Data: addrScript,
 		},
+		rewardTower: true,
 	},
 	{
 		name: "reject unsupported blob type",
@@ -266,8 +281,67 @@ var createSessionTests = []createSessionTestCase{
 			Code: wtwire.CreateSessionCodeRejectBlobType,
 			Data: []byte{},
 		},
+		rewardTower: false,
 	},
 	// TODO(conner): add policy rejection tests
+	{
+		name: "reject invalid base reward",
+		initMsg: wtwire.NewInitMessage(
+			lnwire.NewRawFeatureVector(),
+			testnetChainHash,
+		),
+		// This is what the client request should hold
+		createMsg: &wtwire.CreateSession{
+			BlobType:     blob.TypeRewardCommit,
+			MaxUpdates:   1000,
+			RewardBase:   wtpolicy.DefaultRewardBase - 1,
+			RewardRate:   wtpolicy.DefaultRewardRate,
+			SweepFeeRate: 10000,
+		},
+		expReply: &wtwire.CreateSessionReply{
+			Code: wtwire.CreateSessionCodeRejectRewardBase,
+			Data: []byte{},
+		},
+		rewardTower: true,
+	},
+	{
+		name: "reject invalid reward rate",
+		initMsg: wtwire.NewInitMessage(
+			lnwire.NewRawFeatureVector(),
+			testnetChainHash,
+		),
+		createMsg: &wtwire.CreateSession{
+			BlobType:     blob.TypeRewardCommit,
+			MaxUpdates:   1000,
+			RewardBase:   wtpolicy.DefaultRewardBase,
+			RewardRate:   wtpolicy.DefaultRewardRate - 1,
+			SweepFeeRate: 10000,
+		},
+		expReply: &wtwire.CreateSessionReply{
+			Code: wtwire.CreateSessionCodeRejectRewardRate,
+			Data: []byte{},
+		},
+		rewardTower: true,
+	},
+	{
+		name: "reject invalid session size",
+		initMsg: wtwire.NewInitMessage(
+			lnwire.NewRawFeatureVector(),
+			testnetChainHash,
+		),
+		createMsg: &wtwire.CreateSession{
+			BlobType:     blob.TypeRewardCommit,
+			MaxUpdates:   wtpolicy.DefaultMaxUpdates + 1,
+			RewardBase:   wtpolicy.DefaultRewardBase,
+			RewardRate:   wtpolicy.DefaultRewardRate,
+			SweepFeeRate: 10000,
+		},
+		expReply: &wtwire.CreateSessionReply{
+			Code: wtwire.CreateSessionCodeRejectMaxUpdates,
+			Data: []byte{},
+		},
+		rewardTower: true,
+	},
 }
 
 // TestServerCreateSession checks the server's behavior in response to a
@@ -285,7 +359,8 @@ func TestServerCreateSession(t *testing.T) {
 func testServerCreateSession(t *testing.T, i int, test createSessionTestCase) {
 	const timeoutDuration = 500 * time.Millisecond
 
-	s := initServer(t, nil, timeoutDuration)
+	s := initServer(t, nil, timeoutDuration, test.rewardTower)
+	defer s.Stop()
 
 	localPub := randPubKey(t)
 
@@ -639,7 +714,8 @@ func TestServerStateUpdates(t *testing.T) {
 func testServerStateUpdates(t *testing.T, test stateUpdateTestCase) {
 	const timeoutDuration = 100 * time.Millisecond
 
-	s := initServer(t, nil, timeoutDuration)
+	s := initServer(t, nil, timeoutDuration, true)
+	defer s.Stop()
 
 	localPub := randPubKey(t)
 
@@ -746,7 +822,8 @@ func TestServerDeleteSession(t *testing.T) {
 
 	const timeoutDuration = 100 * time.Millisecond
 
-	s := initServer(t, db, timeoutDuration)
+	s := initServer(t, db, timeoutDuration, true)
+	defer s.Stop()
 
 	// Create a session for peer2 so that the server's db isn't completely
 	// empty.

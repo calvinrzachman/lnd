@@ -418,6 +418,9 @@ func (n *sessionNegotiator) tryAddress(sessionKey keychain.SingleKeyECDH,
 	}
 
 	policy := n.cfg.Policy
+	n.log.Debugf("Negotiating session with %s under requested policy: %s",
+		lnAddr, policy)
+
 	createSession := &wtwire.CreateSession{
 		BlobType:     policy.BlobType,
 		MaxUpdates:   policy.MaxUpdates,
@@ -504,8 +507,39 @@ func (n *sessionNegotiator) tryAddress(sessionKey keychain.SingleKeyECDH,
 			return ErrPermanentTowerFailure
 		}
 
+		requestedRewardRate := createSessionReply.Data
+
+		n.log.Debugf("tower set reward rate to: %v",
+			requestedRewardRate)
+
 		return fmt.Errorf("tower rejected reward rate: %v",
 			policy.RewardRate)
+
+	case wtwire.CreateSessionCodeRejectRewardBase:
+		// The tower rejected the session because of the reward base.
+		if !policy.BlobType.Has(blob.FlagReward) {
+			return ErrPermanentTowerFailure
+		}
+
+		requestedRewardBase := createSessionReply.Data
+
+		n.log.Debugf("tower set reward base to: %v",
+			requestedRewardBase)
+
+		return fmt.Errorf("tower rejected reward base: %v",
+			policy.RewardBase)
+
+	case wtwire.CreateSessionCodeRejectAltruistClient:
+		// The tower rejected the session because we are not
+		// configured to negotiate reward sessions.
+		if policy.BlobType.Has(blob.FlagReward) {
+			return ErrPermanentTowerFailure
+		}
+
+		// TODO(czachman): could tower include its policy in the rejection
+		// reply data?
+		return fmt.Errorf("tower requires reward: %v",
+			createSessionReply.Data)
 
 	case wtwire.CreateSessionCodeRejectSweepFeeRate:
 		return fmt.Errorf("tower rejected sweep fee rate: %v",

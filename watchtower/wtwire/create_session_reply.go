@@ -29,6 +29,14 @@ const (
 	// CreateSessionCodeRejectBlobType is returned when the tower does not
 	// support the proposed blob type.
 	CreateSessionCodeRejectBlobType CreateSessionCode = 64
+
+	// CreateSessionCodeRejectRewardBase the tower rejected the reward rate
+	// proposed by the client.
+	CreateSessionCodeRejectRewardBase CreateSessionCode = 65
+
+	// CreateSessionCodeRejecAltruistClient the tower rejected session
+	// negotiation from an altruist (no reward) client.
+	CreateSessionCodeRejectAltruistClient CreateSessionCode = 66
 )
 
 // MaxCreateSessionReplyDataLength is the maximum size of the Data payload

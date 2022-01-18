@@ -90,6 +90,24 @@ type Config struct {
 	// the server's replies.
 	WriteTimeout time.Duration
 
+	// RewardBase is the fixed amount allocated to the tower when the
+	// policy's blob type specifies a reward for the tower. This is taken
+	// before adding the proportional reward.
+	RewardBase uint32
+
+	// RewardRate is the fraction of the total balance of the revoked
+	// commitment that the watchtower is entitled to. This value is
+	// expressed in millionths of the total balance.
+	RewardRate uint32
+
+	// EnableReward permits the server to accept session creation
+	// attempts that request rewards.
+	EnableReward bool
+
+	// // DisableReward permits the server to accept session creation
+	// // attempts which pay no reward.
+	// DisableReward bool
+
 	// TorController allows the watchtower to optionally setup an onion hidden
 	// service.
 	TorController *tor.Controller

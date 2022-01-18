@@ -9,5 +9,12 @@ type Watchtower struct {
 
 	TowerDir string `long:"towerdir" description:"Directory of the watchtower.db"`
 
+	EnableReward bool `long:"enablereward" description:"Configure tower to claim reward for justice enacted"`
+	// DisableReward bool `long:"disablereward" description:"Configure altruist tower. Claim reward for justice enacted"`
+
+	RewardBase uint32 `long:"rewardbase" description:"Minimum flat fee charged for justice transaction broadcast (in satoshis)"`
+
+	RewardRate uint32 `long:"rewardrate" description:"Minimum portion of justice transaction claimed by tower as reward"`
+
 	watchtower.Conf
 }

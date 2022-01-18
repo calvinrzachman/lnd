@@ -52,6 +52,8 @@ var (
 	altruistCommitType = blob.FlagCommitOutputs.Type()
 
 	altruistAnchorCommitType = blob.TypeAltruistAnchorCommit
+
+	rewardAnchorCommitType = blob.TypeRewardAnchorCommit
 )
 
 // TestJusticeDescriptor asserts that a JusticeDescriptor is able to produce the
@@ -72,6 +74,10 @@ func TestJusticeDescriptor(t *testing.T) {
 		{
 			name:     "altruist anchor commit type",
 			blobType: altruistAnchorCommitType,
+		},
+		{
+			name:     "reward anchor commit type",
+			blobType: rewardAnchorCommitType,
 		},
 	}
 

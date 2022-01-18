@@ -154,6 +154,10 @@ type Config struct {
 	// DB provides access to the client's stable storage medium.
 	DB DB
 
+	// EnableReward permits the client to negotiate sessions
+	// with towers that request rewards.
+	EnableReward bool
+
 	// Policy is the session policy the client will propose when creating
 	// new sessions with the tower. If the policy differs from any active
 	// sessions recorded in the database, those sessions will be ignored and

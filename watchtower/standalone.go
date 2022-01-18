@@ -9,6 +9,7 @@ import (
 	"github.com/lightningnetwork/lnd/lnencrypt"
 	"github.com/lightningnetwork/lnd/tor"
 	"github.com/lightningnetwork/lnd/watchtower/lookout"
+	"github.com/lightningnetwork/lnd/watchtower/wtpolicy"
 	"github.com/lightningnetwork/lnd/watchtower/wtserver"
 )
 
@@ -82,16 +83,32 @@ func New(cfg *Config) (*Standalone, error) {
 		listeners = append(listeners, listener)
 	}
 
+	// Construct altruist or reward policy for tower.
+	// TODO(czachman): Carefully consider handling of default values.
+	// Need to allow user provided config to override.
+	policy := wtpolicy.DefaultRewardPolicy()
+
+	// If we're running an altruist tower these values will be overwritten,
+	// silently ignoring user specified reward configuration, so that policy
+	// validation will still work for altruist towers.
+	policy.RewardBase = cfg.RewardBase
+	policy.RewardRate = cfg.RewardRate
+	if !cfg.EnableReward {
+		policy = wtpolicy.DefaultAltruistPolicy()
+	}
+
 	// Initialize the server with its required resources.
 	server, err := wtserver.New(&wtserver.Config{
-		ChainHash:     cfg.ChainHash,
-		DB:            cfg.DB,
-		NodeKeyECDH:   cfg.NodeKeyECDH,
-		Listeners:     listeners,
-		ReadTimeout:   cfg.ReadTimeout,
-		WriteTimeout:  cfg.WriteTimeout,
-		NewAddress:    cfg.NewAddress,
-		DisableReward: true,
+		ChainHash:        cfg.ChainHash,
+		DB:               cfg.DB,
+		NodeKeyECDH:      cfg.NodeKeyECDH,
+		Listeners:        listeners,
+		ReadTimeout:      cfg.ReadTimeout,
+		WriteTimeout:     cfg.WriteTimeout,
+		Policy:           policy,
+		NewAddress:       cfg.NewAddress,
+		EnableReward:     cfg.EnableReward,
+		SessionValidator: wtpolicy.NewValidator(policy),
 	})
 	if err != nil {
 		return nil, err

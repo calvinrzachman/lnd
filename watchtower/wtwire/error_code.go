@@ -40,6 +40,8 @@ func (c ErrorCode) String() string {
 		return "CreateSessionCodeRejectSweepFeeRate"
 	case CreateSessionCodeRejectBlobType:
 		return "CreateSessionCodeRejectBlobType"
+	case CreateSessionCodeRejectRewardBase:
+		return "CreateSessionCodeRejectRewardBase"
 	case StateUpdateCodeClientBehind:
 		return "StateUpdateCodeClientBehind"
 	case StateUpdateCodeMaxUpdatesExceeded:

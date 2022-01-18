@@ -30,6 +30,17 @@ var typeStringTests = []typeStringTest{
 		typ:    unknownFlag.Type(),
 		expStr: "0000000000010000[No-FlagAnchorChannel|No-FlagCommitOutputs|No-FlagReward]",
 	},
+	// NOTE: This might not be overkill since we just testing the string creation method.
+	{
+		name:   "commit anchor no-reward",
+		typ:    blob.TypeAltruistAnchorCommit,
+		expStr: "[FlagAnchorChannel|FlagCommitOutputs|No-FlagReward]",
+	},
+	{
+		name:   "commit anchor reward",
+		typ:    blob.TypeRewardAnchorCommit,
+		expStr: "[FlagAnchorChannel|FlagCommitOutputs|FlagReward]",
+	},
 }
 
 // TestTypeStrings asserts that the proper human-readable string is returned for

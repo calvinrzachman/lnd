@@ -63,7 +63,7 @@ func (p *JusticeDescriptor) commitToLocalInput() (*breachedInput, error) {
 	}
 
 	// Compute the witness script hash, which will be used to locate the
-	// input on the breaching commitment transaction.
+	// output on the breaching commitment transaction.
 	toLocalWitnessHash, err := input.WitnessScriptHash(toLocalScript)
 	if err != nil {
 		return nil, err
@@ -129,7 +129,7 @@ func (p *JusticeDescriptor) commitToRemoteInput() (*breachedInput, error) {
 		}
 
 		// Compute the witness script hash from the to-remote pubkey, which will
-		// be used to locate the input on the breach commitment transaction.
+		// be used to locate the output on the breach commitment transaction.
 		toRemoteScriptHash, err = input.CommitScriptUnencumbered(
 			toRemotePubKey,
 		)
@@ -291,7 +291,7 @@ func (p *JusticeDescriptor) CreateJusticeTxn() (*wire.MsgTx, error) {
 	}
 
 	// An older ToLocalPenaltyWitnessSize constant used to underestimate the
-	// size by one byte. The diferrence in weight can cause different output
+	// size by one byte. The difference in weight can cause different output
 	// values on the sweep transaction, so we mimic the original bug to
 	// avoid invalidating signatures by older clients. For anchor channels
 	// we correct this and use the correct witness size.
