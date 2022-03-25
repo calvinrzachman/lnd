@@ -161,6 +161,7 @@ func createInterceptorFunc(prefix, receiver string, messages []expectedMessage,
 	}
 }
 
+// READ THIS
 // TestChannelLinkRevThenSig tests that if a link owes both a revocation and a
 // signature to the counterparty (in this order), that they are sent as rev and
 // then sig.
@@ -1512,6 +1513,7 @@ func TestChannelLinkMultiHopUnknownNextHop(t *testing.T) {
 	// Load the forwarding packages for Bob's incoming link. The payment
 	// should have been rejected by the switch, and the AddRef in this link
 	// should be acked by the failed payment.
+	// Example of forwarding package use
 	bobInFwdPkgs, err := channels.bobToAlice.State().LoadFwdPkgs()
 	if err != nil {
 		t.Fatalf("unable to load bob's fwd pkgs: %v", err)
@@ -1749,6 +1751,7 @@ func TestChannelLinkExpiryTooSoonMidNode(t *testing.T) {
 	}
 }
 
+// READ THIS
 // TestChannelLinkSingleHopMessageOrdering test checks ordering of message which
 // flying around between Alice and Bob are correct when Bob sends payments to
 // Alice.
@@ -2162,6 +2165,9 @@ func updateState(batchTick chan time.Time, link *channelLink,
 //
 // TODO(roasbeef): add sync hook into packet processing so can eliminate all
 // sleep in this test and the one below
+// Pro tip on how to get rid of sleeps in tests. If you have one routine waiting on
+// another have them sync up so you only wait as long as necessary (and you never don't
+// don't wait long enough!)
 func TestChannelLinkBandwidthConsistency(t *testing.T) {
 	if !build.IsDevBuild() {
 		t.Fatalf("htlcswitch tests must be run with '-tags dev")
@@ -2621,6 +2627,7 @@ func genAddsAndCircuits(numHtlcs int, htlc *lnwire.UpdateAddHTLC) (
 	return addPkts, circuits
 }
 
+// READ THIS
 // TestChannelLinkTrimCircuitsPending checks that the switch and link properly
 // trim circuits if there are open circuits corresponding to ADDs on a pending
 // commmitment transaction.
@@ -2894,6 +2901,7 @@ func TestChannelLinkTrimCircuitsPending(t *testing.T) {
 	)
 }
 
+// READ THIS
 // TestChannelLinkTrimCircuitsNoCommit checks that the switch and link properly trim
 // circuits if the ADDs corresponding to open circuits are never committed.
 func TestChannelLinkTrimCircuitsNoCommit(t *testing.T) {
@@ -3164,6 +3172,7 @@ func TestChannelLinkTrimCircuitsNoCommit(t *testing.T) {
 	assertLinkBandwidth(t, alice.link, aliceStartingBandwidth)
 }
 
+// READ THIS
 // TestChannelLinkTrimCircuitsRemoteCommit checks that the switch and link
 // don't trim circuits if the ADD is locked in on the remote commitment but
 // not on our local commitment.
@@ -3460,6 +3469,7 @@ func TestChannelLinkBandwidthChanReserve(t *testing.T) {
 	assertLinkBandwidth(t, bobLink, 0)
 }
 
+// READ THIS
 // TestChannelRetransmission tests the ability of the channel links to
 // synchronize theirs states after abrupt disconnect.
 func TestChannelRetransmission(t *testing.T) {
@@ -3841,6 +3851,7 @@ func TestShouldAdjustCommitFee(t *testing.T) {
 	}
 }
 
+// READ THIS
 // TestChannelLinkShutdownDuringForward asserts that a link can be fully
 // stopped when it is trying to send synchronously through the switch. The
 // specific case this can occur is when a link forwards incoming Adds. We test
@@ -4115,6 +4126,7 @@ func TestChannelLinkUpdateCommitFee(t *testing.T) {
 	triggerFeeUpdate(newFeeRate, minRelayFee, minRelayFee, true)
 }
 
+// READ THIS
 // TestChannelLinkAcceptDuplicatePayment tests that if a link receives an
 // incoming HTLC for a payment we have already settled, then it accepts the
 // HTLC. We do this to simplify the processing of settles after restarts or
@@ -4610,6 +4622,7 @@ func generateHtlcAndInvoice(t *testing.T,
 	return htlc, invoice
 }
 
+// READ THIS
 // TestChannelLinkNoMoreUpdates tests that we won't send a new commitment
 // when there are no new updates to sign.
 func TestChannelLinkNoMoreUpdates(t *testing.T) {
@@ -4737,6 +4750,7 @@ func checkHasPreimages(t *testing.T, coreLink *channelLink,
 	}
 }
 
+// READ THIS - for sure
 // TestChannelLinkWaitForRevocation tests that we will keep accepting updates
 // to our commitment transaction, even when we are waiting for a revocation
 // from the remote node.
@@ -5423,6 +5437,7 @@ func (*mockPackager) AckSettleFails(tx kvdb.RwTx,
 	return nil
 }
 
+// READ THIS - info on when we force close
 // TestChannelLinkFail tests that we will fail the channel, and force close the
 // channel in certain situations.
 func TestChannelLinkFail(t *testing.T) {
@@ -6491,6 +6506,7 @@ func TestChannelLinkReceiveEmptySig(t *testing.T) {
 	aliceLink.Stop()
 }
 
+// READ THIS
 // TestPendingCommitTicker tests that a link will fail itself after a timeout if
 // the commitment dance stalls out.
 func TestPendingCommitTicker(t *testing.T) {

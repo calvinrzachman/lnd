@@ -840,6 +840,17 @@ func (cm *circuitMap) CommitCircuits(circuits ...*PaymentCircuit) (
 			continue
 		}
 
+		// In this loop we have done some work, but only here
+		// do we modify shared memory. Is this a we have the lock to read
+		// so we might as well write? We do this work only to potentially
+		// undo it later should our DB write fail. What if we deferred writing
+		// to shared state, opted for a read lock instead, and only wrote to shared
+		// memory IFF the write to persistent storage is successful?
+
+		// In principle we could write to shared memory here, release the lock, another routine
+		// could observe the write and act on it, we could then fail the DB write and
+		// rollback the write, but it would be too late as some other portion of the
+		// program already acted on it. Can this happen given the structure of the program?
 		cm.pending[inKey] = circuit
 		adds = append(adds, circuit)
 		addFails = append(addFails, circuit)
@@ -893,13 +904,22 @@ func (cm *circuitMap) CommitCircuits(circuits ...*PaymentCircuit) (
 		return actions, nil
 	}
 
-	// Otherwise, rollback the circuits added to the pending set if the
-	// write failed.
+	// Update memory AFTER successful write to persistent storage.
+	// We need to grab a write lock.
 	cm.mtx.Lock()
 	for _, circuit := range adds {
-		delete(cm.pending, circuit.InKey())
+		inKey := circuit.InKey()
+		cm.pending[inKey] = circuit
 	}
 	cm.mtx.Unlock()
+
+	// // Otherwise, rollback the circuits added to the pending set if the
+	// // write failed.
+	// cm.mtx.Lock()
+	// for _, circuit := range adds {
+	// 	delete(cm.pending, circuit.InKey())
+	// }
+	// cm.mtx.Unlock()
 
 	// Since our write failed, we will return the dropped packets and mark
 	// all other circuits as failed.

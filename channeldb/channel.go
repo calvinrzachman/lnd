@@ -1522,6 +1522,7 @@ func syncNewChannel(tx kvdb.RwTx, c *OpenChannel, addrs []net.Addr) error {
 	return putLinkNode(nodeInfoBucket, linkNode)
 }
 
+// READ THIS
 // UpdateCommitment updates the local commitment state. It locks in the pending
 // local updates that were received by us from the remote party. The commitment
 // state completely describes the balance state at this point in the commitment
@@ -2118,6 +2119,7 @@ func deserializeCommitDiff(r io.Reader) (*CommitDiff, error) {
 	return &d, nil
 }
 
+// READ THIS
 // AppendRemoteCommitChain appends a new CommitDiff to the end of the
 // commitment chain for the remote party. This method is to be used once we
 // have prepared a new commitment state for the remote party, but before we
@@ -2339,6 +2341,7 @@ func (c *OpenChannel) InsertNextRevocation(revKey *btcec.PublicKey) error {
 	return nil
 }
 
+// READ THIS
 // AdvanceCommitChainTail records the new state transition within an on-disk
 // append-only log which records all state transitions by the remote peer. In
 // the case of an uncooperative broadcast of a prior state by the remote peer,

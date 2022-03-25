@@ -664,6 +664,8 @@ func (s *Switch) ForwardPackets(linkQuit chan struct{},
 	}
 
 	// Write any circuits that we found to disk.
+	// NOTE : This hands back a list of previously unseen HTLC Add Updates
+	// which should be forwarded through the Switch to an outgoing link.
 	actions, err := s.circuits.CommitCircuits(circuits...)
 	if err != nil {
 		log.Errorf("unable to commit circuits in switch: %v", err)
@@ -1025,6 +1027,12 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 		// allow forwards of this nature, we fail the htlc early. This
 		// check is in place to disallow inefficiently routed htlcs from
 		// locking up our balance.
+		//
+		// NOTE: We will always be able to perform this check, however
+		// "disallowing inefficeintly/maliciously routed htlcs from locking
+		// up our balance" seems difficult when we no longer are able to correlate
+		// payment hops via static payment hash. Is privacy at odds with DoS
+		// prevention?
 		linkErr := checkCircularForward(
 			packet.incomingChanID, packet.outgoingChanID,
 			s.cfg.AllowCircularRoute, htlc.PaymentHash,
@@ -1564,7 +1572,7 @@ func (s *Switch) CloseLink(chanPoint *wire.OutPoint,
 // fragmenting) incoming/outgoing HTLCs amongst all active interfaces and their
 // links. The duties of the forwarder are similar to that of a network switch,
 // in that it facilitates multi-hop payments by acting as a central messaging
-// bus. The switch communicates will active links to create, manage, and tear
+// bus. The switch communicates with active links to create, manage, and tear
 // down active onion routed payments. Each active channel is modeled as
 // networked device with metadata such as the available payment bandwidth, and
 // total link capacity.

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"sort"
 	"sync"
@@ -36,6 +37,11 @@ var (
 	// ErrNoWindow is returned when revocation window is exhausted.
 	ErrNoWindow = fmt.Errorf("unable to sign new commitment, the current" +
 		" revocation window is exhausted")
+
+	// ErrNoRevocableCommmitment is returned when we do not have a commitment to revoke.
+	// Happens if we attempt to revoke a commitment before negotiating our first commitment.
+	ErrNoRevocableCommmitment = fmt.Errorf("unable to revoke commitment, no revocable" +
+		" commitments exist")
 
 	// ErrMaxWeightCost is returned when the cost/weight (see segwit)
 	// exceeds the widely used maximum allowed policy weight limit. In this
@@ -1047,10 +1053,34 @@ type updateLog struct {
 
 	// updateIndex is an index that maps a particular entries index to the
 	// list element within the list.List above.
+	// QUESTION: Why not have this map be from update ID --> Payment Descriptor?
+	// ***ANSWER: When we go to remove an update/htlc from the linked list having a direct
+	// handle (pointer) to the list element helps us leverage the list implementation's
+	// constant time removal. If we did not have such a handle then we would have to
+	// go iterating through the list in order to remove an item.
+	//
+	// The TowerCandidateIterator does iterate through the list in order to do removals
+	// likely for a couple reasons. TODO(3/3/22): Elaborate...
+	// - Avoid rug-pulling potential holders of pointers to list elements. If other threads
+	//   have a handle on a list element and we remove the element, ...
+	// The TowerCandidateIterator stores ID integer values in the list and then
+	// maps from ID --> tower object
+	//
+	// map [id]-->item
+	// - build a set
+	// - determine set inclusion in constant time
+	// map [id/item] --> pointer to item in list
+	// - build a set
+	// - determine set inclusion in constant time
+	// - also remove list items more quickly.
+	//
+	// So if you NEED a list, and you also need to remove items you probably want a
+	// map/index from id/item --> list handle
 	updateIndex map[uint64]*list.Element
 
 	// offerIndex is an index that maps the counter for offered HTLC's to
 	// their list element within the main list.List.
+	// QUESTION: Why not have this map be from ADD update ID --> Payment Descriptor?
 	htlcIndex map[uint64]*list.Element
 
 	// modifiedHtlcs is a set that keeps track of all the current modified
@@ -2721,6 +2751,13 @@ func (lc *LightningChannel) evaluateHTLCView(view *htlcView, ourBalance,
 		// If we're settling an inbound HTLC, and it hasn't been
 		// processed yet, then increment our state tracking the total
 		// number of satoshis we've received within the channel.
+		//
+		// Perspective can be confusing. A log update of type SETTLE in our
+		// local log represents the response to an HTLC ADD we received from
+		// the remote party. These correspond to funds we received on this channel (below).
+		// A log update of type SETTLE in our log for the remote represents the response
+		// to an HTLC ADD we originally sent to the remote party. These correspond
+		// to funds we have sent on this channel (bit further below).
 		if mutateState && entry.EntryType == Settle && !remoteChain &&
 			entry.removeCommitHeightLocal == 0 {
 			lc.channelState.TotalMSatReceived += entry.Amount
@@ -2731,6 +2768,7 @@ func (lc *LightningChannel) evaluateHTLCView(view *htlcView, ourBalance,
 			return nil, err
 		}
 
+		// QUESTION: Why is this 'skipThem' when we are looking at our updates?
 		skipThem[addEntry.HtlcIndex] = struct{}{}
 		processRemoveEntry(entry, ourBalance, theirBalance,
 			nextHeight, remoteChain, true, mutateState)
@@ -3276,8 +3314,8 @@ func (lc *LightningChannel) getUnsignedAckedUpdates() []channeldb.LogUpdate {
 	for e := lc.remoteUpdateLog.Front(); e != nil; e = e.Next() {
 		pd := e.Value.(*PaymentDescriptor)
 
-		// Skip all remote updates that we have already included in our
-		// commit chain.
+		// Skip all remote updates that we have already included in the
+		// commit chain for our channel partner.
 		if pd.LogIndex < lastRemoteCommitted {
 			continue
 		}
@@ -3516,8 +3554,10 @@ func (lc *LightningChannel) SignNextCommitment() (lnwire.Sig, []lnwire.Sig,
 	// dare to fail hard here. We assume peers can deal with the empty sig
 	// and continue channel operation. We log an error so that the bug
 	// causing this can be tracked down.
+	// if !lc.weOweCommitment()
 	if !lc.oweCommitment(true) {
 		lc.log.Errorf("sending empty commit sig")
+		log.Println("sending empty commit sig")
 	}
 
 	var (
@@ -3529,14 +3569,29 @@ func (lc *LightningChannel) SignNextCommitment() (lnwire.Sig, []lnwire.Sig,
 	// don't yet have the initial next revocation point of the remote
 	// party, then we're unable to create new states. Each time we create a
 	// new state, we consume a prior revocation point.
+	//
+	// We may call this function repeatedly but we'll bail early
+	// unless our last commitment was ACKed by the remote node.
 	commitPoint := lc.channelState.RemoteNextRevocation
 	if lc.remoteCommitChain.hasUnackedCommitment() || commitPoint == nil {
 		return sig, htlcSigs, nil, ErrNoWindow
 	}
 
 	// Determine the last update on the remote log that has been locked in.
+	// NOTE: We consult OUR commitment chain. Our commitment chain represents
+	// our commitment state (recall we have asymmetric state). What HTLC updates
+	// from the remote party does our valid/active commitment state commit to?
+	// It depends on when we last called RevokeAndAck - whether we are initiating
+	// a commitment dance or accepting a dance invitation.
 	remoteACKedIndex := lc.localCommitChain.tail().theirMessageIndex
 	remoteHtlcIndex := lc.localCommitChain.tail().theirHtlcIndex
+	// When signing the next commitment we always use our channel partner's HTLC updates index
+	// of the current accepted channel state from our perspective.
+	// The commitment covers the HTLC updates from the remote that were included in our current accepted state.
+	//
+	// This right here might be where we REQUIRE that Revocation is sent BEFORE a responding commmit signature
+	// IF accepting a dance: by the time this is called we will have already revoked our previous commitment
+	// acknowledged we did so, and pushed our local commit chain forward.
 
 	// Before we extend this new commitment to the remote commitment chain,
 	// ensure that we aren't violating any of the constraints the remote
@@ -3562,8 +3617,10 @@ func (lc *LightningChannel) SignNextCommitment() (lnwire.Sig, []lnwire.Sig,
 	// HTLCs. The view includes the latest balances for both sides on the
 	// remote node's chain, and also update the addition height of any new
 	// HTLC log entries. When we creating a new remote view, we include
-	// _all_ of our changes (pending or committed) but only the remote
-	// node's changes up to the last change we've ACK'd.
+	// _all_ of our changes (pending or committed - represented by the latest
+	// local update we have - c.localUpdateLog.logIndex) but only the remote
+	// node's changes up to the last change for which we've received an ACK
+	// these are those in our current valid commitment transaction).
 	newCommitView, err := lc.fetchCommitmentView(
 		true, lc.localUpdateLog.logIndex, lc.localUpdateLog.htlcCounter,
 		remoteACKedIndex, remoteHtlcIndex, keyRing,
@@ -3819,6 +3876,7 @@ func (lc *LightningChannel) ProcessChanSyncMsg(
 		// but died before the signature was sent. We re-transmit our
 		// revocation, but also initiate a state transition to re-sync
 		// them.
+		// if lc.weOweCommitment() {
 		if lc.OweCommitment(true) {
 			commitSig, htlcSigs, _, err := lc.SignNextCommitment()
 			switch {
@@ -4325,11 +4383,24 @@ func (lc *LightningChannel) ReceiveNewCommitment(commitSig lnwire.Sig,
 	// reliable, because it could be that we've sent out a new sig, but the
 	// remote hasn't received it yet. We could then falsely assume that they
 	// should add our updates to their remote commitment tx.
+	// if !lc.owedCommitment() {
 	if !lc.oweCommitment(false) {
 		lc.log.Warnf("empty commit sig message received")
 	}
 
 	// Determine the last update on the local log that has been locked in.
+	// NOTE: We consult the commitment chain we have FOR THE REMOTE PARTY.
+	// Our remote commitment chain represents our persepctive of the remote
+	// party's commitment state (recall we have asymmetric state). What HTLC updates
+	// from us does our valid/active remote party's commitment state commit to?
+	// Our channel partner is extending our local commitment chain. They sent us
+	// a signature, we will no reconstruct what we expect the commitment transaction to
+	// look like and verify that the signature is valid.
+	// We expect that our channel partner will include ONLY the HTLC updates
+	// we have fully committed to in their current accepted commitment state.
+	// We expect that our channel partner will include ALL HTLCs they have told us
+	// about so far. NOTE: This means that it is invalid for our channel partner to
+	// send 10 HTLC updates, but sign for fewer than 10.
 	localACKedIndex := lc.remoteCommitChain.tail().ourMessageIndex
 	localHtlcIndex := lc.remoteCommitChain.tail().ourHtlcIndex
 
@@ -4362,6 +4433,17 @@ func (lc *LightningChannel) ReceiveNewCommitment(commitSig lnwire.Sig,
 	// commitment view which includes all the entries (pending or committed)
 	// we know of in the remote node's HTLC log, but only our local changes
 	// up to the last change the remote node has ACK'd.
+	//
+	// QUESTION: Our copy of the remote party's update log can lag behind
+	// What if we receive a commitment which includes HTLC updates from the remote
+	// which we have not yet heard of?
+	// ANSWER: I do not think this is possible with the way the Channel Link
+	// drives this state machine forward combined with in order message delivery.
+	//
+	// IMPORTANT NOTE: Understand the difference between how the commitment is constructed
+	// when sending vs. receiving
+	//
+	// This includes ALL
 	localCommitmentView, err := lc.fetchCommitmentView(
 		false, localACKedIndex, localHtlcIndex,
 		lc.remoteUpdateLog.logIndex, lc.remoteUpdateLog.htlcCounter,
@@ -4516,10 +4598,12 @@ func (lc *LightningChannel) IsChannelClean() bool {
 
 	// Now check that both local and remote commitments are signing the
 	// same updates.
+	// if lc.weOweCommitment() {
 	if lc.oweCommitment(true) {
 		return false
 	}
 
+	// if lc.owedCommitment() {
 	if lc.oweCommitment(false) {
 		return false
 	}
@@ -4540,12 +4624,68 @@ func (lc *LightningChannel) OweCommitment(local bool) bool {
 	return lc.oweCommitment(local)
 }
 
+// func (lc *LightningChannel) owedCommitment() bool {
+// 	var (
+// 		remoteUpdatesPending, localUpdatesPending bool
+
+// 		lastLocalCommit  = lc.localCommitChain.tip()
+// 		lastRemoteCommit = lc.remoteCommitChain.tip()
+// 	)
+
+// 	localUpdatesPending = lastRemoteCommit.ourMessageIndex >
+// 		lastLocalCommit.ourMessageIndex
+
+// 	remoteUpdatesPending = lc.remoteUpdateLog.logIndex >
+// 		lastLocalCommit.theirMessageIndex
+
+// 	// If any of the conditions above is true, we owe a commitment
+// 	// signature.
+// 	owedCommitment := localUpdatesPending || remoteUpdatesPending
+
+// 	lc.log.Tracef("We are owed commit: %v (local updates: %v, "+
+// 		"remote updates %v)", owedCommitment,
+// 		localUpdatesPending, remoteUpdatesPending)
+
+// 	return owedCommitment
+// }
+
+// func (lc *LightningChannel) weOweCommitment() bool {
+// 	var (
+// 		remoteUpdatesPending, localUpdatesPending bool
+
+// 		lastLocalCommit  = lc.localCommitChain.tip()
+// 		lastRemoteCommit = lc.remoteCommitChain.tip()
+// 	)
+
+// 	localUpdatesPending = lc.localUpdateLog.logIndex >
+// 		lastRemoteCommit.ourMessageIndex
+
+// 	remoteUpdatesPending = lastLocalCommit.theirMessageIndex >
+// 		lastRemoteCommit.theirMessageIndex
+
+// 	// If any of the conditions above is true, we owe a commitment
+// 	// signature.
+// 	oweCommitment := localUpdatesPending || remoteUpdatesPending
+
+// 	lc.log.Tracef("We owe commit: %v (local updates: %v, "+
+// 		"remote updates %v)", oweCommitment,
+// 		localUpdatesPending, remoteUpdatesPending)
+
+// 	return oweCommitment
+// }
+
 // oweCommitment is the internal version of OweCommitment. This function expects
 // to be executed with a lock held.
+//
+// NOTE: Could include some comments and our rework as PR. I think it would increase
+// readability of this function.
 func (lc *LightningChannel) oweCommitment(local bool) bool {
 	var (
 		remoteUpdatesPending, localUpdatesPending bool
 
+		// Grab most recently added commit in chain.
+		// Could be irrevocably committed fully accepted channel state.
+		// Might be a dangling/pending commitment update in progresss that is unacknowledged.
 		lastLocalCommit  = lc.localCommitChain.tip()
 		lastRemoteCommit = lc.remoteCommitChain.tip()
 
@@ -4553,33 +4693,90 @@ func (lc *LightningChannel) oweCommitment(local bool) bool {
 	)
 
 	if local {
+		// Answers the question: Do we owe the remote a commitment?
 		perspective = "local"
 
 		// There are local updates pending if our local update log is
 		// not in sync with our remote commitment tx.
+		//
+		// The most recent commit we have for the remote party
+		// commits to some index in our update log. If our local update log
+		// is ahead of that index, then we have local updates that still need
+		// to be added to a commitment transaction.
+		// NOTE: The index of our local update log would always be >= our index
+		// committed to by the remote party. They cannot commit to updates we have
+		// not told them about yet. We of course are aware of local updates first.
+		// - our local update log is ahead of our represenation of their commit (higher index #)
+		//
+		// We owe them a commitment. We should start a dance.
+		//
+		// I believe we can swap this from '!=' to '>' to increase understandability
+		// with no loss in correctness.
+		// The remote commit CANNOT cover our HTLC updates which are not in our local update log.
 		localUpdatesPending = lc.localUpdateLog.logIndex !=
 			lastRemoteCommit.ourMessageIndex
+
+		if localUpdatesPending {
+			log.Println("[We Owe]: Local Updates Pending!")
+		}
 
 		// There are remote updates pending if their remote commitment
 		// tx (our local commitment tx) contains updates that we don't
 		// have added to our remote commitment tx yet.
+		//
+		// Our most recent local commit commits to some index in the
+		// update log we keep for the remote (it commits to some HTLC
+		// updates we have received from our channel partner).
+		// If our representation of the remote commitment chain commits
+		// to a different update log index that means either:
+		// - our local commit contains HTLC updates from the remote party that we don't yet
+		// 	 have in our representation of their commit. This would be the case if
+		// 	 say they initiated a commitment dance and extended our commit.
+		//   Our local commit would contain more recent updates from them until
+		//   we completed the dance and extended their commitment transaction.
+		// -
+		// We owe them a commitment. We should respond to their dance invitation.
 		remoteUpdatesPending = lastLocalCommit.theirMessageIndex !=
 			lastRemoteCommit.theirMessageIndex
+
+		if remoteUpdatesPending {
+			log.Println("[We Owe]: Remote Updates Pending!")
+		}
 	} else {
+		// Answers the question: Does the remote OWE US a commitment?
 		perspective = "remote"
 
 		// There are local updates pending (local updates from the
 		// perspective of the remote party) if the remote party has
 		// updates to their remote tx pending for which they haven't
 		// signed yet.
-		localUpdatesPending = lc.remoteUpdateLog.logIndex !=
-			lastLocalCommit.theirMessageIndex
+		//
+		// Our representation of their commit covers more of our HTLC updates
+		// than our local commit does. This would be the case if we initiated
+		// a commitment dance and extended their commit. Their commit would
+		// contain more recent updates from us until they completed the dance
+		// and extended our commitment transaction.
+		// We are owed a commitment. They should respond to the dance we started.
+		localUpdatesPending = lastRemoteCommit.ourMessageIndex !=
+			lastLocalCommit.ourMessageIndex
+
+		if localUpdatesPending {
+			log.Println("[We are Owed]: Local Updates Pending!")
+		}
 
 		// There are remote updates pending (remote updates from the
 		// perspective of the remote party) if we have updates on our
 		// remote commitment tx that they haven't added to theirs yet.
-		remoteUpdatesPending = lastRemoteCommit.ourMessageIndex !=
-			lastLocalCommit.ourMessageIndex
+		//
+		// We have received HTLC updates from our channel partner
+		// which are not yet included in our commitment transaction.
+		// We are owed a commitment. They should start a dance.
+		remoteUpdatesPending = lc.remoteUpdateLog.logIndex !=
+			lastLocalCommit.theirMessageIndex
+
+		if remoteUpdatesPending {
+			log.Println("[We are Owed]: Remote Updates Pending!")
+		}
 	}
 
 	// If any of the conditions above is true, we owe a commitment
@@ -4587,7 +4784,10 @@ func (lc *LightningChannel) oweCommitment(local bool) bool {
 	oweCommitment := localUpdatesPending || remoteUpdatesPending
 
 	lc.log.Tracef("%v owes commit: %v (local updates: %v, "+
-		"remote updates %v)", perspective, oweCommitment,
+		"remote updates: %v)", perspective, oweCommitment,
+		localUpdatesPending, remoteUpdatesPending)
+	log.Printf("%v owes commit: %v (local updates: %v, "+
+		"remote updates: %v)", perspective, oweCommitment,
 		localUpdatesPending, remoteUpdatesPending)
 
 	return oweCommitment
@@ -4637,6 +4837,10 @@ func (lc *LightningChannel) RevokeCurrentCommitment() (*lnwire.RevokeAndAck, []c
 	// Get the unsigned acked remotes updates that are currently in memory.
 	// We need them after a restart to sync our remote commitment with what
 	// is committed locally.
+	// NOTE: I think these are the HTLC updates that WILL BE ACKed as soon
+	// as we actually send RevokeAndAck (which this function does not do).
+	// By persisting these we will be able to resend a RevokeAndAck
+	// should we die before doing so.
 	unsignedAckedUpdates := lc.getUnsignedAckedUpdates()
 
 	err = lc.channelState.UpdateCommitment(
@@ -4980,11 +5184,14 @@ func (lc *LightningChannel) AddHTLC(htlc *lnwire.UpdateAddHTLC,
 	lc.Lock()
 	defer lc.Unlock()
 
+	// Assigns current update log index to HTLC
 	pd := lc.htlcAddDescriptor(htlc, openKey)
 	if err := lc.validateAddHtlc(pd); err != nil {
 		return 0, err
 	}
 
+	// Adds payment descriptor/HTLC to update log and
+	// increments the update log index.
 	lc.localUpdateLog.appendHtlc(pd)
 
 	return pd.HtlcIndex, nil
@@ -6941,6 +7148,12 @@ func (lc *LightningChannel) ReceiveUpdateFee(feePerKw chainfee.SatPerKWeight) er
 // generateRevocation generates the revocation message for a given height.
 func (lc *LightningChannel) generateRevocation(height uint64) (*lnwire.RevokeAndAck,
 	error) {
+
+	// NOTE: This is not needed because we gurantee this method will not be called with
+	// 0 commit height by only ever calling it AFTER ReceiveNewCommit().
+	// if height == 0 {
+	// 	return nil, ErrNoRevocableCommmitment
+	// }
 
 	// Now that we've accept a new state transition, we send the remote
 	// party the revocation for our current commitment state.

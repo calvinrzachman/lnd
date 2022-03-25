@@ -377,6 +377,10 @@ func (m *memoryMailBox) mailCourier(cType courierType) {
 	}
 
 	// TODO(roasbeef): refactor...
+	// Actually try splitting this into separate functions. It may not seem like a lot
+	// but we incur the overhead of several switch case evaluations for EVERY message/packet processed.
+	// Maybe this is negligible but it seems worth a try. Split into separate functions and then run
+	// a bench.
 
 	for {
 		// First, we'll check our condition. If our target mailbox is
@@ -389,6 +393,12 @@ func (m *memoryMailBox) mailCourier(cType courierType) {
 
 				select {
 				case msgDone := <-m.msgReset:
+					// Receive a channel with which we can notify requester that
+					// messages have been reset so they can be replayed. This
+					// channel of channels lets us plug into a go routine dynamically.
+					// In this case we connect with a go routine which will "strobe"
+					// our condition variable so we unblock and check the condition
+					// repeatedly until we reset. Why do we need to strobe?
 					m.wireMessages.Init()
 
 					close(msgDone)
@@ -546,6 +556,7 @@ func (m *memoryMailBox) mailCourier(cType courierType) {
 				}
 				m.pktCond.L.Unlock()
 
+			// This will be a nil channel and never fire for SETTLE/FAILS.
 			case <-deadline:
 				m.FailAdd(add)
 
@@ -585,7 +596,7 @@ func (m *memoryMailBox) AddMessage(msg lnwire.Message) error {
 
 // AddPacket appends a new message to the end of the packet queue.
 //
-// NOTE: This method is safe for concrete use and part of the MailBox
+// NOTE: This method is safe for concurrent use and part of the MailBox
 // interface.
 func (m *memoryMailBox) AddPacket(pkt *htlcPacket) error {
 	m.pktCond.L.Lock()

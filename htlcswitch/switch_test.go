@@ -288,6 +288,7 @@ func TestSwitchSendPending(t *testing.T) {
 	}
 }
 
+// READ THIS
 // TestSwitchForward checks the ability of htlc switch to forward add/settle
 // requests.
 func TestSwitchForward(t *testing.T) {
@@ -401,6 +402,7 @@ func TestSwitchForward(t *testing.T) {
 	}
 }
 
+// READ THIS
 func TestSwitchForwardFailAfterFullAdd(t *testing.T) {
 	t.Parallel()
 
@@ -600,6 +602,7 @@ func TestSwitchForwardFailAfterFullAdd(t *testing.T) {
 	}
 }
 
+// READ THIS
 func TestSwitchForwardSettleAfterFullAdd(t *testing.T) {
 	t.Parallel()
 
@@ -1131,6 +1134,7 @@ func TestSwitchForwardFailAfterHalfAdd(t *testing.T) {
 	}
 }
 
+// READ THIS
 // TestSwitchForwardCircuitPersistence checks the ability of htlc switch to
 // maintain the proper entries in the circuit map in the face of restarts.
 func TestSwitchForwardCircuitPersistence(t *testing.T) {
@@ -1372,6 +1376,7 @@ type multiHopFwdTest struct {
 	expectedReply        lnwire.FailCode
 }
 
+// READ THIS - Consider how this changes when you have PTLCs.
 // TestCircularForwards tests the allowing/disallowing of circular payments
 // through the same channel in the case where the switch is configured to allow
 // and disallow same channel circular forwards.
@@ -1728,6 +1733,7 @@ func TestSkipIneligibleLinksLocalForward(t *testing.T) {
 	testSkipLinkLocalForward(t, false, nil)
 }
 
+// READ THIS - test does not adhere to comment. I see not Channel Policy check.
 // TestSkipPolicyUnsatisfiedLinkLocalForward ensures that the switch will not
 // attempt to send locally initiated HTLCs that would violate the channel policy
 // down a link.
@@ -2073,6 +2079,7 @@ func TestSwitchAddSamePayment(t *testing.T) {
 	}
 }
 
+// READ THIS
 // TestSwitchSendPayment tests ability of htlc switch to respond to the
 // users when response is came back from channel link.
 func TestSwitchSendPayment(t *testing.T) {
@@ -2504,6 +2511,7 @@ func TestUpdateFailMalformedHTLCErrorConversion(t *testing.T) {
 	})
 }
 
+// READ THIS
 // TestSwitchGetPaymentResult tests that the switch interacts as expected with
 // the circuit map and network result store when looking up the result of a
 // payment ID. This is important for not to lose results under concurrent

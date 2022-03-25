@@ -56,11 +56,998 @@ func assertOutputExistsByValue(t *testing.T, commitTx *wire.MsgTx,
 		spew.Sdump(commitTx))
 }
 
+// PLAYGROUND
+// TestSimpleCommitSigBeforeSendingUpdateAddHTLC tests a simple channel scenario wherein the
+// local node (Alice in this case) creates a new outgoing HTLC to bob, commits
+// this change, then bob immediately commits a settlement of the HTLC after the
+// initial add is fully committed in both commit chains.
+
+// a helper function which logs information on the state of both local and
+// remote update logs and commitment chains.
+func dumpUpdateAndCommitInfo(t *testing.T, aliceChannel, bobChannel *LightningChannel) {
+
+	// Commit heights
+	t.Log("Alice Current Height:", aliceChannel.currentHeight)
+	t.Log("Bob Current Height:", bobChannel.currentHeight)
+
+	// Which HTLC updates do the local/remote commitments cover?
+	t.Logf("[Alice]: the most recent local commitment we have commits to our %dth HTLC update",
+		aliceChannel.localCommitChain.tip().ourMessageIndex)
+	t.Logf("[Alice]: the most recent local commitment we have commits to Bob's %dth HTLC update",
+		aliceChannel.localCommitChain.tip().theirMessageIndex)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to our %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to Bob's %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().theirMessageIndex)
+	t.Logf("[Bob]: the most recent local commitment we have commits to our %dth HTLC update",
+		bobChannel.localCommitChain.tip().ourMessageIndex)
+	t.Logf("[Bob]: the most recent local commitment we have commits to Alice's %dth HTLC update",
+		bobChannel.localCommitChain.tip().theirMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to our %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to Alice's %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().theirMessageIndex)
+
+	// What do Alice & Bob's perpsective on the local/remote update logs look like?
+	t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
+}
+
+func TestCommitSigBeforeSendingUpdateAddHTLC(t *testing.T) {
+	t.Parallel()
+
+	// for _, tweakless := range []bool{true, false} {
+	// tweakless := tweakless
+	t.Run(fmt.Sprintf("tweakless=%v", true), func(t *testing.T) {
+		testPlayground(t, true)
+	})
+	// }
+}
+
+func TestFixedDanceAdaptableGoWithFlowDance(t *testing.T) {
+	t.Parallel()
+
+	t.Run(fmt.Sprintf("tweakless=%v", true), func(t *testing.T) {
+		testPlayground2(t, true)
+	})
+}
+
+func TestSimpleUpdate(t *testing.T) {
+	t.Parallel()
+
+	t.Run(fmt.Sprintf("tweakless=%v", true), func(t *testing.T) {
+		testPlayground0(t, true)
+	})
+}
+
+func testPlayground0(t *testing.T, tweakless bool) {
+	// Create a test channel which will be used for the duration of this
+	// unit test. The channel will be funded evenly with Alice having 5 BTC,
+	// and Bob having 5 BTC.
+	chanType := channeldb.SingleFunderTweaklessBit
+	if !tweakless {
+		chanType = channeldb.SingleFunderBit
+	}
+
+	aliceChannel, bobChannel, cleanUp, err := CreateTestChannels(chanType)
+	if err != nil {
+		t.Fatalf("unable to create test channels: %v", err)
+	}
+	defer cleanUp()
+
+	paymentPreimage := bytes.Repeat([]byte{1}, 32)
+	paymentHash := sha256.Sum256(paymentPreimage)
+	htlcAmt := lnwire.NewMSatFromSatoshis(btcutil.SatoshiPerBitcoin)
+	htlc := &lnwire.UpdateAddHTLC{
+		PaymentHash: paymentHash,
+		Amount:      htlcAmt,
+		Expiry:      uint32(5),
+	}
+
+	// First Alice adds the outgoing HTLC to her local channel's state
+	// update log.
+	_, err = aliceChannel.AddHTLC(htlc, nil)
+	if err != nil {
+		t.Fatalf("unable to add htlc: %v", err)
+	}
+
+	// Only now does Alice's HTLC update (ADD) reach Bob over the network
+	// who adds the htlc to his remote state update log.
+	bobHtlcIndex, err := bobChannel.ReceiveHTLC(htlc)
+	if err != nil {
+		t.Fatalf("unable to recv htlc: %v", err)
+	}
+	t.Logf("Bob Received HTLC Update (Add). Received HTLC Update Index: %d", bobHtlcIndex)
+
+	// // What if we add HTLC updates here? From Bob?
+	// htlcAmt = 100000
+	// htlc, _ = createHTLC(0, htlcAmt)
+	// if _, err := aliceChannel.AddHTLC(htlc, nil); err != nil {
+	// 	t.Fatalf("unable to add htlc: %v", err)
+	// }
+	// if _, err := bobChannel.ReceiveHTLC(htlc); err != nil {
+	// 	t.Fatalf("unable to recv htlc: %v", err)
+	// }
+	// htlc2, _ := createHTLC(1, htlcAmt)
+	// if _, err := aliceChannel.AddHTLC(htlc2, nil); err != nil {
+	// 	t.Fatalf("unable to add htlc2: %v", err)
+	// }
+	// if _, err := bobChannel.ReceiveHTLC(htlc2); err != nil {
+	// 	t.Fatalf("unable to recv htlc2: %v", err)
+	// }
+
+	// htlc, _ = createHTLC(0, htlcAmt)
+	// if _, err := bobChannel.AddHTLC(htlc, nil); err != nil {
+	// 	t.Fatalf("unable to add htlc: %v", err)
+	// }
+	// if _, err := aliceChannel.ReceiveHTLC(htlc); err != nil {
+	// 	t.Fatalf("unable to recv htlc: %v", err)
+	// }
+	// htlc2, _ := createHTLC(1, htlcAmt)
+	// if _, err := bobChannel.AddHTLC(htlc2, nil); err != nil {
+	// 	t.Fatalf("unable to add htlc2: %v", err)
+	// }
+	// if _, err := aliceChannel.ReceiveHTLC(htlc2); err != nil {
+	// 	t.Fatalf("unable to recv htlc2: %v", err)
+	// }
+
+	dumpUpdateAndCommitInfo(t, aliceChannel, bobChannel)
+
+	// // What if we add HTLC updates here? From Bob?
+	// htlcAmt = 100000
+	// htlc, _ = createHTLC(0, htlcAmt)
+	// if _, err := aliceChannel.AddHTLC(htlc, nil); err != nil {
+	// 	t.Fatalf("unable to add htlc: %v", err)
+	// }
+	// if _, err := bobChannel.ReceiveHTLC(htlc); err != nil {
+	// 	t.Fatalf("unable to recv htlc: %v", err)
+	// }
+	// htlc2, _ := createHTLC(1, htlcAmt)
+	// if _, err := aliceChannel.AddHTLC(htlc2, nil); err != nil {
+	// 	t.Fatalf("unable to add htlc2: %v", err)
+	// }
+	// if _, err := bobChannel.ReceiveHTLC(htlc2); err != nil {
+	// 	t.Fatalf("unable to recv htlc2: %v", err)
+	// }
+
+	// htlc, _ = createHTLC(0, htlcAmt)
+	// if _, err := bobChannel.AddHTLC(htlc, nil); err != nil {
+	// 	t.Fatalf("unable to add htlc: %v", err)
+	// }
+	// if _, err := aliceChannel.ReceiveHTLC(htlc); err != nil {
+	// 	t.Fatalf("unable to recv htlc: %v", err)
+	// }
+	// htlc2, _ := createHTLC(1, htlcAmt)
+	// if _, err := bobChannel.AddHTLC(htlc2, nil); err != nil {
+	// 	t.Fatalf("unable to add htlc2: %v", err)
+	// }
+	// if _, err := aliceChannel.ReceiveHTLC(htlc2); err != nil {
+	// 	t.Fatalf("unable to recv htlc2: %v", err)
+	// }
+
+	t.Log("[Alice]: --- Sign Commitment ---")
+	aliceSig, aliceHtlcSigs, _, err := aliceChannel.SignNextCommitment()
+	if err != nil {
+		t.Logf("[ERROR]: unable to extend remote party's commitment chain: %v.", err)
+	}
+
+	dumpUpdateAndCommitInfo(t, aliceChannel, bobChannel)
+
+	t.Log("[Bob]: --- Receive Commitment ---")
+	// Bob is able to receive the signature message now!
+	err = bobChannel.ReceiveNewCommitment(aliceSig, aliceHtlcSigs)
+	if err != nil {
+		t.Fatalf("Bob is unable to process Alice's new commitment: %v", err)
+	} else {
+		t.Log("Bob is able to successfully receive the commitment only AFTER " +
+			"he learns about all HTLC updates to which it commits. NOTE: " +
+			"This makes sense. He cannot reconstruct a transaction for HTLCs " +
+			"that he does not know exist!")
+	}
+
+	dumpUpdateAndCommitInfo(t, aliceChannel, bobChannel)
+
+	t.Log("[Bob]: --- Locally Revoke Commitment ---")
+	// Bob revokes his prior commitment given to him by Alice, since he now
+	// has a valid signature for a newer commitment.
+	bobRevocation, _, err := bobChannel.RevokeCurrentCommitment()
+	if err != nil {
+		t.Logf("[ERROR]: Bob is unable to revoke current commitment and advance tail of his local commitment chain - %v", err)
+		// t.Fatalf("unable to generate bob revocation: %v", err)
+	} else {
+		t.Log("Bob is able to successfully revoke the current commitment")
+	}
+
+	dumpUpdateAndCommitInfo(t, aliceChannel, bobChannel)
+
+	t.Log("[Bob]: --- Sign Commitment to Update Alice so Her State is Inline With Ours  ---")
+	// NOTE: Need to understand how Bob knows to build his commitment transaction for Alice!
+	// Bob computes a signature for Alice's commitment transaction.
+	// This signature will cover the HTLC, since Bob will first send the
+	// revocation just created. The revocation also acks every received
+	// HTLC up to the point where Alice sent her signature.
+	// NOTE: This is an important comment
+	bobSig, bobHtlcSigs, _, err := bobChannel.SignNextCommitment()
+	if err != nil {
+		t.Fatalf("bob unable to sign alice's commitment: %v", err)
+	}
+
+	dumpUpdateAndCommitInfo(t, aliceChannel, bobChannel)
+
+	t.Log("[Alice]: --- Receive Bob's Revocation & Acknowledgement of our Attempt to Extend His Commitment Chain ---")
+	// Alice processes Bob's revocation which implicitly ACKnowledges
+	// that he received Alice's proposed commitment state, including the
+	// HTLC updates it commits to and succeeded in extending his local commitment chain.
+	// "Roger that Alice. We read you on proposed commitment state which
+	// commits to HTLC Update Indeces: A2, B2. We will extend your commitment
+	// chain and await your revocation and acknowledgement. Over and out."
+	fwdPkg, _, _, _, err := aliceChannel.ReceiveRevocation(bobRevocation)
+	if err != nil {
+		t.Fatalf("alice unable to process bob's revocation: %v", err)
+	} else {
+		t.Log("Alice is able to successfully receive Bob's revocation and (implicit) " +
+			"acknowledgement of the state she previously proposed.")
+	}
+	// Alice shouldn't have any HTLCs to forward since she's sending an outgoing HTLC.
+	if len(fwdPkg.Adds) != 0 {
+		t.Fatalf("alice forwards %v add htlcs, should forward none",
+			len(fwdPkg.Adds))
+	}
+	if len(fwdPkg.SettleFails) != 0 {
+		t.Fatalf("alice forwards %v settle/fail htlcs, "+
+			"should forward none", len(fwdPkg.SettleFails))
+	}
+
+	dumpUpdateAndCommitInfo(t, aliceChannel, bobChannel)
+
+	t.Log("[Alice]: --- Receive Bob's Commitment ---")
+	// Alice processes Bob's signature, and since she just received
+	// the revocation, she expects this signature to cover everything up to
+	// the point where she sent her signature, including the HTLC.
+	// This time this should succeed because Bob will have (implicitly)
+	// ACKnowledged his receipt.
+	err = aliceChannel.ReceiveNewCommitment(bobSig, bobHtlcSigs)
+	if err != nil {
+		t.Fatalf("alice unable to process bob's new commitment: %v", err)
+	} else {
+		t.Log("Alice is able to successfully receive the commitment only AFTER " +
+			"Bob has acknowledged that he received the commitment with which she initiated " +
+			"this commitment dance.")
+	}
+
+	dumpUpdateAndCommitInfo(t, aliceChannel, bobChannel)
+
+	t.Log("[Alice]: --- Revoke Current Commitment ---")
+	// Alice then generates a revocation for bob.
+	aliceRevocation, aliceHTLCs, err := aliceChannel.RevokeCurrentCommitment()
+	if err != nil {
+		t.Fatalf("unable to revoke alice channel: %v", err)
+	}
+
+	t.Logf("Number of HTLCs added to Alice's new commitment: %d", len(aliceHTLCs))
+	dumpUpdateAndCommitInfo(t, aliceChannel, bobChannel)
+
+	t.Log("[Bob]: --- Receive Alice's Revocation Completing this Commitment Dance---")
+	// Alice sends Bob the revocation for her prior commitment
+	// transaction completing this commitment dance.
+	// Bob processes Alice's revocation, at this point the new HTLC
+	// is fully locked in within both commitment transactions. Bob should
+	// also be able to forward an HTLC now that the HTLC has been locked
+	// into both commitment transactions.
+	fwdPkg, _, _, _, err = bobChannel.ReceiveRevocation(aliceRevocation)
+	if err != nil {
+		t.Fatalf("bob unable to process alice's revocation: %v", err)
+	}
+	if len(fwdPkg.Adds) != 1 {
+		t.Fatalf("bob forwards %v add htlcs, should only forward one",
+			len(fwdPkg.Adds))
+	}
+	if len(fwdPkg.SettleFails) != 0 {
+		t.Fatalf("bob forwards %v settle/fail htlcs, "+
+			"should forward none", len(fwdPkg.SettleFails))
+	}
+
+	dumpUpdateAndCommitInfo(t, aliceChannel, bobChannel)
+
+	t.Log("Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+
+	t.Log("[Alice]: --- Sign Commitment ---")
+	aliceSig, aliceHtlcSigs, _, err = aliceChannel.SignNextCommitment()
+	if err != nil {
+		t.Logf("[ERROR]: unable to extend remote party's commitment chain: %v.", err)
+	}
+
+	dumpUpdateAndCommitInfo(t, aliceChannel, bobChannel)
+
+	t.Log("[Bob]: --- Receive Commitment ---")
+	err = bobChannel.ReceiveNewCommitment(aliceSig, aliceHtlcSigs)
+	if err != nil {
+		t.Fatalf("Bob is unable to process Alice's new commitment: %v", err)
+	} else {
+		t.Log("Bob is able to successfully receive the commitment only AFTER " +
+			"he learns about all HTLC updates to which it commits. NOTE: " +
+			"This makes sense. He cannot reconstruct a transaction for HTLCs " +
+			"that he does not know exist!")
+	}
+
+	dumpUpdateAndCommitInfo(t, aliceChannel, bobChannel)
+
+	t.Log("[Bob]: --- Locally Revoke Commitment ---")
+	bobRevocation, _, err = bobChannel.RevokeCurrentCommitment()
+	if err != nil {
+		t.Logf("[ERROR]: Bob is unable to revoke current commitment and advance tail of his local commitment chain - %v", err)
+		// t.Fatalf("unable to generate bob revocation: %v", err)
+	} else {
+		t.Log("Bob is able to successfully revoke the current commitment")
+	}
+
+	dumpUpdateAndCommitInfo(t, aliceChannel, bobChannel)
+
+	t.Log("[Alice]: --- Receive Bob's Revocation & Acknowledgement of our Attempt to Extend His Commitment Chain ---")
+	_, _, _, _, err = aliceChannel.ReceiveRevocation(bobRevocation)
+	if err != nil {
+		t.Fatalf("alice unable to process bob's revocation: %v", err)
+	} else {
+		t.Log("Alice is able to successfully receive Bob's revocation and (implicit) " +
+			"acknowledgement of the state she previously proposed.")
+	}
+	// if len(fwdPkg.Adds) != 2 {
+	// 	t.Fatalf("alice forwards %v add htlcs, should only forward %v",
+	// 		len(fwdPkg.Adds), 2)
+	// }
+	// if len(fwdPkg.SettleFails) != 0 {
+	// 	t.Fatalf("alice forwards %v settle/fail htlcs, "+
+	// 		"should forward none", len(fwdPkg.SettleFails))
+	// }
+
+	dumpUpdateAndCommitInfo(t, aliceChannel, bobChannel)
+
+	t.Log("Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+}
+
+func testPlayground(t *testing.T, tweakless bool) {
+	// Create a test channel which will be used for the duration of this
+	// unit test. The channel will be funded evenly with Alice having 5 BTC,
+	// and Bob having 5 BTC.
+	chanType := channeldb.SingleFunderTweaklessBit
+	if !tweakless {
+		chanType = channeldb.SingleFunderBit
+	}
+
+	aliceChannel, bobChannel, cleanUp, err := CreateTestChannels(chanType)
+	if err != nil {
+		t.Fatalf("unable to create test channels: %v", err)
+	}
+	defer cleanUp()
+
+	paymentPreimage := bytes.Repeat([]byte{1}, 32)
+	paymentHash := sha256.Sum256(paymentPreimage)
+	htlcAmt := lnwire.NewMSatFromSatoshis(btcutil.SatoshiPerBitcoin)
+	htlc := &lnwire.UpdateAddHTLC{
+		PaymentHash: paymentHash,
+		Amount:      htlcAmt,
+		Expiry:      uint32(5),
+	}
+
+	// TestCommitSigBeforeSendingUpdateAddHTLC
+
+	// First Alice adds the outgoing HTLC to her local channel's state
+	// update log.
+	//
+	// At this point both this index should be 0?
+	// YES! channel_test.go:111: Alice HTLC Update Index: 0
+	_, err = aliceChannel.AddHTLC(htlc, nil)
+	if err != nil {
+		t.Fatalf("unable to add htlc: %v", err)
+	}
+
+	// t.Logf("Alice HTLC Update Index: %d", aliceHtlcIndex)
+	// t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	// t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	// t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	// t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
+	// t.Logf("Alice HTLC Update Index: %d", aliceHtlcIndex)
+	// t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	// t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	// t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	// t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
+	// What happens when messages are unordered? Does the code guarantee
+	// in order message delivery? It seems that it very well might. How though?
+	// TCP itself guarantees in order byte delivery ("reliable byte stream").
+
+	// What happens if HTLC Adds are dropped? Then might we accidentally send a
+	// commitment signature which covers an HTLC that our channel partner would not yet know about?
+	// Their representation of our update log lags ours until they receive notice
+	// of an HTLC update from us.
+	//
+	// Simulate the case of out of order delivery of the HTLC ADD.
+	// The ADD could be dropped or our CommitSig simply arrives first.
+	// This will let her sign a commitment dance as she has pending local updates.
+	aliceSig, aliceHtlcSigs, _, err := aliceChannel.SignNextCommitment()
+	if err != nil {
+		t.Logf("[ERROR]: unable to extend remote party's commitment chain: %v.", err)
+	}
+	// t.Logf("Alice Signature: %+v", aliceSig)
+	// t.Logf("# of Alice HTLC Signatures: %+v", len(aliceHtlcSigs))
+	// t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	// t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	// t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	// t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
+	// ***Next Alice commits this change by sending a signature message.
+	// Since this message arrived out of order, Bob will be receiving
+	// a commitment signature which covers an HTLC update which he has
+	// NOT YET learned about from Alice. He will be UNABLE to reconstruct
+	// the proposed state update locally and validate Alice's signature.
+	// He will FAIL to receive the commitment.
+	// We expect Alice is unable to initiate a commitment dance with Bob.
+	err = bobChannel.ReceiveNewCommitment(aliceSig, aliceHtlcSigs)
+	// Bob does not think he is owed a commitment at this point.
+	// TODO(2/20/22): Understand this case in oweCommitment
+	// what if this and the next line were flipped?
+	if err != nil {
+		t.Logf("[ERROR]: Bob is unable to receive commitment which covers HTLCs he has not received yet (via UpdateAddHTLC). "+
+			"Bob is unable extend his local commitment chain at this time - %v", err)
+		// channel_test.go:139: [ERROR]: Bob is unable to receive commitment which covers HTLC he has not received
+		// yet (via UpdateAddHTLC). Bob is unable extend his local commitment chain at this time
+		// - number of htlc sig mismatch. Expected 0 sigs, got 1
+		//
+		// Error thrown by: genHtlcSigValidationJobs()
+	}
+
+	// Bob attempts to revoke a commitment out of turn.
+	// NOTE: This does NOT roll back state if nothing exists
+	// to revoke. It has null pointer dereference if commitHeight == 0
+	// and it mutates state.
+	// It seems we really need to ensure proper ordering. That is done by
+	// only ever calling RevokeCurrentCommitment() in response to a ReceiveNewCommitment()
+
+	// _, _, err = bobChannel.RevokeCurrentCommitment()
+	// if err != nil {
+	// 	t.Logf("[ERROR]: Bob is unable to revoke current commitment and advance tail of his local commitment chain - %v", err)
+	// 	// t.Fatalf("unable to generate bob revocation: %v", err)
+	// }
+
+	// Only now does Alice's HTLC update (ADD) reach Bob over the network
+	// who adds the htlc to his remote state update log.
+	bobHtlcIndex, err := bobChannel.ReceiveHTLC(htlc)
+	if err != nil {
+		t.Fatalf("unable to recv htlc: %v", err)
+	}
+	t.Logf("Bob Received HTLC Update (Add). Received HTLC Update Index: %d", bobHtlcIndex)
+
+	// Bob is able to receive the signature message now!
+	err = bobChannel.ReceiveNewCommitment(aliceSig, aliceHtlcSigs)
+	if err != nil {
+		t.Fatalf("Bob is unable to process Alice's new commitment: %v", err)
+	} else {
+		t.Log("Bob is able to successfully receive the commitment only AFTER " +
+			"he learns about all HTLC updates to which it commits. NOTE: " +
+			"This makes sense. He cannot reconstruct a transaction for HTLCs " +
+			"that he does not know exist!")
+	}
+
+	// Bob revokes his prior commitment given to him by Alice, since he now
+	// has a valid signature for a newer commitment.
+	bobRevocation, htlcs, err := bobChannel.RevokeCurrentCommitment()
+	if err != nil {
+		t.Logf("[ERROR]: Bob is unable to revoke current commitment and advance tail of his local commitment chain - %v", err)
+		// t.Fatalf("unable to generate bob revocation: %v", err)
+	} else {
+		t.Log("Bob is able to successfully revoke the current commitment")
+	}
+
+	t.Logf("Number of HTLCs added to Bob's pending commitment: %d", len(htlcs))
+
+	// Bob computes a signature for Alice's commitment transaction.
+	// This signature will cover the HTLC, since Bob will first send the
+	// revocation just created. The revocation also acks every received
+	// HTLC up to the point where Alice sent her signature.
+	// NOTE: This is an important comment
+	bobSig, bobHtlcSigs, _, err := bobChannel.SignNextCommitment()
+	if err != nil {
+		t.Fatalf("bob unable to sign alice's commitment: %v", err)
+	}
+
+	// t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	// t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	// t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	// t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
+	// t.Logf("Bob Signature: %+v", bobSig)
+	// t.Logf("Bob HTLC Signatures: %+v", bobHtlcSigs)
+
+	// So we send a RevokeAndACK IFF we are responding to a CommitmentSigned
+	// What happens if Alice receives these out of order?
+	// We break.
+	// ***NOTE: There is a well defined Commitment Dance message ordering!!
+	// QUESTION: How is this strictly enforced? Take a look at our message
+	// delivery to the peer. Perhaps we gurantee all messages will arrive
+	// in order. If so, there would be no way this CommitmentSigned gets to
+	// Alice before the RevokeAndAck. What about after a restart? https://github.com/lightning/bolts/issues/794
+	// If it does, Alice fails to construct the proper local commitment transaction
+	// such that the Bob's signature will validate. Alice will only include HTLC
+	// updates that have been ACKnowledged by Bob.
+
+	// [OUT OF TURN MESSAGE]
+	// Alice receives Bob's signature for her commitment transaction before
+	// receiving Bob's RevokeAndAck (despite R&A being sent through the peer connection first).
+	err = aliceChannel.ReceiveNewCommitment(bobSig, bobHtlcSigs)
+	if err != nil {
+		t.Logf("[ERROR]: Alice is unable to receive Bob's commitment which covers HTLCs he has not yet acknowledged (via RevokeAndAck). "+
+			"Alice is unable extend her local commitment chain at this time - %v", err)
+	}
+
+	// t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	// t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	// t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	// t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
+	// channel_test.go:111: Alice HTLC Update Index: 0
+	// channel_test.go:143: [ERROR]: Bob is unable to receive commitment which covers HTLCs
+	//     he has not received yet (via UpdateAddHTLC). Bob is unable extend his local commitment
+	//     chain at this time - number of htlc sig mismatch. Expected 0 sigs, got 1
+	// channel_test.go:171: Bob HTLC Update Index: 0
+	// channel_test.go:178: Bob is able to successfully receive the commitment only AFTER he learns
+	//     about all HTLC updates to which it commits. NOTE: This makes sense.
+	//     He cannot reconstruct a transaction for HTLCs that he does not know exist!
+	// channel_test.go:190: Bob is able to successfully revoke the current commitment
+	// channel_test.go:193: Number of HTLCs added to Bob's pending commitment: 1
+	// channel_test.go:225: [ERROR]: Alice is unable to receive Bob's commitment which covers HTLCs
+	//     he has not yet acknowledged (via RevokeAndAck). Alice is unable extend her local commitment
+	//     chain at this time - number of htlc sig mismatch. Expected 0 sigs, got 1
+
+	// Alice processes Bob's revocation which implicitly ACKnowledges
+	// that he received Alice's proposed commitment state, including the
+	// HTLC updates it commits to and succeeded in extending his local commitment chain.
+	// "Roger that Alice. We read you on proposed commitment state which
+	// commits to HTLC Update Indeces: A2, B2. We will extend your commitment
+	// chain and await your revocation and acknowledgement. Over and out."
+	fwdPkg, _, _, _, err := aliceChannel.ReceiveRevocation(bobRevocation)
+	if err != nil {
+		t.Fatalf("alice unable to process bob's revocation: %v", err)
+	} else {
+		t.Log("Alice is able to successfully receive Bob's revocation and (implicit) " +
+			"acknowledgement of the state she previously proposed.")
+	}
+	// Alice shouldn't have any HTLCs to forward since she's sending an outgoing HTLC.
+	if len(fwdPkg.Adds) != 0 {
+		t.Fatalf("alice forwards %v add htlcs, should forward none",
+			len(fwdPkg.Adds))
+	}
+	if len(fwdPkg.SettleFails) != 0 {
+		t.Fatalf("alice forwards %v settle/fail htlcs, "+
+			"should forward none", len(fwdPkg.SettleFails))
+	}
+
+	// t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	// t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	// t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	// t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
+	// Alice processes Bob's signature, and since she just received
+	// the revocation, she expects this signature to cover everything up to
+	// the point where she sent her signature, including the HTLC.
+	// This time this should succeed because Bob will have (implicitly)
+	// ACKnowledged his receipt.
+	err = aliceChannel.ReceiveNewCommitment(bobSig, bobHtlcSigs)
+	if err != nil {
+		t.Fatalf("alice unable to process bob's new commitment: %v", err)
+	} else {
+		t.Log("Alice is able to successfully receive the commitment only AFTER " +
+			"Bob has acknowledged that he received the commitment with which she initiated " +
+			"this commitment dance.")
+	}
+
+	// t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	// t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	// t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	// t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
+	// Alice then generates a revocation for bob.
+	aliceRevocation, aliceHTLCs, err := aliceChannel.RevokeCurrentCommitment()
+	if err != nil {
+		t.Fatalf("unable to revoke alice channel: %v", err)
+	}
+
+	t.Logf("Number of HTLCs added to Alice's new commitment: %d", len(aliceHTLCs))
+
+	// Alice sends Bob the revocation for her prior commitment
+	// transaction completing this commitment dance.
+	// Bob processes Alice's revocation, at this point the new HTLC
+	// is fully locked in within both commitment transactions. Bob should
+	// also be able to forward an HTLC now that the HTLC has been locked
+	// into both commitment transactions.
+	fwdPkg, _, _, _, err = bobChannel.ReceiveRevocation(aliceRevocation)
+	if err != nil {
+		t.Fatalf("bob unable to process alice's revocation: %v", err)
+	}
+	if len(fwdPkg.Adds) != 1 {
+		t.Fatalf("bob forwards %v add htlcs, should only forward one",
+			len(fwdPkg.Adds))
+	}
+	if len(fwdPkg.SettleFails) != 0 {
+		t.Fatalf("bob forwards %v settle/fail htlcs, "+
+			"should forward none", len(fwdPkg.SettleFails))
+	}
+
+	// channel_test.go:143: [ERROR]: Bob is unable to receive commitment which covers HTLCs
+	//     he has not received yet (via UpdateAddHTLC). Bob is unable extend his local commitment
+	//     chain at this time - number of htlc sig mismatch. Expected 0 sigs, got 1
+	// channel_test.go:179: Bob Received HTLC Update (Add). Received HTLC Update Index: 0
+	// channel_test.go:178: Bob is able to successfully receive the commitment only AFTER he learns
+	//     about all HTLC updates to which it commits. NOTE: This makes sense.
+	//     He cannot reconstruct a transaction for HTLCs that he does not know exist!
+	// channel_test.go:199: Bob is able to successfully revoke the current commitment
+	// channel_test.go:202: Number of HTLCs added to Bob's pending commitment: 1
+	// channel_test.go:225: [ERROR]: Alice is unable to receive Bob's commitment which covers HTLCs
+	//     he has not yet acknowledged (via RevokeAndAck). Alice is unable extend her local commitment
+	//     chain at this time - number of htlc sig mismatch. Expected 0 sigs, got 1
+	// channel_test.go:272: Alice is able to successfully receive Bob's revocation and
+	//     (implicit) acknowledgement of the state she previously proposed.
+	// channel_test.go:299: Alice is able to successfully receive the commitment only AFTER
+	//     Bob has acknowledged that he received the commitment with which she initiated this commitment dance.
+	// channel_test.go:315: Number of HTLCs added to Alice's new commitment: 1
+
+	// -----------------------------------------------
+
+}
+
+func testPlayground2(t *testing.T, tweakless bool) {
+	// Create a test channel which will be used for the duration of this
+	// unit test. The channel will be funded evenly with Alice having 5 BTC,
+	// and Bob having 5 BTC.
+	chanType := channeldb.SingleFunderTweaklessBit
+	if !tweakless {
+		chanType = channeldb.SingleFunderBit
+	}
+
+	aliceChannel, bobChannel, cleanUp, err := CreateTestChannels(chanType)
+	if err != nil {
+		t.Fatalf("unable to create test channels: %v", err)
+	}
+	defer cleanUp()
+
+	paymentPreimage := bytes.Repeat([]byte{1}, 32)
+	paymentHash := sha256.Sum256(paymentPreimage)
+	htlcAmt := lnwire.NewMSatFromSatoshis(btcutil.SatoshiPerBitcoin)
+	htlc := &lnwire.UpdateAddHTLC{
+		PaymentHash: paymentHash,
+		Amount:      htlcAmt,
+		Expiry:      uint32(5),
+		ID:          0,
+	}
+
+	paymentPreimage2 := bytes.Repeat([]byte{2}, 32)
+	paymentHash2 := sha256.Sum256(paymentPreimage2)
+	htlc2 := &lnwire.UpdateAddHTLC{
+		PaymentHash: paymentHash2,
+		Amount:      htlcAmt,
+		Expiry:      uint32(5),
+		ID:          1,
+	}
+
+	// TestFixedDanceAdaptableGoWithFlowDance
+	// Run this again but have Bob send a number of HTLC ADDs
+	// during the commitment dance. Will the commitment dance finish ignoring
+	// HTLC updates which take place after it has started?
+	// Or will the outcome of the commitment dance reflect the HTLC
+	// ADDs which were sent during the dance?
+
+	// First Alice adds the outgoing HTLCs to her local channel's state
+	// update log.
+	aliceHtlcIndex, err := aliceChannel.AddHTLC(htlc, nil)
+	if err != nil {
+		t.Fatalf("unable to add htlc: %v", err)
+	}
+	t.Logf("Added HTLC Update Index: %d", aliceHtlcIndex)
+	t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
+	// Alice's HTLC update (ADD) reach Bob over the network
+	// who adds the htlc to his remote state update log.
+	bobHtlcIndex, err := bobChannel.ReceiveHTLC(htlc)
+	if err != nil {
+		t.Fatalf("unable to recv htlc: %v", err)
+	}
+
+	t.Log("[Before Alice Signs]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("[Before Alice Signs]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+
+	t.Logf("Bob Received HTLC Update (Add). Received HTLC Update Index: %d", bobHtlcIndex)
+	t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
+	aliceSig, aliceHtlcSigs, _, err := aliceChannel.SignNextCommitment()
+	if err != nil {
+		t.Logf("[ERROR]: unable to extend remote party's commitment chain: %v.", err)
+	}
+	// t.Logf("Alice Signature: %+v", aliceSig)
+	t.Logf("# of Alice HTLC Signatures: %+v", len(aliceHtlcSigs))
+	t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to our %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to Bob's %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().theirMessageIndex)
+
+	t.Log("[After Alice Signs but Before Dance]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("[After Alice Starts but Before Dance]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+
+	// What if we add HTLC updates here?
+
+	// Bob is able to receive the signature message now!
+	err = bobChannel.ReceiveNewCommitment(aliceSig, aliceHtlcSigs)
+	if err != nil {
+		t.Fatalf("bob unable to process alice's new commitment: %v", err)
+	} else {
+		t.Log("Bob is able to successfully receive the commitment only AFTER " +
+			"he learns about all HTLC updates to which it commits. NOTE: " +
+			"This makes sense. He cannot reconstruct a transaction for HTLCs " +
+			"that he does not know exist!")
+	}
+
+	t.Log("[After Bob Receives Dance Invitation]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("[After Bob Receives Dance Invitation]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+
+	// What if we add HTLC updates here?
+	aliceHtlcIndex2, err := aliceChannel.AddHTLC(htlc2, nil)
+	if err != nil {
+		t.Fatalf("unable to add htlc: %v", err)
+	}
+	t.Logf("Added HTLC Update Index: %d", aliceHtlcIndex2)
+
+	t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
+	bobHtlcIndex, err = bobChannel.ReceiveHTLC(htlc2)
+	if err != nil {
+		t.Fatalf("unable to recv htlc: %v", err)
+	}
+	t.Logf("Bob Received HTLC Update (Add). Received HTLC Update Index: %d", bobHtlcIndex)
+
+	t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
+	htlc, _ = createHTLC(2, lnwire.MilliSatoshi(500000))
+	aliceHtlcIndex, err = aliceChannel.AddHTLC(htlc, nil)
+	if err != nil {
+		t.Fatalf("unable to add htlc: %v", err)
+	}
+	t.Logf("Added HTLC Update Index: %d", aliceHtlcIndex)
+
+	t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
+	bobHtlcIndex, err = bobChannel.ReceiveHTLC(htlc)
+	if err != nil {
+		t.Fatalf("unable to recv htlc: %v", err)
+	}
+	t.Logf("Bob Received HTLC Update (Add). Received HTLC Update Index: %d", bobHtlcIndex)
+
+	t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
+	// Bob revokes his prior commitment given to him by Alice, since he now
+	// has a valid signature for a newer commitment.
+	bobRevocation, htlcs, err := bobChannel.RevokeCurrentCommitment()
+	if err != nil {
+		t.Logf("[ERROR]: Bob is unable to revoke current commitment and advance tail of his local commitment chain - %v", err)
+		// t.Fatalf("unable to generate bob revocation: %v", err)
+	} else {
+		t.Log("Bob is able to successfully revoke the current commitment")
+	}
+
+	t.Logf("Number of HTLCs added to Bob's pending commitment: %d", len(htlcs))
+
+	// t.Log("[After Bob Revokes His Current Commitment]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	// t.Log("[After Bob Revokes His Current Commitment]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+	t.Log("[After Bob Revokes His Current Commitment (w/ Updates from Alice in Between)]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("[After Bob Revokes His Current Commitment (w/ Updates from Alice in Between)]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+
+	// Bob computes a signature for Alice's commitment transaction.
+	// This signature will cover the HTLC, since Bob will first send the
+	// revocation just created. The revocation also acks every received
+	// HTLC up to the point where Alice sent her signature.
+	// NOTE: This is an important comment
+	bobSig, bobHtlcSigs, _, err := bobChannel.SignNextCommitment()
+	if err != nil {
+		t.Fatalf("bob unable to sign alice's commitment: %v", err)
+	}
+
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to our %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to Alice's %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().theirMessageIndex)
+	// t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	// t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
+	t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
+	// What happens if we try another Commitment Dance before the previous is finished?
+	// NOTE: If she tries before receiving revocation she will get Revocation Window exhausted error
+	t.Log("Alice Attempts to Start Another Dance While Dancing (Before Revocation)")
+	aliceSig, aliceHtlcSigs, _, err = aliceChannel.SignNextCommitment()
+	if err != nil {
+		t.Logf("[ERROR]: Alice is unable to extend Bob's commitment chain: %v.", err)
+	} else {
+		t.Log("Alice is able to successfully sign another commitment for new dance")
+	}
+	// t.Logf("Alice Signature: %+v", aliceSig)
+	t.Logf("# of Alice HTLC Signatures: %+v", len(aliceHtlcSigs))
+
+	// Alice processes Bob's revocation which implicitly ACKnowledges
+	// that he received Alice's proposed commitment state, including the
+	// HTLC updates it commits to and succeeded in extending his local commitment chain.
+	// "Roger that Alice. We read you on proposed commitment state which
+	// commits to HTLC Update Indeces: A2, B2. We will extend your commitment
+	// chain and await your revocation and acknowledgement. Over and out."
+	fwdPkg, _, _, _, err := aliceChannel.ReceiveRevocation(bobRevocation)
+	if err != nil {
+		t.Fatalf("alice unable to process bob's revocation: %v", err)
+	} else {
+		t.Log("Alice is able to successfully receive Bob's revocation and (implicit) " +
+			"acknowledgement of the state she previously proposed.")
+	}
+	// Alice shouldn't have any HTLCs to forward since she's sending an outgoing HTLC.
+	if len(fwdPkg.Adds) != 0 {
+		t.Fatalf("alice forwards %v add htlcs, should forward none",
+			len(fwdPkg.Adds))
+	}
+	if len(fwdPkg.SettleFails) != 0 {
+		t.Fatalf("alice forwards %v settle/fail htlcs, "+
+			"should forward none", len(fwdPkg.SettleFails))
+	}
+
+	t.Log("[After Bob Alice's Next Commitment and Alice Receives Bob's Revocation]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("[After Bob Alice's Next Commitment Alice Receives Bob's Revocation]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+
+	// What happens if we try another Commitment Dance before the previous is finished?
+	t.Log("Alice Attempts to Start Another Dance While Dancing (After Receiving Revocation)")
+	aliceSig, aliceHtlcSigs, _, err = aliceChannel.SignNextCommitment()
+	if err != nil {
+		t.Logf("[ERROR]: unable to extend remote party's commitment chain: %v.", err)
+	} else {
+		t.Log("Alice is able to successfully sign another commitment for new dance")
+	}
+	// t.Logf("Alice Signature: %+v", aliceSig)
+	t.Logf("# of Alice HTLC Signatures: %+v", len(aliceHtlcSigs))
+
+	t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
+	t.Log("[After Alice Signs but Before 2nd Dance]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("[After Alice Starts but Before 2nd Dance]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+
+	// What if we add HTLC updates here?
+
+	// Bob is able to receive the signature message now!
+	err = bobChannel.ReceiveNewCommitment(aliceSig, aliceHtlcSigs)
+	if err != nil {
+		t.Fatalf("bob unable to process alice's new commitment: %v", err)
+	} else {
+		t.Log("Bob is able to successfully receive the commitment only AFTER " +
+			"he learns about all HTLC updates to which it commits. NOTE: " +
+			"This makes sense. He cannot reconstruct a transaction for HTLCs " +
+			"that he does not know exist!")
+	}
+
+	t.Log("[After Bob Receives 2nd Dance Invitation]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("[After Bob Receives 2nd Dance Invitation]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+
+	// Alice processes Bob's signature, and since she just received
+	// the revocation, she expects this signature to cover everything up to
+	// the point where she sent her signature, including the HTLC.
+	// This time this should succeed because Bob will have (implicitly)
+	// ACKnowledged his receipt.
+	err = aliceChannel.ReceiveNewCommitment(bobSig, bobHtlcSigs)
+	if err != nil {
+		t.Fatalf("alice unable to process bob's new commitment: %v", err)
+	} else {
+		t.Log("Alice is able to successfully receive the commitment only AFTER " +
+			"Bob has acknowledged that he received the commitment with which she initiated " +
+			"this commitment dance.")
+	}
+
+	t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
+	// Alice then generates a revocation for bob.
+	aliceRevocation, aliceHTLCs, err := aliceChannel.RevokeCurrentCommitment()
+	if err != nil {
+		t.Fatalf("unable to revoke alice channel: %v", err)
+	}
+
+	t.Logf("Number of HTLCs added to Alice's new commitment: %d", len(aliceHTLCs))
+
+	// Alice sends Bob the revocation for her prior commitment
+	// transaction completing this commitment dance.
+	// Bob processes Alice's revocation, at this point the new HTLC
+	// is fully locked in within both commitment transactions. Bob should
+	// also be able to forward an HTLC now that the HTLC has been locked
+	// into both commitment transactions.
+	fwdPkg, _, _, _, err = bobChannel.ReceiveRevocation(aliceRevocation)
+	if err != nil {
+		t.Fatalf("bob unable to process alice's revocation: %v", err)
+	} else {
+		t.Log("Bob is able to successfully receive Alice's revocation completing this commitment dance!")
+	}
+	if len(fwdPkg.Adds) != 1 {
+		t.Fatalf("bob forwards %v add htlcs, should only forward one",
+			len(fwdPkg.Adds))
+	}
+	if len(fwdPkg.SettleFails) != 0 {
+		t.Fatalf("bob forwards %v settle/fail htlcs, "+
+			"should forward none", len(fwdPkg.SettleFails))
+	}
+
+	// After the commitment dance is finished and HTLC updates are irrevocably commmitted
+	// to both Alice and Bob's commitment transactions.
+	//
+	// NOTE: Log Compaction has nothing to remove until HTLCs are removed (settle/fail)
+	// t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	// t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	// t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	// t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
+	t.Log("Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+
+	// channel_test.go:456: Bob is able to successfully receive the commitment only AFTER he learns about all HTLC updates to which it commits. NOTE: This makes sense. He cannot reconstruct a transaction for HTLCs that he does not know exist!
+	// channel_test.go:491: Bob is able to successfully revoke the current commitment
+	// channel_test.go:494: Number of HTLCs added to Bob's pending commitment: 1
+	// channel_test.go:521: Alice is able to successfully receive Bob's revocation and (implicit) acknowledgement of the state she previously proposed.
+	// channel_test.go:548: Alice is able to successfully receive the commitment only AFTER Bob has acknowledged that he received the commitment with which she initiated this commitment dance.
+	// channel_test.go:564: Number of HTLCs added to Alice's new commitment: 1
+	// channel_test.go:585: Does Alice owe a new commitment?  true
+	// channel_test.go:586: Does Bob owe a new commitment?  false
+
+	// Will the commitment dance finish, ignoring HTLC updates which take place after it has started?
+	// Or will the outcome of the commitment dance reflect the HTLC ADDs which were sent during the dance?
+	//
+	// ***NOTE: So it looks like that once a dance is started, we do not include any additional HTLC updates.
+	// This makes sense to me, but I still need to find how this happens in the code (TODO - 2/20/22)
+	// Somehow we know to ignore certain HTLC updates. This occurs due to the way the ChannelLink
+	// routine drives the state machine.
+	// -----------------------------------------------
+
+}
+
+// READ THIS
 // testAddSettleWorkflow tests a simple channel scenario where Alice and Bob
 // add, the settle an HTLC between themselves.
 func testAddSettleWorkflow(t *testing.T, tweakless bool) {
 	// Create a test channel which will be used for the duration of this
-	// unittest. The channel will be funded evenly with Alice having 5 BTC,
+	// unit test. The channel will be funded evenly with Alice having 5 BTC,
 	// and Bob having 5 BTC.
 	chanType := channeldb.SingleFunderTweaklessBit
 	if !tweakless {
@@ -85,6 +1072,7 @@ func testAddSettleWorkflow(t *testing.T, tweakless bool) {
 	// First Alice adds the outgoing HTLC to her local channel's state
 	// update log. Then Alice sends this wire message over to Bob who adds
 	// this htlc to his remote state update log.
+	// At this point both these indexes should be 0?
 	aliceHtlcIndex, err := aliceChannel.AddHTLC(htlc, nil)
 	if err != nil {
 		t.Fatalf("unable to add htlc: %v", err)
@@ -99,6 +1087,15 @@ func testAddSettleWorkflow(t *testing.T, tweakless bool) {
 	// we expect the messages to be ordered, Bob will receive the HTLC we
 	// just sent before he receives this signature, so the signature will
 	// cover the HTLC.
+	// NOTE: This is an important comment. What happens if HTLC Adds are dropped?
+	// Then might we accidentally send a commitment signature which covers an
+	// HTLC that our channel partner would not yet know about?
+	// Their update log lags ours until they
+	// TestSimpleCommitSigBeforeSendingUpdateAddHTLC
+	// aliceChannel.AddHTLC(htlc, nil)
+	// aliceSig, aliceHtlcSigs, _, err := aliceChannel.SignNextCommitment()
+	// err = bobChannel.ReceiveNewCommitment(aliceSig, aliceHtlcSigs) // would Bob think he is owed a commitment at this point? what if this and the next line were flipped?
+	// bobHtlcIndex, err := bobChannel.ReceiveHTLC(htlc)
 	aliceSig, aliceHtlcSigs, _, err := aliceChannel.SignNextCommitment()
 	if err != nil {
 		t.Fatalf("alice unable to sign commitment: %v", err)
@@ -122,7 +1119,8 @@ func testAddSettleWorkflow(t *testing.T, tweakless bool) {
 	// Bob finally send a signature for Alice's commitment transaction.
 	// This signature will cover the HTLC, since Bob will first send the
 	// revocation just created. The revocation also acks every received
-	// HTLC up to the point where Alice sent here signature.
+	// HTLC up to the point where Alice sent her signature.
+	// NOTE: This is an important comment
 	bobSig, bobHtlcSigs, _, err := bobChannel.SignNextCommitment()
 	if err != nil {
 		t.Fatalf("bob unable to sign alice's commitment: %v", err)
@@ -145,7 +1143,7 @@ func testAddSettleWorkflow(t *testing.T, tweakless bool) {
 	}
 
 	// Alice then processes bob's signature, and since she just received
-	// the revocation, she expect this signature to cover everything up to
+	// the revocation, she expects this signature to cover everything up to
 	// the point where she sent her signature, including the HTLC.
 	err = aliceChannel.ReceiveNewCommitment(bobSig, bobHtlcSigs)
 	if err != nil {
@@ -1696,6 +2694,7 @@ func TestChannelBalanceDustLimit(t *testing.T) {
 	}
 }
 
+// READ THIS
 func TestStateUpdatePersistence(t *testing.T) {
 	t.Parallel()
 
@@ -1800,6 +2799,8 @@ func TestStateUpdatePersistence(t *testing.T) {
 	// commitment transaction (but it was in Alice's, as he ACK'd her
 	// changes before creating a new state), Bob needs to trigger another
 	// state update in order to re-sync their states.
+	//
+	// TODO(2/21/22): Understand what this comment means
 	if err := ForceStateTransition(bobChannel, aliceChannel); err != nil {
 		t.Fatalf("unable to complete bob's state transition: %v", err)
 	}
@@ -1866,6 +2867,10 @@ func TestStateUpdatePersistence(t *testing.T) {
 
 	// The state update logs of the new channels and the old channels
 	// should now be identical other than the height the HTLCs were added.
+	//
+	// Update Logs are persisted to disk. Is this in the hot path of the payment
+	// processing/commit dance or done lazily? With how critical information is
+	// in LND when money is directly on the line, my guess is in the hot path.
 	if aliceChannel.localUpdateLog.logIndex !=
 		aliceChannelNew.localUpdateLog.logIndex {
 		t.Fatalf("alice log counter: expected %v, got %v",
@@ -1993,6 +2998,13 @@ func TestStateUpdatePersistence(t *testing.T) {
 	// entries to the update log before a state transition was initiated by
 	// either side, both sides are required to trigger an update in order
 	// to lock in their changes.
+	//
+	// TODO(2/21/22): Understand what this comment means. I would have thought
+	// that because all updates were shared prior to a dance starting, that
+	// they could all be included and irrevocably committed to in a single commitiment dance.
+	// Unless the RevokeAndACK is doing some heavy lifting in that it acknowledges more than
+	// just updates that are included in a commitment transaction, but rather all updates -
+	// even pending, that it has received up to that point.
 	if err := ForceStateTransition(aliceChannelNew, bobChannelNew); err != nil {
 		t.Fatalf("unable to update commitments: %v", err)
 	}
@@ -2039,6 +3051,7 @@ func TestStateUpdatePersistence(t *testing.T) {
 	}
 }
 
+// READ THIS
 func TestCancelHTLC(t *testing.T) {
 	t.Parallel()
 
@@ -2101,6 +3114,8 @@ func TestCancelHTLC(t *testing.T) {
 
 	// Now trigger another state transition, the HTLC should now be removed
 	// from both sides, with balances reflected.
+	//
+	// NOTE: we are unable to swap who initiates the dance and have the test pass.
 	if err := ForceStateTransition(bobChannel, aliceChannel); err != nil {
 		t.Fatalf("unable to create new commitment: %v", err)
 	}
@@ -2433,6 +3448,7 @@ func TestUpdateFeeFail(t *testing.T) {
 
 }
 
+// READ THIS
 // TestUpdateFeeConcurrentSig tests that the channel can properly handle a fee
 // update that it receives concurrently with signing its next commitment.
 func TestUpdateFeeConcurrentSig(t *testing.T) {
@@ -3479,6 +4495,7 @@ func TestChanSyncOweCommitment(t *testing.T) {
 	}
 }
 
+// READ THIS - This is a good one!
 // TestChanSyncOweCommitmentPendingRemote asserts that local updates are applied
 // to the remote commit across restarts.
 func TestChanSyncOweCommitmentPendingRemote(t *testing.T) {
@@ -3526,14 +4543,44 @@ func TestChanSyncOweCommitmentPendingRemote(t *testing.T) {
 		preimages = append(preimages, bobPreimage)
 	}
 
+	t.Log("Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+	t.Log("Alice Current Height:", aliceChannel.currentHeight)
+	t.Log("Bob Current Height:", bobChannel.currentHeight)
+
 	// With the HTLCs applied to both update logs, we'll initiate a state
 	// transition from Bob.
 	if err := ForceStateTransition(bobChannel, aliceChannel); err != nil {
 		t.Fatalf("unable to complete bob's state transition: %v", err)
 	}
 
+	t.Log("Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+	t.Log("Alice Current Height:", aliceChannel.currentHeight)
+	t.Log("Bob Current Height:", bobChannel.currentHeight)
+
 	// Next, Alice settles the HTLCs from Bob in distinct state updates.
+	// ***NOTE: This loop demonstrates a key concept that we have not internalized
+	// up to this point. Namely that Alice can send multiple commitments in a row
+	// to extend Bob's commitment chain WITHOUT waiting for Bob to extend her own
+	// as long as she receives revocation and acknowledgement from Bob for each one
+	// in turn. Alice will NOT send multiple commitment signatures without receiving an
+	// ACK as our revocation window is 1. We may need to redefine our concept of commitment
+	// dance. Bob's commitment chain can move arbitrarily far ahead of Alice one Commit/RevokeAndAck
+	// at a time. How does Alice catch up in this case? Does she need to individually receive
+	// commitments from Bob for each individual state? Or can she cut through/jump to the end
+	// to get synced back up? We do have cut through! Alice can receive a single commitment
+	// update from Bob to get them back in sync!
 	for i := 0; i < numHtlcs; i++ {
+		t.Log("[Alice about to settle]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+		t.Log("[Alice about to settle]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+		t.Log("Alice Current Height:", aliceChannel.currentHeight)
+		t.Log("Bob Current Height:", bobChannel.currentHeight)
+		t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+		t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+		t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+		t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
 		err = aliceChannel.SettleHTLC(preimages[i], uint64(i), nil, nil, nil)
 		if err != nil {
 			t.Fatalf("unable to settle htlc: %v", err)
@@ -3542,6 +4589,15 @@ func TestChanSyncOweCommitmentPendingRemote(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unable to settle htlc: %v", err)
 		}
+
+		t.Log("[Bob received settle]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+		t.Log("[Bob received settle]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+		t.Log("Alice Current Height:", aliceChannel.currentHeight)
+		t.Log("Bob Current Height:", bobChannel.currentHeight)
+		t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+		t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+		t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+		t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
 
 		aliceSig, aliceHtlcSigs, _, err := aliceChannel.SignNextCommitment()
 		if err != nil {
@@ -3553,20 +4609,50 @@ func TestChanSyncOweCommitmentPendingRemote(t *testing.T) {
 			t.Fatalf("unable to receive commitment: %v", err)
 		}
 
+		t.Log("[Alice signed and sent commitment]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+		t.Log("[Alice signed and sent commitment]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+		t.Log("Alice Current Height:", aliceChannel.currentHeight)
+		t.Log("Bob Current Height:", bobChannel.currentHeight)
+
 		// Bob revokes his current commitment. After this call
 		// completes, the htlc is settled on the local commitment
 		// transaction. Bob still owes Alice a signature to also settle
 		// the htlc on her local commitment transaction.
+		//
+		// NOTE: The HTLC is considered settled on the local transaction
+		// could Bob forward the preimage/or htlc (if this was an add)
+		// to the next node? Or does he need to wait for Alice to
+		// irrevocably commit the update as well?
+		// He must wait to forward. See HTLC Forwarding:
+		// https://github.com/lightning/bolts/blob/master/02-peer-protocol.md#forwarding-htlcs
 		bobRevoke, _, err := bobChannel.RevokeCurrentCommitment()
 		if err != nil {
 			t.Fatalf("unable to revoke commitment: %v", err)
 		}
 
+		t.Log("[Bob revokes his previous commitment]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+		t.Log("[Bob revokes his previous commitment]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+		t.Log("Alice Current Height:", aliceChannel.currentHeight)
+		t.Log("Bob Current Height:", bobChannel.currentHeight)
+
 		_, _, _, _, err = aliceChannel.ReceiveRevocation(bobRevoke)
 		if err != nil {
 			t.Fatalf("unable to revoke commitment: %v", err)
 		}
+		t.Log("[Alice recieved Bob's revocation]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+		t.Log("[Alice recieved Bob's revocation]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+		t.Log("Alice Current Height:", aliceChannel.currentHeight)
+		t.Log("Bob Current Height:", bobChannel.currentHeight)
 	}
+
+	t.Log("[After consecutive partial settles by Alice]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("[After consecutive partial settles by Alice]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+	t.Log("Alice Current Height:", aliceChannel.currentHeight)
+	t.Log("Bob Current Height:", bobChannel.currentHeight)
+	t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
 
 	// We restart Bob. This should have no impact on further message that
 	// are generated.
@@ -3576,10 +4662,18 @@ func TestChanSyncOweCommitmentPendingRemote(t *testing.T) {
 	}
 
 	// Bob signs the commitment he owes.
+	// So Bob only. It looks like he can net all of his commitment updates
+	// into a single update for Alice!? Would they be at different commit
+	// heights
 	bobCommit, bobHtlcSigs, _, err := bobChannel.SignNextCommitment()
 	if err != nil {
 		t.Fatalf("unable to sign commitment: %v", err)
 	}
+
+	t.Log("[After Bob signs commitment]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("[After Bob signs commitment]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+	t.Log("Alice Current Height:", aliceChannel.currentHeight)
+	t.Log("Bob Current Height:", bobChannel.currentHeight)
 
 	// This commitment is expected to contain no htlcs anymore.
 	if len(bobHtlcSigs) != 0 {
@@ -3599,10 +4693,100 @@ func TestChanSyncOweCommitmentPendingRemote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	t.Log("[After Alice receives commitment and sends revocation]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("[After Alice receives commitment and sends revocation]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+	t.Log("Alice Current Height:", aliceChannel.currentHeight)
+	t.Log("Bob Current Height:", bobChannel.currentHeight)
+	t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
+	// Bob sends some HTLCs
+	// channel_test.go:4215: Does Alice owe a new commitment?  false
+	// channel_test.go:4216: Does Bob owe a new commitment?  true
+	// channel_test.go:4217: Alice Current Height: 0
+	// channel_test.go:4218: Bob Current Height: 0
+
+	// Bob and Alice dance
+	// channel_test.go:4226: Does Alice owe a new commitment?  false
+	// channel_test.go:4227: Does Bob owe a new commitment?  false
+	// channel_test.go:4228: Alice Current Height: 1
+	// channel_test.go:4229: Bob Current Height: 1
+
+	// Alice settles the HTLCs from Bob in distinct state updates.
+	// channel_test.go:4243: [Alice about to settle]: Does Alice owe a new commitment?  false
+	// channel_test.go:4244: [Alice about to settle]: Does Bob owe a new commitment?  false
+	// channel_test.go:4245: Alice Current Height: 1
+	// channel_test.go:4246: Bob Current Height: 1
+	// channel_test.go:4257: [Bob received settle]: Does Alice owe a new commitment?  true
+	// channel_test.go:4258: [Bob received settle]: Does Bob owe a new commitment?  false
+	// channel_test.go:4259: Alice Current Height: 1
+	// channel_test.go:4260: Bob Current Height: 1
+	// channel_test.go:4272: [Alice signed and sent commitment]: Does Alice owe a new commitment?  false
+	// channel_test.go:4273: [Alice signed and sent commitment]: Does Bob owe a new commitment?  true
+	// channel_test.go:4274: Alice Current Height: 1
+	// channel_test.go:4275: Bob Current Height: 1
+
+	// channel_test.go:4293: [Bob revokes his previous commitment]: Does Alice owe a new commitment?  false
+	// channel_test.go:4294: [Bob revokes his previous commitment]: Does Bob owe a new commitment?  true
+	// channel_test.go:4295: Alice Current Height: 1
+	// channel_test.go:4296: Bob Current Height: 2
+	// channel_test.go:4302: [Alice recieved Bob's revocation]: Does Alice owe a new commitment?  false
+	// channel_test.go:4303: [Alice recieved Bob's revocation]: Does Bob owe a new commitment?  true
+	// channel_test.go:4304: Alice Current Height: 1
+	// channel_test.go:4305: Bob Current Height: 2
+
+	// channel_test.go:4243: [Alice about to settle]: Does Alice owe a new commitment?  false
+	// channel_test.go:4244: [Alice about to settle]: Does Bob owe a new commitment?  true
+	// channel_test.go:4245: Alice Current Height: 1
+	// channel_test.go:4246: Bob Current Height: 2
+	// channel_test.go:4257: [Bob received settle]: Does Alice owe a new commitment?  true
+	// channel_test.go:4258: [Bob received settle]: Does Bob owe a new commitment?  true
+	// channel_test.go:4259: Alice Current Height: 1
+	// channel_test.go:4260: Bob Current Height: 2
+	// channel_test.go:4272: [Alice signed and sent commitment]: Does Alice owe a new commitment?  false
+	// channel_test.go:4273: [Alice signed and sent commitment]: Does Bob owe a new commitment?  true
+	// channel_test.go:4274: Alice Current Height: 1
+	// channel_test.go:4275: Bob Current Height: 2
+
+	// channel_test.go:4293: [Bob revokes his previous commitment]: Does Alice owe a new commitment?  false
+	// channel_test.go:4294: [Bob revokes his previous commitment]: Does Bob owe a new commitment?  true
+	// channel_test.go:4295: Alice Current Height: 1
+	// channel_test.go:4296: Bob Current Height: 3
+	// channel_test.go:4302: [Alice recieved Bob's revocation]: Does Alice owe a new commitment?  false
+	// channel_test.go:4303: [Alice recieved Bob's revocation]: Does Bob owe a new commitment?  true
+	// channel_test.go:4304: Alice Current Height: 1
+	// channel_test.go:4305: Bob Current Height: 3
+
+	// channel_test.go:4308: [After consecutive partial settles by Alice]: Does Alice owe a new commitment?  false
+	// channel_test.go:4309: [After consecutive partial settles by Alice]: Does Bob owe a new commitment?  true
+	// channel_test.go:4310: Alice Current Height: 1
+	// channel_test.go:4311: Bob Current Height: 3
+	// channel_test.go:4329: [After Bob signs commitment]: Does Alice owe a new commitment?  false
+	// channel_test.go:4330: [After Bob signs commitment]: Does Bob owe a new commitment?  false
+	// channel_test.go:4331: Alice Current Height: 1
+	// channel_test.go:4332: Bob Current Height: 3
+	// channel_test.go:4353: [After Alice receives commitment and sends revocation]: Does Alice owe a new commitment?  false
+	// channel_test.go:4354: [After Alice receives commitment and sends revocation]: Does Bob owe a new commitment?  false
+	// channel_test.go:4355: Alice Current Height: 2
+	// channel_test.go:4356: Bob Current Height: 3
+
+	// So Alice and Bob can by fully synced at different commit heights??? That's something to keep in mind!
+	// Their update logs are still synced! We do have cut through!
+	// ***The state machine is capable of cut through, but does the ChannelLink drive this state machine in such
+	// a way that this actually happens in practice?
+
+	// channel_test.go:4361: Alice Local Update Log Index: 2
+	// channel_test.go:4362: Alice Remote Update Log Index for Bob: 2
+	// channel_test.go:4363: Bob Local Update Log Index: 2
+	// channel_test.go:4364: Bob Remote Update Log Index for Alice: 2
 }
 
+// READ THIS
 // TestChanSyncOweRevocation tests that if Bob restarts (and then Alice) before
-// he receiver's Alice's RevokeAndAck message, then Alice concludes that she
+// he receives Alice's RevokeAndAck message, then Alice concludes that she
 // needs to re-send the RevokeAndAck. After the revocation has been sent, both
 // nodes should be able to successfully complete another state transition.
 func TestChanSyncOweRevocation(t *testing.T) {
@@ -3647,7 +4831,7 @@ func TestChanSyncOweRevocation(t *testing.T) {
 		t.Fatalf("unable to complete bob's state transition: %v", err)
 	}
 
-	// Next, Alice will settle that single HTLC, the _begin_ the start of a
+	// Next, Alice will settle that single HTLC, then _begin_ the start of a
 	// state transition.
 	err = aliceChannel.SettleHTLC(bobPreimage, aliceHtlcIndex, nil, nil, nil)
 	if err != nil {
@@ -3793,6 +4977,7 @@ func TestChanSyncOweRevocation(t *testing.T) {
 	assertNoChanSyncNeeded(t, aliceChannel, bobChannel)
 }
 
+// READ THIS
 // TestChanSyncOweRevocationAndCommit tests that if Alice initiates a state
 // transition with Bob and Bob sends both a RevokeAndAck and CommitSig message
 // but Alice doesn't receive them before the connection dies, then he'll
@@ -3869,7 +5054,7 @@ func TestChanSyncOweRevocationAndCommit(t *testing.T) {
 	}
 
 	// If we now attempt to resync, then Alice should conclude that she
-	// doesn't need any further updates, while Bob concludes that he needs
+	// doesn't need (to send? how about receive?) any further updates, while Bob concludes that he needs
 	// to re-send both his revocation and commit sig message.
 	aliceSyncMsg, err := aliceChannel.channelState.ChanSyncMsg()
 	if err != nil {
@@ -3962,10 +5147,11 @@ func TestChanSyncOweRevocationAndCommit(t *testing.T) {
 	}
 }
 
+// READ THIS - Dump logs to follow this one (confuses me a bit)
 // TestChanSyncOweRevocationAndCommitForceTransition tests that if Alice
 // initiates a state transition with Bob, but Alice fails to receive his
 // RevokeAndAck and the connection dies before Bob sends his CommitSig message,
-// then Bob will re-send her RevokeAndAck message. Bob will also send and
+// then Bob will re-send his RevokeAndAck message. Bob will also send an
 // _identical_ CommitSig as he detects his commitment chain is ahead of
 // Alice's.
 func TestChanSyncOweRevocationAndCommitForceTransition(t *testing.T) {
@@ -4003,9 +5189,27 @@ func TestChanSyncOweRevocationAndCommitForceTransition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to recv bob's htlc: %v", err)
 	}
+
 	if err := ForceStateTransition(bobChannel, aliceChannel); err != nil {
 		t.Fatalf("unable to complete bob's state transition: %v", err)
 	}
+
+	t.Log("[Before Bob's adds another HTLC]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("[Before Bob's adds another HTLC]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+	t.Log("Alice Current Height:", aliceChannel.currentHeight)
+	t.Log("Bob Current Height:", bobChannel.currentHeight)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to our %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to Bob's %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().theirMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to our %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to Alice's %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().theirMessageIndex)
+	t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
 
 	// To ensure the channel sync logic handles the case where the two
 	// commit chains are at different heights, we'll add another HTLC from
@@ -4051,6 +5255,23 @@ func TestChanSyncOweRevocationAndCommitForceTransition(t *testing.T) {
 		t.Fatalf("bob unable to recv revocation: %v", err)
 	}
 
+	t.Log("[After Alice revokes and ACKs the ADD. Before she starts a new Dance to commit the SETTLE]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("[After Alice revokes and ACKs the ADD. Before she starts a new Dance to commit the SETTLE]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+	t.Log("Alice Current Height:", aliceChannel.currentHeight)
+	t.Log("Bob Current Height:", bobChannel.currentHeight)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to our %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to Bob's %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().theirMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to our %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to Alice's %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().theirMessageIndex)
+	t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
 	// Next, Alice will settle that incoming HTLC, then we'll start the
 	// core of the test itself.
 	err = aliceChannel.SettleHTLC(bobPreimage, aliceHtlcIndex, nil, nil, nil)
@@ -4072,6 +5293,23 @@ func TestChanSyncOweRevocationAndCommitForceTransition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bob unable to process alice's commitment: %v", err)
 	}
+
+	t.Log("[After Alice sends Commit for SETTLE before finishing previous dance for ADD]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("[After Alice sends Commit for SETTLE before finishing previous dance for ADD]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+	t.Log("Alice Current Height:", aliceChannel.currentHeight)
+	t.Log("Bob Current Height:", bobChannel.currentHeight)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to our %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to Bob's %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().theirMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to our %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to Alice's %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().theirMessageIndex)
+	t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
 
 	// Bob then sends his revocation message, but before Alice can process
 	// it (and before he scan send his CommitSig message), then connection
@@ -4180,12 +5418,48 @@ func TestChanSyncOweRevocationAndCommitForceTransition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("alice unable to recv revocation: %v", err)
 	}
+
+	t.Log("[After Alice receives Bob's retransmitted revocation]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("[After Alice receives Bob's retransmitted revocation]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+	t.Log("Alice Current Height:", aliceChannel.currentHeight)
+	t.Log("Bob Current Height:", bobChannel.currentHeight)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to our %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to Bob's %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().theirMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to our %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to Alice's %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().theirMessageIndex)
+	// t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	// t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	// t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	// t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
 	err = aliceChannel.ReceiveNewCommitment(
 		bobSigMsg.CommitSig, bobSigMsg.HtlcSigs,
 	)
 	if err != nil {
 		t.Fatalf("alice unable to rev bob's commitment: %v", err)
 	}
+
+	t.Log("[After Alice receives Bob's retransmitted commitment]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("[After Alice receives Bob's retransmitted commitment]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+	t.Log("Alice Current Height:", aliceChannel.currentHeight)
+	t.Log("Bob Current Height:", bobChannel.currentHeight)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to our %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to Bob's %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().theirMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to our %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to Alice's %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().theirMessageIndex)
+	// t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	// t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	// t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	// t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
+
 	aliceRevocation, _, err = aliceChannel.RevokeCurrentCommitment()
 	if err != nil {
 		t.Fatalf("alice unable to revoke commitment: %v", err)
@@ -4194,8 +5468,26 @@ func TestChanSyncOweRevocationAndCommitForceTransition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bob unable to recv revocation: %v", err)
 	}
+
+	t.Log("[After Alice sends commit she didnt send earlier]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("[After Alice sends commit she didnt send earlier]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+	t.Log("Alice Current Height:", aliceChannel.currentHeight)
+	t.Log("Bob Current Height:", bobChannel.currentHeight)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to our %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to Bob's %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().theirMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to our %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to Alice's %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().theirMessageIndex)
+	// t.Logf("Alice Local Update Log Index: %d", aliceChannel.localUpdateLog.logIndex)
+	// t.Logf("Alice Remote Update Log Index for Bob: %d", aliceChannel.remoteUpdateLog.logIndex)
+	// t.Logf("Bob Local Update Log Index: %d", bobChannel.localUpdateLog.logIndex)
+	// t.Logf("Bob Remote Update Log Index for Alice: %d", bobChannel.remoteUpdateLog.logIndex)
 }
 
+// READ THIS
 // TestChanSyncFailure tests the various scenarios during channel sync where we
 // should be able to detect that the channels cannot be synced because of
 // invalid state.
@@ -5492,6 +6784,7 @@ func TestChanCommitWeightDustHtlcs(t *testing.T) {
 	settleHtlc(preimg)
 }
 
+// READ THIS
 // TestSignCommitmentFailNotLockedIn tests that a channel will not attempt to
 // create a new state if it doesn't yet know of the next revocation point for
 // the remote party.
@@ -5521,6 +6814,7 @@ func TestSignCommitmentFailNotLockedIn(t *testing.T) {
 	}
 }
 
+// READ THIS
 // TestLockedInHtlcForwardingSkipAfterRestart ensures that after a restart, a
 // state machine doesn't attempt to re-forward any HTLC's that were already
 // locked in, but in a prior state.
@@ -5662,8 +6956,9 @@ func TestLockedInHtlcForwardingSkipAfterRestart(t *testing.T) {
 	// Bob should detect that he doesn't need to forward *any* HTLC's, as
 	// he was the one that initiated extending the commitment chain of
 	// Alice.
+	// Maybe look at this
 	if len(fwdPkg.Adds) != 0 {
-		t.Fatalf("alice shouldn't forward any HTLC's, instead wants to "+
+		t.Fatalf("bob shouldn't forward any HTLC's, instead wants to "+
 			"forward %v htlcs", len(fwdPkg.Adds))
 	}
 	if len(fwdPkg.SettleFails) != 0 {
@@ -5684,6 +6979,7 @@ func TestLockedInHtlcForwardingSkipAfterRestart(t *testing.T) {
 
 	// Failing the HTLC here will cause the update to be included in Alice's
 	// remote log, but it should not be committed by this transition.
+	// And here
 	err = bobChannel.FailHTLC(htlc2.ID, []byte("failreason"), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unable to cancel HTLC: %v", err)
@@ -5837,6 +7133,7 @@ func TestLockedInHtlcForwardingSkipAfterRestart(t *testing.T) {
 	}
 }
 
+// READ THIS
 // TestInvalidCommitSigError tests that if the remote party sends us an invalid
 // commitment signature, then we'll reject it and return a special error that
 // contains information to allow the remote party to debug their issues.
@@ -6043,6 +7340,7 @@ func TestChannelUnilateralCloseHtlcResolution(t *testing.T) {
 	}
 }
 
+// READ THIS
 // TestChannelUnilateralClosePendingCommit tests that if the remote party
 // broadcasts their pending commit (hasn't yet revoked the lower one), then
 // we'll create a proper unilateral channel clsoure that can sweep the created
@@ -6174,6 +7472,7 @@ func TestChannelUnilateralClosePendingCommit(t *testing.T) {
 	}
 }
 
+// READ THIS
 // TestDesyncHTLCs checks that we cannot add HTLCs that would make the
 // balance negative, when the remote and local update logs are desynced.
 func TestDesyncHTLCs(t *testing.T) {
@@ -6223,8 +7522,11 @@ func TestDesyncHTLCs(t *testing.T) {
 	//
 	// We try adding an HTLC of value 1 BTC, which should fail because the
 	// balance is unavailable.
+	// NOTE: All this is saying is that you cannot consider a balance yours
+	// until irrevocably committed.
 	htlcAmt = lnwire.NewMSatFromSatoshis(1 * btcutil.SatoshiPerBitcoin)
 	htlc, _ = createHTLC(1, htlcAmt)
+	// Test case does not match comment.
 	if _, err = aliceChannel.AddHTLC(htlc, nil); err != ErrBelowChanReserve {
 		t.Fatalf("expected ErrInsufficientBalance, instead received: %v",
 			err)
@@ -6359,6 +7661,7 @@ func TestMaxAcceptedHTLCs(t *testing.T) {
 	}
 }
 
+// READ THIS FOR SURE
 // TestMaxAsynchronousHtlcs tests that Bob correctly receives (and does not
 // fail) an HTLC from Alice when exchanging asynchronous payments. We want to
 // mimic the following case where Bob's commitment transaction is full before
@@ -6909,7 +8212,7 @@ func TestChanReserveLocalInitiatorDustHtlc(t *testing.T) {
 }
 
 // TestMinHTLC tests that the ErrBelowMinHTLC error is thrown if an HTLC is added
-// that is below the minimm allowed value for HTLCs.
+// that is below the minimum allowed value for HTLCs.
 func TestMinHTLC(t *testing.T) {
 	t.Parallel()
 
@@ -7173,6 +8476,7 @@ func compareLogs(a, b *updateLog) error {
 	return nil
 }
 
+// READ THIS - for sure
 // TestChannelRestoreUpdateLogs makes sure we are able to properly restore the
 // update logs in the case where a different number of HTLCs are locked in on
 // the local, remote and pending remote commitment.
@@ -7209,12 +8513,39 @@ func TestChannelRestoreUpdateLogs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to receive commitment: %v", err)
 	}
+
+	t.Log("[After Bob receives Alice's commit to HTLC ADD]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("[After Bob receives Alice's commit to HTLC ADD]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+	t.Log("Alice Current Height:", aliceChannel.currentHeight)
+	t.Log("Bob Current Height:", bobChannel.currentHeight)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to our %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to Bob's %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().theirMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to our %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to Alice's %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().theirMessageIndex)
+
 	bobRevocation, _, err := bobChannel.RevokeCurrentCommitment()
 	if err != nil {
 		t.Fatalf("unable to revoke commitment: %v", err)
 	}
 
-	// When Alice now receives this revocation, she will advance her remote
+	t.Log("[After Bob revokes]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("[After Bob revokes]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+	t.Log("Alice Current Height:", aliceChannel.currentHeight)
+	t.Log("Bob Current Height:", bobChannel.currentHeight)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to our %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to Bob's %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().theirMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to our %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to Alice's %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().theirMessageIndex)
+
+	// **When Alice now receives this revocation, she will advance her remote
 	// commitment chain to the commitment which includes the HTLC just
 	// sent. However her local commitment chain still won't include the
 	// state with the HTLC, since she hasn't received a new commitment
@@ -7223,6 +8554,19 @@ func TestChannelRestoreUpdateLogs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to receive revocation: %v", err)
 	}
+
+	t.Log("[After Alice recieves Bob's revocation]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("[After Alice recieves Bob's revocation]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+	t.Log("Alice Current Height:", aliceChannel.currentHeight)
+	t.Log("Bob Current Height:", bobChannel.currentHeight)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to our %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to Bob's %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().theirMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to our %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to Alice's %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().theirMessageIndex)
 
 	// Now make Alice send and sign an additional HTLC. We don't let Bob
 	// receive it. We do this since we want to check that update logs are
@@ -7233,7 +8577,20 @@ func TestChannelRestoreUpdateLogs(t *testing.T) {
 		t.Fatalf("alice unable to add htlc: %v", err)
 	}
 
-	// Send the signature covering the HTLC. This is okay, since the local
+	t.Log("[Alice never receives Bob's signature to extend her commitment. She ADDs another HTLC]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("[Alice never receives Bob's signature to extend her commitment. She ADDs another HTLC]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+	t.Log("Alice Current Height:", aliceChannel.currentHeight)
+	t.Log("Bob Current Height:", bobChannel.currentHeight)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to our %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to Bob's %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().theirMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to our %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to Alice's %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().theirMessageIndex)
+
+	// **Send the signature covering the HTLC. This is okay, since the local
 	// and remote commit chains are updated in an async fashion. Since the
 	// remote chain was updated with the latest state (since Bob sent the
 	// revocation earlier) we can keep advancing the remote commit chain.
@@ -7242,10 +8599,23 @@ func TestChannelRestoreUpdateLogs(t *testing.T) {
 		t.Fatalf("unable to sign commitment: %v", err)
 	}
 
-	// After Alice has signed this commitment, her local commitment will
+	t.Log("[Alice never receives Bob's signature to extend her commitment. She extends Bob again]: Does Alice owe a new commitment? ", aliceChannel.OweCommitment(true))
+	t.Log("[Alice never receives Bob's signature to extend her commitment. She extends Bob again]: Does Bob owe a new commitment? ", bobChannel.OweCommitment(true))
+	t.Log("Alice Current Height:", aliceChannel.currentHeight)
+	t.Log("Bob Current Height:", bobChannel.currentHeight)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to our %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Alice]: the most recent commitment we have for Bob commits to Bob's %dth HTLC update",
+		aliceChannel.remoteCommitChain.tip().theirMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to our %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().ourMessageIndex)
+	t.Logf("[Bob]: the most recent commitment we have for Alice commits to Alice's %dth HTLC update",
+		bobChannel.remoteCommitChain.tip().theirMessageIndex)
+
+	// *After Alice has signed this commitment, her local commitment will
 	// contain no HTLCs, her remote commitment will contain an HTLC with
 	// index 0, and the pending remote commitment (a signed remote
-	// commitment which is not AKCed yet) will contain an additional HTLC
+	// commitment which is not ACKed yet) will contain an additional HTLC
 	// with index 1.
 
 	// We now re-create the channels, mimicking a restart. This should sync
@@ -7344,6 +8714,7 @@ func restoreAndAssert(t *testing.T, channel *LightningChannel, numAddsLocal,
 	assertInLog(t, newChannel.remoteUpdateLog, numAddsRemote, numFailsRemote)
 }
 
+// READ THIS - for sure
 // TestChannelRestoreUpdateLogsFailedHTLC runs through a scenario where an
 // HTLC is added and failed, and asserts along the way that we would restore
 // the update logs of the channel to the expected state at any point.
@@ -7367,7 +8738,7 @@ func TestChannelRestoreUpdateLogsFailedHTLC(t *testing.T) {
 	// The htlc Alice sent should be in her local update log.
 	assertInLogs(t, aliceChannel, 1, 0, 0, 0)
 
-	// A restore at this point should NOT restore this update, as it is not
+	// *A restore at this point should NOT restore this update, as it is not
 	// locked in anywhere yet.
 	restoreAndAssert(t, aliceChannel, 0, 0, 0, 0)
 
@@ -7454,7 +8825,7 @@ func TestChannelRestoreUpdateLogsFailedHTLC(t *testing.T) {
 	assertInLogs(t, aliceChannel, 1, 0, 0, 1)
 	restoreAndAssert(t, aliceChannel, 1, 0, 0, 1)
 
-	// When Alice receives Bob's revocation, the Fail is irrevocably locked
+	// *When Alice receives Bob's revocation, the Fail is irrevocably locked
 	// in on both sides. She should compact the logs, removing the HTLC and
 	// the corresponding Fail from the local update log.
 	bobRevocation, _, err := bobChannel.RevokeCurrentCommitment()
@@ -7466,6 +8837,7 @@ func TestChannelRestoreUpdateLogsFailedHTLC(t *testing.T) {
 		t.Fatalf("unable to receive revocation: %v", err)
 	}
 
+	// The logs reset after compaction
 	assertInLogs(t, aliceChannel, 0, 0, 0, 0)
 	restoreAndAssert(t, aliceChannel, 0, 0, 0, 0)
 }
@@ -7550,6 +8922,7 @@ func TestDuplicateFailRejection(t *testing.T) {
 	}
 }
 
+// READ THIS
 // TestDuplicateSettleRejection tests that if either party attempts to settle
 // an HTLC twice, then we'll reject the second settle attempt.
 func TestDuplicateSettleRejection(t *testing.T) {
@@ -7633,6 +9006,7 @@ func TestDuplicateSettleRejection(t *testing.T) {
 	}
 }
 
+// READ THIS
 // TestChannelRestoreCommitHeight tests that the local and remote commit
 // heights of HTLCs are set correctly across restores.
 func TestChannelRestoreCommitHeight(t *testing.T) {
@@ -8300,6 +9674,7 @@ func TestChannelFeeRateFloor(t *testing.T) {
 	}
 }
 
+// READ THIS
 // TestFetchParent tests lookup of an entry's parent in the appropriate log.
 func TestFetchParent(t *testing.T) {
 	tests := []struct {
@@ -8527,6 +9902,7 @@ func TestFetchParent(t *testing.T) {
 	}
 }
 
+// READ THIS
 // TestEvaluateView tests the creation of a htlc view and the opt in mutation of
 // send and receive balances. This test does not check htlc mutation on a htlc
 // level.
@@ -8859,6 +10235,7 @@ func TestEvaluateView(t *testing.T) {
 			)
 
 			// Evaluate the htlc view, mutate as test expects.
+			// TODO: look at this again
 			result, err := lc.evaluateHTLCView(
 				view, &ourBalance, &theirBalance, nextHeight,
 				test.remoteChain, test.mutateState,
@@ -9131,6 +10508,7 @@ func checkHeights(t *testing.T, update *PaymentDescriptor, expected heights) {
 	}
 }
 
+// READ THIS
 // TestProcessAddRemoveEntry tests the updating of our and their balances when
 // we process adds, settles and fails. It also tests the mutating of add and
 // remove heights.
@@ -9535,6 +10913,7 @@ func TestProcessAddRemoveEntry(t *testing.T) {
 	}
 }
 
+// READ THIS
 // TestChannelUnsignedAckedFailure tests that unsigned acked updates are
 // properly restored after signing for them and disconnecting.
 //
@@ -9910,7 +11289,7 @@ func TestIsChannelClean(t *testing.T) {
 	defer cleanUp()
 
 	// Channel state should be clean at the start of the test.
-	assertCleanOrDirty(true, aliceChannel, bobChannel, t)
+	// assertCleanOrDirty(true, aliceChannel, bobChannel, t)
 
 	// Assert that neither side considers the channel clean when alice
 	// sends an htlc.

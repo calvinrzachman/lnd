@@ -1877,6 +1877,10 @@ func (l *channelLink) handleUpstreamMsg(msg lnwire.Message) {
 		// If both commitment chains are fully synced from our PoV,
 		// then we don't need to reply with a signature as both sides
 		// already have a commitment with the latest accepted.
+		//
+		// If the remote party initiated this commitment dance,
+		// we need to ACK that we received this commitment and also
+		// extend their commitment. We do owe them a commitment signature.
 		if !l.channel.OweCommitment(true) {
 			return
 		}
@@ -1884,6 +1888,9 @@ func (l *channelLink) handleUpstreamMsg(msg lnwire.Message) {
 		// Otherwise, the remote party initiated the state transition,
 		// so we'll reply with a signature to provide them with their
 		// version of the latest commitment.
+		//
+		// NOTE: This calls l.channel.SignNextCommitment() and sends
+		// CommitmentSigned message to peer.
 		if !l.updateCommitTxOrFail() {
 			return
 		}
@@ -1923,6 +1930,7 @@ func (l *channelLink) handleUpstreamMsg(msg lnwire.Message) {
 		}
 
 		// If we have a tower client for this channel type, we'll
+		// queue our newly revoked state for backup with a watchtower
 		if l.cfg.TowerClient != nil {
 			state := l.channel.State()
 			breachInfo, err := lnwallet.NewBreachRetribution(
@@ -2101,6 +2109,11 @@ func (l *channelLink) updateCommitTx() error {
 
 	theirCommitSig, htlcSigs, pendingHTLCs, err := l.channel.SignNextCommitment()
 	if err == lnwallet.ErrNoWindow {
+		// The channel state machine will not advance if the revocation
+		// window is exhausted. We must receive an ACK from the remote party
+		// for a previous commitment before we can continue.
+		// If this timer ever fires it means that the remote peer is
+		// not sending commitment ACKs in a timely manner.
 		l.cfg.PendingCommitTicker.Resume()
 
 		l.log.Tracef("revocation window exhausted, unable to send: "+
