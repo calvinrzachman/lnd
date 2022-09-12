@@ -22,6 +22,10 @@ var (
 	testShare      = [32]byte{0x03, 0x04}
 	testSetID      = [32]byte{0x05, 0x06}
 	testChildIndex = uint32(17)
+
+	testBaseFee    uint32 = 100
+	testFeeRate    uint32 = 100
+	testCltvExpiry uint16 = 100
 )
 
 var recordEncDecTests = []recordEncDecTest{
@@ -63,6 +67,31 @@ var recordEncDecTests = []recordEncDecTest{
 			}
 			if amp.ChildIndex() != testChildIndex {
 				t.Fatal("incorrect child index")
+			}
+		},
+	},
+	{
+		name: "route blinding payment relay",
+		encRecord: func() tlv.RecordProducer {
+			return &record.PaymentRelay{
+				BaseFee:         testBaseFee,
+				FeeRate:         testFeeRate,
+				CltvExpiryDelta: testCltvExpiry,
+			}
+		},
+		decRecord: func() tlv.RecordProducer {
+			return new(record.PaymentRelay)
+		},
+		assert: func(t *testing.T, r interface{}) {
+			paymentRelay := r.(*record.PaymentRelay)
+			if paymentRelay.BaseFee != testBaseFee {
+				t.Fatal("incorrect base fee")
+			}
+			if paymentRelay.FeeRate != testFeeRate {
+				t.Fatal("incorrect fee rate")
+			}
+			if paymentRelay.CltvExpiryDelta != testCltvExpiry {
+				t.Fatal("incorrect cltv expiry")
 			}
 		},
 	},
