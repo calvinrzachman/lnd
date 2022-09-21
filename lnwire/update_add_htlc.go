@@ -3,6 +3,9 @@ package lnwire
 import (
 	"bytes"
 	"io"
+
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/lightningnetwork/lnd/tlv"
 )
 
 // OnionPacketSize is the size of the serialized Sphinx onion packet included
@@ -54,6 +57,10 @@ type UpdateAddHTLC struct {
 	// used in the subsequent UpdateAddHTLC message.
 	OnionBlob [OnionPacketSize]byte
 
+	// Route Blinding: Do we make use of this for our TLV data?
+	// Laolu creates a specific field for his TLV modifications for OpenChannel.
+	BlindingPoint *btcec.PublicKey
+
 	// ExtraData is the set of data that was appended to this message to
 	// fill out the full maximum transport message size. These fields can
 	// be used to specify optional data such as custom TLV fields.
@@ -74,15 +81,56 @@ var _ Message = (*UpdateAddHTLC)(nil)
 //
 // This is part of the lnwire.Message interface.
 func (c *UpdateAddHTLC) Decode(r io.Reader, pver uint32) error {
-	return ReadElements(r,
+	// Read all the mandatory fields in the UpdateAddHTLC message.
+	err := ReadElements(r,
 		&c.ChanID,
 		&c.ID,
 		&c.Amount,
 		c.PaymentHash[:],
 		&c.Expiry,
 		c.OnionBlob[:],
-		&c.ExtraData,
+		// &c.ExtraData,
 	)
+	if err != nil {
+		return err
+	}
+
+	// For backwards compatibility, the optional extra data blob for
+	// OpenChannel must contain an entry for the upfront shutdown script.
+	// We'll read it out and attempt to parse it.
+	var tlvRecords ExtraOpaqueData
+	if err := ReadElements(r, &tlvRecords); err != nil {
+		return err
+	}
+
+	// Next we'll parse out the set of known records, keeping the raw tlv
+	// bytes untouched to ensure we don't drop any bytes erroneously.
+	// var blindingPoint *btcec.PublicKey
+	var blindingPoint BlindingPoint
+
+	// This function must be where some of the magic happens.
+	// It takes pointers to Go objects/types and populates their values!
+	// typeMap, err := c.ExtraData.ExtractRecords(
+	typeMap, err := tlvRecords.ExtractRecords(
+		// &blindingPoint,
+		// tlv.MakePrimitiveRecord(BlindingPointOnionType, &blindingPoint),
+		// record.NewBlindingPointRecord(&blindingPoint), // If we remove lnwire dependency from record package & go back to using tlv.Record{} here
+		&blindingPoint,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Set the corresponding TLV types if they were included in the stream.
+	if val, ok := typeMap[BlindingPointRecordType]; ok && val == nil {
+		point := new(btcec.PublicKey)
+		*point = btcec.PublicKey(blindingPoint)
+		c.BlindingPoint = point
+	}
+
+	c.ExtraData = tlvRecords
+
+	return nil
 }
 
 // Encode serializes the target UpdateAddHTLC into the passed io.Writer
@@ -90,6 +138,17 @@ func (c *UpdateAddHTLC) Decode(r io.Reader, pver uint32) error {
 //
 // This is part of the lnwire.Message interface.
 func (c *UpdateAddHTLC) Encode(w *bytes.Buffer, pver uint32) error {
+	recordProducers := []tlv.RecordProducer{}
+	if c.BlindingPoint != nil {
+		point := new(BlindingPoint)
+		*point = BlindingPoint(*c.BlindingPoint)
+		recordProducers = append(recordProducers, point)
+	}
+	err := EncodeMessageExtraData(&c.ExtraData, recordProducers...)
+	if err != nil {
+		return err
+	}
+
 	if err := WriteChannelID(w, c.ChanID); err != nil {
 		return err
 	}

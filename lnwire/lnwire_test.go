@@ -947,6 +947,9 @@ func TestLightningWireProtocol(t *testing.T) {
 
 			v[0] = reflect.ValueOf(req)
 		},
+		// // TODO(9/20/22): create test which exercises route blinding field.
+		// MsgUpdateAddHTLC: func(v []reflect.Value, r *rand.Rand) {
+		// },
 	}
 
 	// With the above types defined, we'll now generate a slice of
