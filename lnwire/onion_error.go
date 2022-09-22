@@ -80,6 +80,7 @@ const (
 	CodeExpiryTooFar                     FailCode = 21
 	CodeInvalidOnionPayload                       = FlagPerm | 22
 	CodeMPPTimeout                       FailCode = 23
+	CodeInvalidOnionBlinding                      = FlagBadOnion | FlagPerm | 24
 )
 
 // String returns the string representation of the failure code.
@@ -156,6 +157,9 @@ func (c FailCode) String() string {
 
 	case CodeMPPTimeout:
 		return "MPPTimeout"
+
+	case CodeInvalidOnionBlinding:
+		return "InvalidOnionBlinding"
 
 	default:
 		return "<unknown>"
@@ -1215,6 +1219,50 @@ func (f *FailMPPTimeout) Error() string {
 	return f.Code().String()
 }
 
+// InvalidOnionBlinding is catch all error signalling something went
+// wrong during the processing of a hop in a blinded route.
+// is returned if the hop in a blinded portion
+// of a route could not correctly be processed.
+//
+// NOTE: May only be returned by intermediate nodes.
+type InvalidOnionBlinding struct {
+	// OnionSHA256 hash of the onion blob which haven't been proceeded.
+	OnionSHA256 [sha256.Size]byte
+}
+
+// NewInvalidOnionBlinding creates new instance of the InvalidOnionBlinding.
+func NewInvalidOnionBlinding(onion []byte) *InvalidOnionBlinding {
+	return &InvalidOnionBlinding{OnionSHA256: sha256.Sum256(onion)}
+}
+
+// Code returns the failure unique code.
+//
+// NOTE: Part of the FailureMessage interface.
+func (f *InvalidOnionBlinding) Code() FailCode {
+	return CodeInvalidOnionBlinding
+}
+
+// Decode decodes the failure from a byte stream.
+//
+// NOTE: Part of the Serializable interface.
+func (f *InvalidOnionBlinding) Decode(r io.Reader, pver uint32) error {
+	return ReadElement(r, f.OnionSHA256[:])
+}
+
+// Encode writes the failure in a byte stream.
+//
+// NOTE: Part of the Serializable interface.
+func (f *InvalidOnionBlinding) Encode(w *bytes.Buffer, pver uint32) error {
+	return WriteBytes(w, f.OnionSHA256[:])
+}
+
+// Returns a human readable string describing the target FailureMessage.
+//
+// NOTE: Implements the error interface.
+func (f *InvalidOnionBlinding) Error() string {
+	return fmt.Sprintf("InvalidOnionBlinding(onion_sha=%x)", f.OnionSHA256[:])
+}
+
 // DecodeFailure decodes, validates, and parses the lnwire onion failure, for
 // the provided protocol version.
 func DecodeFailure(r io.Reader, pver uint32) (FailureMessage, error) {
@@ -1409,6 +1457,9 @@ func makeEmptyOnionError(code FailCode) (FailureMessage, error) {
 
 	case CodeMPPTimeout:
 		return &FailMPPTimeout{}, nil
+
+	case CodeInvalidOnionBlinding:
+		return &InvalidOnionBlinding{}, nil
 
 	default:
 		return nil, errors.Errorf("unknown error code: %v", code)
