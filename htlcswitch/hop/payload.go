@@ -147,7 +147,8 @@ type BlindHopPayload struct {
 }
 
 // TODO(7/15/22): should be able to create a unit test for this pretty easily.
-func NewBlindHopPayloadFromReader(r io.Reader) (*BlindHopPayload, error) {
+// func NewBlindHopPayloadFromReader(r io.Reader) (*BlindHopPayload, error) {
+func NewBlindHopPayloadFromReader(r io.Reader, isFinalHop bool) (*BlindHopPayload, error) {
 
 	var (
 		padding            []byte
@@ -179,8 +180,13 @@ func NewBlindHopPayloadFromReader(r io.Reader) (*BlindHopPayload, error) {
 
 	// TODO(8/13/22): Validate whether the sender properly included or
 	// omitted route blinding tlv records in accordance with BOLT 04.
-	nextScid := lnwire.NewShortChanIDFromInt(nextHop)
-	err = ValidateRouteBlindingPayloadTypes(parsedTypes, nextScid)
+	// NOTE(9/15/22): There is a difference between a TLV record which is
+	// present but 0 valued and one which is not at all present.
+	// Since the nextHop is a uint64 it cannot be nil. It will either be
+	// zero or non-zero. However the nextHop may not show in parsedTypes
+	// nextScid := lnwire.NewShortChanIDFromInt(nextHop)
+	// err = ValidateRouteBlindingPayloadTypes(parsedTypes, nextScid)
+	err = ValidateRouteBlindingPayloadTypes(parsedTypes, isFinalHop)
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +196,8 @@ func NewBlindHopPayloadFromReader(r io.Reader) (*BlindHopPayload, error) {
 		return nil, ErrInvalidPayload{
 			Type:      *violatingType,
 			Violation: RequiredViolation,
-			FinalHop:  nextScid == Exit,
+			// FinalHop:  nextScid == Exit,
+			FinalHop: isFinalHop,
 		}
 	}
 
@@ -236,7 +243,8 @@ func NewBlindHopPayloadFromReader(r io.Reader) (*BlindHopPayload, error) {
 
 // NewPayloadFromReader builds a new Hop from the passed io.Reader. The reader
 // should correspond to the bytes encapsulated in a TLV onion payload.
-func NewPayloadFromReader(r io.Reader) (*Payload, error) {
+// func NewPayloadFromReader(r io.Reader) (*Payload, error) {
+func NewPayloadFromReader(r io.Reader, isFinalHop bool) (*Payload, error) {
 	var (
 		cid         uint64
 		amt         uint64
@@ -272,8 +280,12 @@ func NewPayloadFromReader(r io.Reader) (*Payload, error) {
 
 	// Validate whether the sender properly included or omitted tlv records
 	// in accordance with BOLT 04.
+	// NOTE(9/21/22): The 'nextHop' is passed so that our validation
+	// function can make the determination as to whether we are the
+	// final hop. We will replace this with all-zero onion HMAC.
 	nextHop := lnwire.NewShortChanIDFromInt(cid)
-	err = ValidateParsedPayloadTypes(parsedTypes, nextHop)
+	// err = ValidateParsedPayloadTypes(parsedTypes, nextHop)
+	err = ValidateParsedPayloadTypes(parsedTypes, isFinalHop)
 	if err != nil {
 		return nil, err
 	}
@@ -350,8 +362,10 @@ func NewCustomRecords(parsedTypes tlv.TypeMap) record.CustomSet {
 // ValidateRouteBlindingPayloadTypes checks the types parsed from a route
 // blinding payload to ensure that the proper fields are either included
 // or omitted. The requirements for this method are described in BOLT 04.
+// func ValidateRouteBlindingPayloadTypes(parsedTypes tlv.TypeMap,
+// 	nextHop lnwire.ShortChannelID) error {
 func ValidateRouteBlindingPayloadTypes(parsedTypes tlv.TypeMap,
-	nextHop lnwire.ShortChannelID) error {
+	isFinalHop bool) error {
 
 	_, hasNextHop := parsedTypes[record.BlindedNextHopOnionType]
 	_, hasNextNode := parsedTypes[record.NextNodeIDOnionType]
@@ -360,9 +374,11 @@ func ValidateRouteBlindingPayloadTypes(parsedTypes tlv.TypeMap,
 
 	// TODO(9/10/22): Figure out how to actually distinguish the final
 	// hop in a blinded route as TLV payload reader.
+	// UPDATE(9/15/22): Apparently this is supposed to be indicated by the
+	// sphinx implementation.
 	// isFinalHop = ???
 	// isFinalHop bool = !hashasNextNode && nextHop == hop.Exit
-	var isFinalHop bool = !hasNextNode && !hasNextHop
+	// var isFinalHop bool = !hasNextNode && !hasNextHop
 	if !isFinalHop {
 		fmt.Println("[ValidateRouteBlindingPayloadTypes]: we are NOT the final hop!!")
 		// An intermediate hop MUST specify how the payment is to be forwarded.
@@ -375,9 +391,17 @@ func ValidateRouteBlindingPayloadTypes(parsedTypes tlv.TypeMap,
 			}
 		}
 
+		if !hasNextHop && !hasNextNode {
+			fmt.Println("[ValidateRouteBlindingPayloadTypes]: intermediate hop must provide next node for forwarding!!")
+			return ErrInvalidPayload{
+				Type:      record.BlindedNextHopOnionType,
+				Violation: OmittedViolation,
+				FinalHop:  false,
+			}
+		}
 	} else {
 		fmt.Println("[ValidateRouteBlindingPayloadTypes]: we are the final hop!!")
-		// Final hop MUST have a path_id with which we can validate
+		// The final hop MUST have a path_id with which we can validate
 		// this payment is for a blind route we created.
 		if !hasPathID {
 			return ErrInvalidPayload{
@@ -403,8 +427,10 @@ func ValidateRouteBlindingPayloadTypes(parsedTypes tlv.TypeMap,
 // payload is decrypted. We would like to preserve the normal validation
 // in the case we are forwarding for a normal (not blinded) route.
 // Might this lead to some duplicate validation?
+// func ValidateParsedPayloadTypes(parsedTypes tlv.TypeMap,
+// 	nextHop lnwire.ShortChannelID) error {
 func ValidateParsedPayloadTypes(parsedTypes tlv.TypeMap,
-	nextHop lnwire.ShortChannelID) error {
+	isFinalHop bool) error {
 
 	// NOTE(9/15/22): This may not serve as a proper determination of
 	// whether this is the final hop.
@@ -412,7 +438,7 @@ func ValidateParsedPayloadTypes(parsedTypes tlv.TypeMap,
 	// to have an empty next hop in the top level TLV
 	// onion payload. They MUST have a next hop in the
 	// recipient encrypted data payload however.
-	isFinalHop := nextHop == Exit
+	// isFinalHop := nextHop == Exit
 
 	_, hasAmt := parsedTypes[record.AmtOnionType]
 	_, hasLockTime := parsedTypes[record.LockTimeOnionType]
@@ -485,6 +511,34 @@ func ValidateParsedPayloadTypes(parsedTypes tlv.TypeMap,
 		// This is a blind hop so we'll apply additional validation
 		// as per BOLT-04.
 		fmt.Println("this is a blind hop!")
+		// NOTE(9/8/22): I think that we can only make a determination of
+		// whether this is a final hop or not here for normal (not blind) hops.
+		// To make this determination for blinded hops requires inspection of
+		// the encrypted route blinding TLV payload.
+		// UPDATE(9/15/22): According to BOLT-04 this is supposed to be
+		// indicated by the sphinx implementation when it encounters
+		// an all-zero onion HMAC.
+		switch {
+
+		// Intermediate nodes in a blinded route should
+		// not contain an amount to forward.
+		case !isFinalHop && hasAmt:
+			return ErrInvalidPayload{
+				Type:      record.AmtOnionType,
+				Violation: IncludedViolation,
+				FinalHop:  false,
+			}
+
+		// Intermediate nodes in a blinded route should
+		// not contain an outgoing timelock.
+		case !isFinalHop && hasLockTime:
+			return ErrInvalidPayload{
+				Type:      record.LockTimeOnionType,
+				Violation: IncludedViolation,
+				FinalHop:  false,
+			}
+
+		}
 	}
 
 	return nil

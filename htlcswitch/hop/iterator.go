@@ -33,6 +33,11 @@ type Iterator interface {
 	// along with a failure code to signal if the decoding was successful.
 	ExtractErrorEncrypter(ErrorEncrypterExtracter) (ErrorEncrypter,
 		lnwire.FailCode)
+
+	// IsExitHop returns a boolean indicating whether we are the final hop.
+	IsExitHop() bool
+	// NOTE(9/23/22): Could also use a Next() and check for hop.Exit
+	// NextHop() lnwire.ShortChannelID
 }
 
 // sphinxHopIterator is the Sphinx implementation of hop iterator which uses
@@ -92,12 +97,22 @@ func (r *sphinxHopIterator) HopPayload() (*Payload, error) {
 	case sphinx.PayloadTLV:
 		return NewPayloadFromReader(bytes.NewReader(
 			r.processedPacket.Payload.Payload,
-		))
+		), r.IsExitHop())
+		// QUESTION(9/21/22): We pass indication as to whether this is
+		// the final hop so that our parse-time validation function can
+		// enforce the appropriate BOLT-04 criteria. This does not seem
+		// the most clean. Should we still do validation at parse time?
 
 	default:
 		return nil, fmt.Errorf("unknown sphinx payload type: %v",
 			r.processedPacket.Payload.Type)
 	}
+}
+
+// IsExitHop leverages the processed sphinx packet's
+// 'Action' to distinguish whether we are the final hop.
+func (r *sphinxHopIterator) IsExitHop() bool {
+	return int(r.processedPacket.Action) == 0
 }
 
 // ExtractErrorEncrypter decodes and returns the ErrorEncrypter for this hop,

@@ -13,6 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Route Blinding: This may be an important test to modify
+//
 // TestSphinxHopIteratorForwardingInstructions tests that we're able to
 // properly decode an onion payload, no matter the payload type, into the
 // original set of forwarding instructions.
@@ -62,11 +64,15 @@ func TestSphinxHopIteratorForwardingInstructions(t *testing.T) {
 				},
 				Action:                 sphinx.MoreHops,
 				ForwardingInstructions: &hopData,
+				// NOTE(9/15/22): This field will only be populated iff the above Action is MoreHops.
 			},
 			expectedFwdInfo: expectedFwdInfo,
 		},
 		// A TLV payload, we can leave off the action as we'll always
 		// read the cid encoded.
+		// NOTE(9/15/22): The disconnect between sphinx and htlcswitch
+		// packages w.r.t determining the final/exit hop happened with
+		// the move to TLV payload?
 		{
 			sphinxPacket: &sphinx.ProcessedPacket{
 				Payload: sphinx.HopPayload{

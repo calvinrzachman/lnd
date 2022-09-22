@@ -318,6 +318,13 @@ func (s *mockServer) QuitSignal() <-chan struct{} {
 
 // mockHopIterator represents the test version of hop iterator which instead
 // of encrypting the path in onion blob just stores the path as a list of hops.
+// NOTE(10/23/22): This mockHopIterator is really not all that much like the
+// real hopIterator. I do not like the name of hopIterator. It is not as
+// intuitive an iterator like the watchtower's CandidateIterator or newly added
+// AddressIterator which do abstract lists of towers and addresses. The
+// hop "iterator" does not abstract a list of hops. A processing node does not
+// have access to the list of hops in a route. All he knows is his hop and those
+// which directly precede and follow his hop.
 type mockHopIterator struct {
 	hops []*hop.Payload
 }
@@ -328,8 +335,20 @@ func newMockHopIterator(hops ...*hop.Payload) hop.Iterator {
 
 func (r *mockHopIterator) HopPayload() (*hop.Payload, error) {
 	h := r.hops[0]
+	// IMPORTANT NOTE(10/23/22): Every time this method is called we peel
+	// off a layer of the onion and our hop iterator contains one less hop!
 	r.hops = r.hops[1:]
 	return h, nil
+}
+
+func (r *mockHopIterator) IsExitHop() bool {
+	fmt.Println("[mockHopIterator.IsExitHop()]: length of hop iterator: ", len(r.hops))
+	// When the last hop parses its TLV payload via call to HopPayload(),
+	// it will leave us with an empty hop iterator.
+	// We are relying on this method being called AFTER HopPayload().
+	// If this method is called BEFORE parsing the TLV payload then it will
+	// NOT correctly report that we are the final hop!
+	return len(r.hops) == 0
 }
 
 func (r *mockHopIterator) ExtraOnionBlob() []byte {
@@ -483,6 +502,7 @@ func (p *mockIteratorDecoder) DecodeHopIterator(r io.Reader, rHash []byte,
 		return nil, lnwire.CodeTemporaryChannelFailure
 	}
 	hopLength := binary.BigEndian.Uint32(b[:])
+	fmt.Println("[DecodeHopIterator]: hop length: ", hopLength)
 
 	hops := make([]*hop.Payload, hopLength)
 	for i := uint32(0); i < hopLength; i++ {
