@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
@@ -34,7 +35,9 @@ import (
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 	"github.com/lightningnetwork/lnd/lnwire"
+	"github.com/lightningnetwork/lnd/record"
 	"github.com/lightningnetwork/lnd/ticker"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -494,6 +497,462 @@ func TestChannelLinkSingleHopPayment(t *testing.T) {
 			n.bobChannelLink.Bandwidth())
 	}
 }
+
+// // generateBlindedHops creates the per hop payload, the total amount to be sent, and
+// // also the time lock value needed to route an HTLC with the target amount over
+// // the specified path.
+// func generateBlindedHops(payAmt lnwire.MilliSatoshi, startingHeight uint32,
+// 	path ...*channelLink) (lnwire.MilliSatoshi, uint32, []*hop.Payload) {
+
+// 	totalTimelock := startingHeight
+// 	runningAmt := payAmt
+
+// 	// introductionNodeBlindedHopPayload := []byte{
+// 	// 	// amount
+// 	// 	0x02, 0x01, 0x0b,
+// 	// 	// cltv
+// 	// 	0x04, 0x01, 0x11,
+// 	// 	// no unblinded next hop id in blinded portion of route
+// 	// 	// route blinding TLV data
+// 	// 	// recipient encrypted data
+// 	// 	0x0a, 0x0a,
+// 	// 	// blinded (todo) next hop id
+// 	// 	0x02, 0x08,
+// 	// 	0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+// 	// 	// blinding point
+// 	// 	0x0c, 0x21,
+// 	// 	0x02, 0xee, 0xc7, 0x24, 0x5d, 0x6b, 0x7d, 0x2c, 0xcb, 0x30, 0x38,
+// 	// 	0x0b, 0xfb, 0xe2, 0xa3, 0x64, 0x8c, 0xd7, 0xa9, 0x42, 0x65, 0x3f,
+// 	// 	0x5a, 0xa3, 0x40, 0xed, 0xce, 0xa1, 0xf2, 0x83, 0x68, 0x66, 0x19,
+// 	// }
+
+// 	// blindedHopPayload := []byte{
+// 	// 	// amount
+// 	// 	0x02, 0x01, 0x0b,
+// 	// 	// cltv
+// 	// 	0x04, 0x01, 0x11,
+// 	// 	// no unblinded next hop id in blinded portion of route
+// 	// 	// route blinding TLV data
+// 	// 	// recipient encrypted data
+// 	// 	0x0a, 0x0a,
+// 	// 	// byte(int(record.RouteBlindingEncryptedDataOnionType)), 0x0a,
+// 	// 	// 0xfe, 0x00, 0x0a, 0x00, 0x00, 0x0a,
+// 	// 	// blinded (todo) next hop id
+// 	// 	0x02, 0x08,
+// 	// 	0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+// 	// 	// No ephemeral blinding point in TLV onion payload for blinded hops.
+// 	// 	// This information is found in TLV extension to UpdateAddHTLC.
+// 	// }
+
+// 	hops := make([]*hop.Payload, len(path))
+// 	// introNodeBlindedHop, err := hop.NewPayloadFromReader(bytes.NewReader(introductionNodeBlindedHopPayload))
+// 	// if err != nil {
+// 	// 	return nil, err
+// 	// }
+// 	// blindedHop, err := hop.NewPayloadFromReader(bytes.NewReader(blindedHopPayload))
+// 	// hops[1] = introNodeBlindedHop
+// 	// hops[2] = blindedHop
+// 	introductionNodeBlindedHopPayload := &hop.Payload{
+// 		BlindingPoint: nil,
+// 	}
+// 	blindedHopPayload := &hop.Payload{
+// 		RouteBlindingEncryptedData: []byte{},
+// 	}
+// 	hops[1] = introductionNodeBlindedHopPayload
+// 	hops[2] = blindedHopPayload
+
+// 	for i := len(path) - 1; i >= 0; i-- {
+// 		// If this is the last hop, then the next hop is the special
+// 		// "exit node". Otherwise, we look to the "prior" hop.
+// 		nextHop := hop.Exit
+// 		if i != len(path)-1 {
+// 			nextHop = path[i+1].channel.ShortChanID()
+// 		}
+
+// 		var timeLock uint32
+// 		// If this is the last, hop, then the time lock will be their
+// 		// specified delta policy plus our starting height.
+// 		if i == len(path)-1 {
+// 			totalTimelock += testInvoiceCltvExpiry
+// 			timeLock = totalTimelock
+// 		} else {
+// 			// Otherwise, the outgoing time lock should be the
+// 			// incoming timelock minus their specified delta.
+// 			delta := path[i+1].cfg.FwrdingPolicy.TimeLockDelta
+// 			totalTimelock += delta
+// 			timeLock = totalTimelock - delta
+// 		}
+
+// 		// Finally, we'll need to calculate the amount to forward. For
+// 		// the last hop, it's just the payment amount.
+// 		amount := payAmt
+// 		if i != len(path)-1 {
+// 			prevHop := hops[i+1]
+// 			prevAmount := prevHop.ForwardingInfo().AmountToForward
+
+// 			fee := ExpectedFee(path[i].cfg.FwrdingPolicy, prevAmount)
+// 			runningAmt += fee
+
+// 			// Otherwise, for a node to forward an HTLC, then
+// 			// following inequality most hold true:
+// 			//     * amt_in - fee >= amt_to_forward
+// 			amount = runningAmt - fee
+// 		}
+
+// 		var nextHopBytes [8]byte
+// 		binary.BigEndian.PutUint64(nextHopBytes[:], nextHop.ToUint64())
+
+// 		// hops[i] = hop.NewLegacyPayload(&sphinx.HopData{
+// 		// 	Realm:         [1]byte{}, // hop.BitcoinNetwork
+// 		// 	NextAddress:   nextHopBytes,
+// 		// 	ForwardAmount: uint64(amount),
+// 		// 	OutgoingCltv:  timeLock,
+// 		// })
+// 		// For non-legacy payloads, we'll need to pack the
+// 		// routing information, along with any extra TLV
+// 		// information into the new per-hop payload format.
+// 		// We'll also pass in the chan ID of the hop this
+// 		// channel should be forwarded to so we can construct a
+// 		// valid payload.
+// 		// var b bytes.Buffer
+// 		// err := hop.PackHopPayload(&b, nextHop)
+// 		// if err != nil {
+// 		// 	return nil, err
+// 		// }
+
+// 		// TODO(roasbeef): make better API for NewHopPayload?
+// 		// payload, err := sphinx.NewHopPayload(nil, b.Bytes())
+// 		// if err != nil {
+// 		// 	return nil, err
+// 		// }
+
+// 		// payload.
+
+// 		// p, err := hop.NewPayloadFromReader()
+// 		// t.Logf("Parsed Hop Payload: %+v\n", p)
+// 		// if p != nil && p.BlindingPoint != nil {
+// 		// 	// t.Logf("Blinding Point Pointer in Parsed Hop Payload: %p\n", p.BlindingPoint)
+// 		// 	t.Logf("Blinding Point in Parsed Hop Payload: %+v\n", p.BlindingPoint.SerializeCompressed())
+
+// 		// }
+
+// 		// hops[i] = payload
+// 	}
+
+// 	return runningAmt, totalTimelock, hops
+// }
+
+// func testChannelLinkBlindedHopPayment(t *testing.T) {
+// 	t.Parallel()
+
+// 	channels, cleanUp, _, err := createClusterChannels(
+// 		btcutil.SatoshiPerBitcoin,
+// 		btcutil.SatoshiPerBitcoin)
+// 	if err != nil {
+// 		t.Fatalf("unable to create channel: %v", err)
+// 	}
+// 	defer cleanUp()
+
+// 	n := newThreeHopNetwork(t, channels.aliceToBob, channels.bobToAlice,
+// 		channels.bobToCarol, channels.carolToBob, testStartingHeight)
+
+// 	if err := n.start(); err != nil {
+// 		t.Fatal(err)
+// 	}
+// 	defer n.stop()
+
+// 	carolBandwidthBefore := n.carolChannelLink.Bandwidth()
+// 	firstBobBandwidthBefore := n.firstBobChannelLink.Bandwidth()
+// 	secondBobBandwidthBefore := n.secondBobChannelLink.Bandwidth()
+// 	aliceBandwidthBefore := n.aliceChannelLink.Bandwidth()
+
+// 	amount := lnwire.NewMSatFromSatoshis(btcutil.SatoshiPerBitcoin)
+// 	htlcAmt, totalTimelock, hops := generateHops(amount,
+// 		testStartingHeight,
+// 		n.firstBobChannelLink, n.carolChannelLink)
+
+// 	// Wait for:
+// 	// * HTLC add request to be sent from Alice to Bob.
+// 	// * Alice<->Bob commitment states to be updated.
+// 	// * HTLC add request to be propagated to Carol.
+// 	// * Bob<->Carol commitment state to be updated.
+// 	// * settle request to be sent back from Carol to Bob.
+// 	// * Alice<->Bob commitment state to be updated.
+// 	// * settle request to be sent back from Bob to Alice.
+// 	// * Alice<->Bob commitment states to be updated.
+// 	// * user notification to be sent.
+// 	receiver := n.carolServer
+// 	firstHop := n.firstBobChannelLink.ShortChanID()
+// 	rhash, err := makePayment(
+// 		n.aliceServer, n.carolServer, firstHop, hops, amount, htlcAmt,
+// 		totalTimelock,
+// 	).Wait(30 * time.Second)
+// 	if err != nil {
+// 		t.Fatalf("unable to send payment: %v", err)
+// 	}
+
+// 	// Wait for Alice and Bob's second link to receive the revocation.
+// 	time.Sleep(2 * time.Second)
+
+// 	// Check that Carol invoice was settled and bandwidth of HTLC
+// 	// links were changed.
+// 	invoice, err := receiver.registry.LookupInvoice(rhash)
+// 	if err != nil {
+// 		t.Fatalf("unable to get invoice: %v", err)
+// 	}
+// 	if invoice.State != channeldb.ContractSettled {
+// 		t.Fatal("carol invoice haven't been settled")
+// 	}
+
+// 	expectedAliceBandwidth := aliceBandwidthBefore - htlcAmt
+// 	if expectedAliceBandwidth != n.aliceChannelLink.Bandwidth() {
+// 		t.Fatalf("channel bandwidth incorrect: expected %v, got %v",
+// 			expectedAliceBandwidth, n.aliceChannelLink.Bandwidth())
+// 	}
+
+// 	expectedBobBandwidth1 := firstBobBandwidthBefore + htlcAmt
+// 	if expectedBobBandwidth1 != n.firstBobChannelLink.Bandwidth() {
+// 		t.Fatalf("channel bandwidth incorrect: expected %v, got %v",
+// 			expectedBobBandwidth1, n.firstBobChannelLink.Bandwidth())
+// 	}
+
+// 	expectedBobBandwidth2 := secondBobBandwidthBefore - amount
+// 	if expectedBobBandwidth2 != n.secondBobChannelLink.Bandwidth() {
+// 		t.Fatalf("channel bandwidth incorrect: expected %v, got %v",
+// 			expectedBobBandwidth2, n.secondBobChannelLink.Bandwidth())
+// 	}
+
+// 	expectedCarolBandwidth := carolBandwidthBefore + amount
+// 	if expectedCarolBandwidth != n.carolChannelLink.Bandwidth() {
+// 		t.Fatalf("channel bandwidth incorrect: expected %v, got %v",
+// 			expectedCarolBandwidth, n.carolChannelLink.Bandwidth())
+// 	}
+// }
+
+/*
+
+	Blinded Route
+
+	+-----------+		+-----------+		+-----------+		+-----------+
+	|	Alice	|		|	Bob		|		|	Carol	|		|	Dave	|
+	|			+-------+->			+-------+->			+-------+->			|
+	|	Sender  |		|	Intro	|		|  Blinded	|		| Recipient	|
+	+-----------+		+-----------+		+-----------+		+-----------+
+
+*/
+
+// TestChannelLinkProcessBlindHop verifies that the link supports route
+// blinding, namely that it can process an onion packet "sent" to its blinded
+// node ID public key rather than the usual persistent node ID public key,
+// and unblinded the next hop in the route.
+//
+// Check the Alice is able to process onions as a blinded hop and forward to Bob.
+// IMPORTANT NOTE: Testing this stuff gets complex pretty fast.
+
+// NOTE: This is likely to specific. We are interested in confirming that once an
+// HTLC is irrevocably committed, the inbound Channel Link acts in an "appropriate"
+// way to process the onion and forward it to the outbound link.
+// func TestChannelLinkProcessRemoteAdds(t *testing.T) {}
+//
+// Verify that the Link processess irrevocably committed HTLC updates (Add/Settle/Fail)
+// TODO(4/15/22): This is most certainly accomplished by existing test cases. Study these and
+// use them to help us verify correct blinded hop processing.
+// TODO(8/9/22): We likely need a unit test that processBlindHop and/or the
+// individual validation functions it calls properly adhere to the BOLT spec.
+// func TestChannelLinkProcessHTLCUpdates(t *testing.T) {
+func TestChannelLinkProcessBlindHop(t *testing.T) {
+
+	// const (
+	// 	chanAmt = btcutil.SatoshiPerBitcoin * 5
+	// )
+
+	// // We'll start by creating a new link with our chanAmt (5 BTC). We will
+	// // only be testing Alice's behavior, so the reference to Bob's channel
+	// // state is unnecessary.
+	// // aliceLink, _, batchTicker, start, cleanUp, restore, err :=
+	// aliceLink, bobChannel, _, start, cleanUp, _, err :=
+	// 	newSingleLinkTestHarness(chanAmt, 0)
+	// if err != nil {
+	// 	t.Fatalf("unable to create link: %v", err)
+	// }
+	// defer cleanUp()
+
+	// if err := start(); err != nil {
+	// 	t.Fatalf("unable to start test harness: %v", err)
+	// }
+
+	// var (
+	// 	mockBlob               [lnwire.OnionPacketSize]byte
+	// 	coreChan               = aliceLink.(*channelLink).channel
+	// 	coreLink               = aliceLink.(*channelLink)
+	// 	defaultCommitFee       = coreChan.StateSnapshot().CommitFee
+	// 	aliceStartingBandwidth = aliceLink.Bandwidth()
+	// 	aliceMsgs              = coreLink.cfg.Peer.(*mockPeer).sentMsgs
+	// )
+
+	// // coreLink.processRemoteAdds(fwdPkg *channeldb.FwdPkg, lockedInHtlcs []*lnwallet.PaymentDescriptor)
+	// coreLink.processRemoteAdds(&channeldb.FwdPkg{}, []*lnwallet.PaymentDescriptor{
+	// 	{
+	// 		OnionBlob: []byte{},
+	// 	},
+	// })
+	// coreLink.processBlindHop(pd*lnwallet.PaymentDescriptor, fwdInfo*hop.ForwardingInfo, payload*hop.Payload)
+
+	// NOTE(8/13/22): We need some unit tests which ensure that we are
+	// validating the route blinding payload properly.
+
+}
+func TestChannelLinkProcessBlindedHop(t *testing.T) {
+
+	const (
+		chanAmt = btcutil.SatoshiPerBitcoin * 5
+	)
+
+	// Setup a alice-bob network.
+	alice, bob, err := createTwoClusterChannels(
+		t, btcutil.SatoshiPerBitcoin*3, btcutil.SatoshiPerBitcoin*5,
+	)
+	if err != nil {
+		t.Fatalf("unable to create channel: %v", err)
+	}
+
+	n := newTwoHopNetwork(
+		t, alice.channel, bob.channel, testStartingHeight,
+	)
+	if err := n.start(); err != nil {
+		t.Fatal(err)
+	}
+	defer n.stop()
+
+	// Next, we'll create an HTLC worth 1 BTC that will be used as a dummy
+	// message for the test.
+	var mockBlob [lnwire.OnionPacketSize]byte
+	htlcAmt := lnwire.NewMSatFromSatoshis(btcutil.SatoshiPerBitcoin)
+	// _, htlc, _, err := generatePayment(htlcAmt, htlcAmt, 5, mockBlob)
+	// if err != nil {
+	// 	t.Fatalf("unable to create payment: %v", err)
+	// }
+	htlc := &lnwire.UpdateAddHTLC{
+		PaymentHash: [32]byte{},
+		Amount:      htlcAmt,
+		Expiry:      5,
+		OnionBlob:   mockBlob,
+	}
+
+	alice.channel.ReceiveHTLC(htlc)
+
+}
+
+// // We'll start by creating a new link with our chanAmt (5 BTC). We will
+// // only be testing Alice's behavior, so the reference to Bob's channel
+// // state is unnecessary.
+// // aliceLink, _, batchTicker, start, cleanUp, restore, err :=
+// aliceLink, bobChannel, batchTicker, start, cleanUp, _, err :=
+// 	newSingleLinkTestHarness(chanAmt, 0)
+// if err != nil {
+// 	t.Fatalf("unable to create link: %v", err)
+// }
+// defer cleanUp()
+
+// if err := start(); err != nil {
+// 	t.Fatalf("unable to start test harness: %v", err)
+// }
+
+// // alice := newPersistentLinkHarness(
+// // 	t, aliceLink, batchTicker, restore,
+// // )
+
+// // Next, we'll create an HTLC worth 1 BTC that will be used as a dummy
+// // message for the test.
+// var mockBlob [lnwire.OnionPacketSize]byte
+// htlcAmt := lnwire.NewMSatFromSatoshis(btcutil.SatoshiPerBitcoin)
+// // _, htlc, _, err := generatePayment(htlcAmt, htlcAmt, 5, mockBlob)
+// // if err != nil {
+// // 	t.Fatalf("unable to create payment: %v", err)
+// // }
+
+// htlc := &lnwire.UpdateAddHTLC{
+// 	PaymentHash: [32]byte{},
+// 	Amount:      htlcAmt,
+// 	Expiry:      5,
+// 	OnionBlob:   mockBlob,
+// }
+
+// bobChannel.ReceiveHTLC(htlc)
+// t.Log("hi", aliceLink, batchTicker, htlc)
+
+// func TestChannelLinkBlindedHop(t *testing.T) {
+// 	t.Parallel()
+
+// 	var startingHeight uint32
+
+// 	aliceDb := aliceChannel.State().Db.GetParentDB()
+// 	bobDb := firstBobChannel.State().Db.GetParentDB()
+// 	carolDb := carolChannel.State().Db.GetParentDB()
+
+// 	// Create three peers/servers.
+// 	aliceServer, err := newMockServer(
+// 		t, "alice", startingHeight, aliceDb, hopNetwork.defaultDelta,
+// 	)
+// 	if err != nil {
+// 		t.Fatalf("unable to create alice server: %v", err)
+// 	}
+// 	bobServer, err := newMockServer(
+// 		t, "bob", startingHeight, bobDb, hopNetwork.defaultDelta,
+// 	)
+// 	if err != nil {
+// 		t.Fatalf("unable to create bob server: %v", err)
+// 	}
+// 	carolServer, err := newMockServer(
+// 		t, "carol", startingHeight, carolDb, hopNetwork.defaultDelta,
+// 	)
+// 	if err != nil {
+// 		t.Fatalf("unable to create carol server: %v", err)
+// 	}
+
+// 	// First, we'll create our traditional three hop network. We'll only be
+// 	// interacting with and asserting the state of two of the end points
+// 	// for this test.
+// 	channels, cleanUp, _, err := createClusterChannels(
+// 		btcutil.SatoshiPerBitcoin*3,
+// 		btcutil.SatoshiPerBitcoin*5)
+// 	if err != nil {
+// 		t.Fatalf("unable to create channel: %v", err)
+// 	}
+// 	defer cleanUp()
+
+// 	// n := newThreeHopNetwork(t, channels.aliceToBob, channels.bobToAlice,
+// 	// 	channels.bobToCarol, channels.carolToBob, testStartingHeight)
+// 	// if err := n.start(); err != nil {
+// 	// 	t.Fatalf("unable to start three hop network: %v", err)
+// 	// }
+// 	// defer n.stop()
+
+// 	// // carolBandwidthBefore := n.carolChannelLink.Bandwidth()
+// 	// // firstBobBandwidthBefore := n.firstBobChannelLink.Bandwidth()
+// 	// // secondBobBandwidthBefore := n.secondBobChannelLink.Bandwidth()
+// 	// // aliceBandwidthBefore := n.aliceChannelLink.Bandwidth()
+
+// 	// // We'll request a route to send 10k satoshis via Alice -> Bob ->
+// 	// // Carol.
+// 	// amount := lnwire.NewMSatFromSatoshis(btcutil.SatoshiPerBitcoin)
+// 	// htlcAmt, totalTimelock, hops := generateHops(
+// 	// 	amount, testStartingHeight,
+// 	// 	n.firstBobChannelLink, n.carolChannelLink,
+// 	// )
+
+// 	// // When we actually go to send the payment, we'll actually create an
+// 	// // invoice at Carol for only half of this amount.
+// 	// receiver := n.carolServer
+// 	// firstHop := n.firstBobChannelLink.ShortChanID()
+// 	// rhash, err := makePayment(
+// 	// 	n.aliceServer, n.carolServer, firstHop, hops, amount/2, htlcAmt,
+// 	// 	totalTimelock,
+// 	// ).Wait(30 * time.Second)
+// 	// if err != nil {
+// 	// 	t.Fatalf("unable to send payment: %v", err)
+// 	// }
+// }
 
 // TestChannelLinkMultiHopPayment checks the ability to send payment over two
 // hops. In this test we send the payment from Carol to Alice over Bob peer.
@@ -6557,5 +7016,641 @@ func assertFailureCode(t *testing.T, err error, code lnwire.FailCode) {
 	if rtErr.WireMessage().Code() != code {
 		t.Fatalf("expected %v but got %v",
 			code, rtErr.WireMessage().Code())
+	}
+}
+
+// TestBlindedHop verifies that the Channel Link
+// can process hops in a blinded route.
+func TestProcessBlindedHop(t *testing.T) {
+
+	// Receive an UpdateAddHTLC
+	// Peel off Blinding Point
+	// Decrypt Onion
+	// Forward?
+}
+
+// NOTE(9/8/22): If a hop is part of a blinded route we have
+// another set of BOLT-04 validation criteria.
+// We now have validation to do across two levels of TLV payloads
+// (top level onion TLV payload & route blinding TLV payload) and the contents
+// of the UpdateAddHTLC message. What is present in one payload effects our
+// expectation of what is present in the other payload.
+type validateOnionPayloadTest struct {
+	name string
+	// payload       []byte
+	parsedPayload *hop.Payload
+	// This would assume the route blinding TLV payload
+	// as already been extracted from the top level onion TLV payload.
+	// routeBlindingPayload []byte
+	// This would assume the route blinding TLV payload
+	// as already been parsed into a hop.BlindPayload{} struct.
+	parsedRouteBlindingPayload *hop.BlindHopPayload
+	// The internal representation of the information contained
+	// in the update message for this htlc (UpdateAddHTLC).
+	// Decide which is better to use for the test.
+	updateAddHtlc lnwallet.PaymentDescriptor
+	// UpdateAddHTLC lnwire.UpdateAddHTLC
+	expectedErr error
+	errExpected bool
+	isFinalHop  bool // NOTE(9/16/22): determined by sphinx package before TLVs are parsed!
+}
+
+// IDEA(9/10/22): populate these maps and use these to fill
+// out test cases. Is this any better than a giant switch statement?
+// var topLevelOnionPayloadFlavors map[string]*hop.Payload
+// var routeBlindingPayloadFlavors map[string]*hop.BlindHopPayload
+
+/*
+
+	Test to create:
+	- well formed intro, intermediate, final blind hops
+	- one without payment relay
+	- final without pathID
+	- everything set
+	- intro without blinding point
+	- with, w/o blinding point override
+	- top level blinding point for non-intro node (ex: final)
+	- insufficient amount
+	- insufficient timelock (ie: blind route expired)
+
+	Do we need the separate test function just for route blinding payloads?
+
+*/
+
+var validateOnionPayloadTests = []validateOnionPayloadTest{
+	{
+		name:                       "introduction node blinded route",
+		parsedPayload:              generatePayload("intro"),
+		parsedRouteBlindingPayload: generateBlindPayload("intro"),
+	},
+	{
+		name:                       "intermediate hop blinded route w/ next hop",
+		parsedPayload:              generatePayload("intermediate"),
+		parsedRouteBlindingPayload: generateBlindPayload("intermediate"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{}, // intermediate node receives blinding point in update message
+		},
+	},
+	{
+		name:                       "final hop blinded route",
+		parsedPayload:              generatePayload("final"),
+		parsedRouteBlindingPayload: generateBlindPayload("final"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{}, // final node receives blinding point in update message
+		},
+		isFinalHop: true,
+	},
+	{
+		name:                       "blind hop with blinding point in both msg and tlv payload", // error case
+		parsedPayload:              generatePayload("intro"),
+		parsedRouteBlindingPayload: generateBlindPayload("intro"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{},
+		},
+		// TODO(9/10/22): figure out how to confirm correct errors.
+		// We have 3 separate TLV BOLT-04 validation functions.
+		// Depending on the setup, we exect an error any one of them.
+		errExpected: true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.BlindingPointOnionType,
+			Violation: hop.OverloadedViolation,
+		},
+	},
+	{
+		name:                       "blind hop missing blinding point in msg and tlv payload", // error case
+		parsedPayload:              generatePayload("coal"),
+		parsedRouteBlindingPayload: generateBlindPayload("coal"),
+		updateAddHtlc:              lnwallet.PaymentDescriptor{},
+		errExpected:                true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.BlindingPointOnionType,
+			Violation: hop.OmittedViolation,
+		},
+	},
+	// {
+	// 	name:                       "blind hop missing payment_relay", // error case (covered at parse time!!)
+	// 	parsedPayload:              generatePayload("intermediate"),
+	// 	parsedRouteBlindingPayload: generateBlindPayload("unsatisfiable-constraints"),
+	// 	updateAddHtlc: lnwallet.PaymentDescriptor{
+	// 		BlindingPoint: &btcec.PublicKey{},
+	// 	},
+	// 	// errExpected: true,
+	// },
+	{
+		name:                       "blind hop payment_relay which fails to meet constraints", // error case
+		parsedPayload:              generatePayload("intermediate"),
+		parsedRouteBlindingPayload: generateBlindPayload("unsatisfiable-constraints"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{},
+		},
+		errExpected: true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.AmtOnionType,
+			Violation: hop.InsufficientViolation,
+		},
+	},
+	{
+		name:          "blind hop payment_relay fails to meet constraints - expired", // error case
+		parsedPayload: generatePayload("intermediate"),
+		parsedRouteBlindingPayload: func() *hop.BlindHopPayload {
+			pld := generateBlindPayload("unsatisfiable-constraints")
+			pld.PaymentConstraints.MaxCltvExpiryDelta = 100
+			return pld
+		}(),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{},
+			Timeout:       101,
+		},
+		errExpected: true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.LockTimeOnionType,
+			Violation: hop.InsufficientViolation,
+		},
+	},
+	{
+		name:                       "blind hop with amt_to_forward improperly set in top level TLV payload", // error case
+		parsedPayload:              generatePayload("intermediate + forward info"),
+		parsedRouteBlindingPayload: generateBlindPayload("intermediate"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{},
+		},
+		errExpected: true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.AmtOnionType,
+			Violation: hop.IncludedViolation,
+		},
+	},
+	{
+		name: "blind hop with timelock improperly set in top level TLV payload", // error case
+		parsedPayload: func() *hop.Payload {
+			pld := generatePayload("intermediate")
+			pld.FwdInfo.OutgoingCTLV = 1000
+			return pld
+		}(),
+		parsedRouteBlindingPayload: generateBlindPayload("intermediate"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{},
+		},
+		errExpected: true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.LockTimeOnionType,
+			Violation: hop.IncludedViolation,
+		},
+	},
+	{
+		name: "blind hop with short_channel_id improperly set in top level TLV payload", // error case
+		parsedPayload: func() *hop.Payload {
+			pld := generatePayload("intermediate")
+			pld.FwdInfo.NextHop = lnwire.NewShortChanIDFromInt(1)
+			return pld
+		}(),
+		parsedRouteBlindingPayload: generateBlindPayload("intermediate"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{},
+		},
+		errExpected: true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.NextHopOnionType,
+			Violation: hop.IncludedViolation,
+		},
+	},
+	{
+		name: "blind hop with MPP improperly set in top level TLV payload", // error case
+		parsedPayload: &hop.Payload{
+			RouteBlindingEncryptedData: []byte{},
+			MPP:                        &record.MPP{},
+		},
+		parsedRouteBlindingPayload: generateBlindPayload("intermediate"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{},
+		},
+		errExpected: true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.MPPOnionType,
+			Violation: hop.IncludedViolation,
+		},
+	},
+	{
+		name: "blind hop with AMP improperly set in top level TLV payload", // error case
+		parsedPayload: &hop.Payload{
+			RouteBlindingEncryptedData: []byte{},
+			AMP:                        &record.AMP{},
+		},
+		parsedRouteBlindingPayload: generateBlindPayload("intermediate"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{},
+		},
+		errExpected: true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.AMPOnionType,
+			Violation: hop.IncludedViolation,
+		},
+	},
+	// {
+	// 	name: "blind hop with metadata improperly set in top level TLV payload", // error case
+	// 	parsedPayload: &hop.Payload{
+	// 		RouteBlindingEncryptedData: []byte{},
+	// 	},
+	// 	parsedRouteBlindingPayload: generateBlindPayload("intermediate"),
+	// 	updateAddHtlc: lnwallet.PaymentDescriptor{
+	// 		BlindingPoint: &btcec.PublicKey{},
+	// 	},
+	// 	errExpected:                 true,
+	// },
+	{
+		name: "blind hop with total_amount_msat improperly set in top level TLV payload", // error case
+		parsedPayload: &hop.Payload{
+			RouteBlindingEncryptedData: []byte{},
+			TotalAmountMsat:            lnwire.MilliSatoshi(100),
+		},
+		parsedRouteBlindingPayload: generateBlindPayload("intermediate"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{},
+		},
+		errExpected: true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.TotalAmountMsatOnionType,
+			Violation: hop.IncludedViolation,
+		},
+	},
+	{
+		name: "final hop blinded route missing amt in top level TLV payload",
+		parsedPayload: func() *hop.Payload {
+			pld := generatePayload("final")
+			pld.FwdInfo.AmountToForward = lnwire.MilliSatoshi(0)
+			return pld
+		}(),
+		parsedRouteBlindingPayload: generateBlindPayload("final"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{}, // final node receives blinding point in update message
+		},
+		errExpected: true,
+		isFinalHop:  true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.AmtOnionType,
+			Violation: hop.OmittedViolation,
+			FinalHop:  true,
+		},
+	},
+	{
+		name: "final hop blinded route missing outgoing_cltv_value in top level TLV payload",
+		parsedPayload: func() *hop.Payload {
+			pld := generatePayload("final")
+			pld.FwdInfo.OutgoingCTLV = 0
+			return pld
+		}(),
+		parsedRouteBlindingPayload: generateBlindPayload("final"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{}, // final node receives blinding point in update message
+		},
+		errExpected: true,
+		isFinalHop:  true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.LockTimeOnionType,
+			Violation: hop.OmittedViolation,
+			FinalHop:  true,
+		},
+	},
+	// NOTE(10/8/22): I am not sure the following test cases add much value.
+	// {
+	// 	name:                       "top and RB christmas payload",
+	// 	parsedPayload:              generatePayload("christmas"),
+	// 	parsedRouteBlindingPayload: generateBlindPayload("christmas"),
+	// 	updateAddHtlc: lnwallet.PaymentDescriptor{
+	// 		BlindingPoint: &btcec.PublicKey{}, // final node receives blinding point in update message
+	// 	},
+	// 	errExpected: true,
+	// 	// isFinalHop:  true,
+	// 	// expectedErr: hop.ErrInvalidPayload{
+	// 	// 	Type:      record.LockTimeOnionType,
+	// 	// 	Violation: hop.OmittedViolation,
+	// 	// 	FinalHop:  true,
+	// 	// },
+	// },
+	{
+		name:                       "intro w/ christmas RB payload",
+		parsedPayload:              generatePayload("intro"),
+		parsedRouteBlindingPayload: generateBlindPayload("christmas"),
+		updateAddHtlc:              lnwallet.PaymentDescriptor{},
+	},
+	{
+		name: "intro node is last node",
+		parsedPayload: func() *hop.Payload {
+			pld := generatePayload("intro")
+			// The sender must add
+			pld.FwdInfo.AmountToForward = lnwire.MilliSatoshi(100)
+			pld.FwdInfo.OutgoingCTLV = 100
+			return pld
+		}(),
+		parsedRouteBlindingPayload: generateBlindPayload("final"),
+		updateAddHtlc:              lnwallet.PaymentDescriptor{},
+		isFinalHop:                 true,
+	},
+	{
+		name:                       "intermediate w/ christmas RB payload",
+		parsedPayload:              generatePayload("intermediate"),
+		parsedRouteBlindingPayload: generateBlindPayload("christmas"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{},
+		},
+	},
+	{
+		name:                       "final w/ christmas RB payload",
+		parsedPayload:              generatePayload("final"),
+		parsedRouteBlindingPayload: generateBlindPayload("christmas"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{},
+		},
+		isFinalHop: true,
+	},
+}
+
+// generateBlindPayload creates a variety of route blinding TLV payloads.
+func generateBlindPayload(typ string) *hop.BlindHopPayload {
+	var blindPayload *hop.BlindHopPayload
+
+	switch typ {
+	case "intro":
+		blindPayload = &hop.BlindHopPayload{
+			Padding: []byte{0, 0, 0, 0},
+			NextHop: lnwire.NewShortChanIDFromInt(1),
+			PaymentRelay: &record.PaymentRelay{
+				CltvExpiryDelta: 0,
+				FeeRate:         0,
+				BaseFee:         100,
+			},
+			PaymentConstraints: &record.PaymentConstraints{
+				MaxCltvExpiryDelta: 1000,
+				HtlcMinimumMsat:    0,
+				// AllowedFeatures: []byte,
+			},
+		}
+
+	case "intermediate":
+		blindPayload = &hop.BlindHopPayload{
+			Padding: []byte{0, 0, 0, 0},
+			NextHop: lnwire.NewShortChanIDFromInt(1),
+			PaymentRelay: &record.PaymentRelay{
+				CltvExpiryDelta: 0,
+				FeeRate:         0,
+				BaseFee:         100,
+			},
+			PaymentConstraints: &record.PaymentConstraints{
+				MaxCltvExpiryDelta: 1000,
+				HtlcMinimumMsat:    0,
+				// AllowedFeatures: []byte,
+			},
+		}
+
+	case "final":
+		blindPayload = &hop.BlindHopPayload{
+			Padding: []byte{0, 0, 0, 0},
+			PathID:  []byte{0xff, 0x00, 0xff, 0x00},
+			PaymentConstraints: &record.PaymentConstraints{
+				MaxCltvExpiryDelta: 1000,
+				HtlcMinimumMsat:    0,
+				// AllowedFeatures: []byte,
+			},
+		}
+
+	case "christmas":
+		blindPayload = &hop.BlindHopPayload{
+			Padding:               []byte{0, 0, 0, 0},
+			NextHop:               lnwire.NewShortChanIDFromInt(1),
+			NextNodeID:            &btcec.PublicKey{},
+			PathID:                []byte{0xff, 0x00, 0xff, 0x00},
+			BlindingPointOverride: &btcec.PublicKey{},
+			PaymentRelay: &record.PaymentRelay{
+				CltvExpiryDelta: 0,
+				FeeRate:         0,
+				BaseFee:         100,
+			},
+			PaymentConstraints: &record.PaymentConstraints{
+				MaxCltvExpiryDelta: 1000,
+				HtlcMinimumMsat:    0,
+				// AllowedFeatures: []byte,
+			},
+		}
+
+	case "unsatisfiable-constraints":
+		blindPayload = &hop.BlindHopPayload{
+			Padding: []byte{0, 0, 0, 0},
+			NextHop: lnwire.NewShortChanIDFromInt(1),
+			PaymentRelay: &record.PaymentRelay{
+				CltvExpiryDelta: 0,
+				FeeRate:         0,
+				BaseFee:         100,
+			},
+			PaymentConstraints: &record.PaymentConstraints{
+				MaxCltvExpiryDelta: 0,
+				HtlcMinimumMsat:    ^uint64(0), // max value
+				// AllowedFeatures: []byte,
+			},
+		}
+
+	case "coal":
+		blindPayload = &hop.BlindHopPayload{
+			Padding: []byte{0, 0, 0, 0},
+		}
+
+	default:
+		blindPayload = nil
+	}
+
+	return blindPayload
+}
+
+// var pubkeyHex = "02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619"
+// const testPublicKey = btcec.PublicKeyFromHex("02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619")
+
+// generatePayload creates a variety of top level onion TLV payloads.
+func generatePayload(typ string) *hop.Payload {
+	var hopPayload *hop.Payload
+	pubkeyBytes, _ := hex.DecodeString("02bedd1e7865e7476f522b02b13f137f418105154312b48c45985dd72cbf47c143")
+	pubKey, _ := btcec.ParsePubKey(pubkeyBytes)
+
+	switch typ {
+	case "intro":
+		hopPayload = &hop.Payload{
+			RouteBlindingEncryptedData: []byte{},
+			BlindingPoint:              pubKey,
+		}
+
+	case "intermediate":
+		hopPayload = &hop.Payload{
+			RouteBlindingEncryptedData: []byte{},
+		}
+
+	case "final":
+		hopPayload = &hop.Payload{
+			FwdInfo: hop.ForwardingInfo{
+				NextHop:         hop.Exit,
+				AmountToForward: lnwire.MilliSatoshi(100),
+				OutgoingCTLV:    1000,
+			},
+			RouteBlindingEncryptedData: []byte{},
+		}
+
+	case "intermediate + forward info":
+		hopPayload = &hop.Payload{
+			FwdInfo: hop.ForwardingInfo{
+				NextHop:         lnwire.NewShortChanIDFromInt(1),
+				AmountToForward: lnwire.MilliSatoshi(100),
+			},
+			RouteBlindingEncryptedData: []byte{},
+		}
+
+	case "christmas":
+		hopPayload = &hop.Payload{
+			FwdInfo: hop.ForwardingInfo{
+				NextHop:         lnwire.NewShortChanIDFromInt(1),
+				AmountToForward: lnwire.MilliSatoshi(100),
+			},
+			RouteBlindingEncryptedData: []byte{},
+			BlindingPoint:              &btcec.PublicKey{},
+		}
+
+	case "coal":
+		hopPayload = &hop.Payload{
+			RouteBlindingEncryptedData: []byte{},
+		}
+
+	default:
+		hopPayload = nil
+	}
+
+	return hopPayload
+}
+
+// TestHopPayloadRecordValidation...
+// NOTE(9/16/22): This test validates both top level onion TLV payload
+// and route blinding TLV payload conform to the BOLT-04 specification.
+func TestHopPayloadRecordValidation(t *testing.T) {
+	for _, test := range validateOnionPayloadTests {
+		t.Run(test.name, func(t *testing.T) {
+			testTopLevelPayloadValidation(t, test)
+			// testRouteBlindingPayloadValidation(t, test)
+			// testRouteBlindingConstraintsValidation(t, test)
+		})
+	}
+}
+
+func testTopLevelPayloadValidation(t *testing.T, test validateOnionPayloadTest) {
+	// func testTopLevelPayloadValidation(t *testing.T, test validateOnionPayloadTest, expErr error) {
+
+	// Parse the hop payload.
+	// NOTE(9/10/22): Since we don't need to double test parsing the hop
+	// payload, might our test just handle pre-parsed payloads (ie: hop.Payload{})?
+
+	errTop := ValidateTopLevelPayloadRouteBlinding(test.parsedPayload, &test.updateAddHtlc)
+	errRB := ValidateRouteBlindingPayload(test.parsedRouteBlindingPayload, test.parsedPayload, test.isFinalHop)
+
+	// NOTE(9/10/22): We need to compute the route blinding forwarding
+	// parameters using the payment relay in order to test this function.
+	// Might this be aided by the presence of a new struct which encapsulates
+	// the payment relay information?
+	// UPDATE(9/15/22): We learned from t-bast that we validate these
+	// constraints against the values in the incoming HTLC!
+	errPC := ValidateRouteBlindingPaymentConstraints(test.parsedRouteBlindingPayload, &test.updateAddHtlc)
+
+	// NOTE(9/10/22): We cannot parse after each validation with
+	// a single flag for expected errors. We can parse once at the end?
+	var err error
+	parseError := func(err error) {
+		if test.errExpected && err == nil { // incorrect
+			t.Fatalf("expected error mismatch, want: %t, got: %v",
+				test.errExpected, err)
+		}
+		if test.errExpected && err != nil { // correct
+			t.Logf("expected error match!, want: %t, got: %v",
+				test.errExpected, err)
+		}
+		if !test.errExpected && err != nil { // incorrect
+			t.Fatalf("expected error mismatch, want: %t, got: %v",
+				test.errExpected, err)
+		}
+		if !test.errExpected && err == nil { // correct
+			t.Logf("expected error match!, want: %t, got: %v",
+				test.errExpected, err)
+		}
+
+		// Confirm that validation provides the expected error
+		// as it enforces BOLT-04.
+		if err != test.expectedErr {
+			t.Fatalf("expected error mismatch, want: %v, got: %v",
+				test.expectedErr, err)
+		}
+
+		// Don't check for error again.
+		test.errExpected = false
+	}
+
+	if errTop != nil {
+		err = errTop
+	}
+	if errRB != nil {
+		err = errRB
+	}
+	if errPC != nil {
+		err = errPC
+	}
+	parseError(err)
+
+}
+
+// TODO(10/16/22): Compare the two methods of computing the amount to forward.
+func TestComputeAmountToForward(t *testing.T) {
+
+	testCases := []struct {
+		name               string
+		incomingAmt        lnwire.MilliSatoshi
+		expectedAmt        lnwire.MilliSatoshi
+		paymentRelayParams record.PaymentRelay
+	}{
+		{
+			name:        "no fees",
+			incomingAmt: 100,
+			expectedAmt: 100,
+		},
+		{
+			name:        "base fee",
+			incomingAmt: 100,
+			expectedAmt: 75,
+			paymentRelayParams: record.PaymentRelay{
+				BaseFee: 25,
+				FeeRate: 0,
+			},
+		},
+		{
+			name:        "fee rate",
+			incomingAmt: 100,
+			expectedAmt: 91, // 91
+			paymentRelayParams: record.PaymentRelay{
+				FeeRate: 100000,
+			},
+		},
+		{
+			name:        "base + fee rate",
+			incomingAmt: 100,
+			expectedAmt: 69, // 69
+			paymentRelayParams: record.PaymentRelay{
+				BaseFee: 25,
+				FeeRate: 100000,
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+
+			amtToForward := computeAmountToForward(
+				tc.incomingAmt, &tc.paymentRelayParams,
+			)
+			assert.Equal(t, tc.expectedAmt, amtToForward,
+				"wanted: %d, got: %d",
+				tc.expectedAmt, amtToForward,
+			)
+		})
+
 	}
 }

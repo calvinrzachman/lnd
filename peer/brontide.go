@@ -337,8 +337,12 @@ type Config struct {
 	// from the peer.
 	HandleCustomMessage func(peer [33]byte, msg *lnwire.Custom) error
 
+	// NOTE(9/25/22): These first class functions enable the peer package
+	// to be configured from the outside.
 	// GetAliases is passed to created links so the Switch and link can be
 	// aware of the channel's aliases.
+	// NOTE(9/25/22): Strictly passed through peer package (by lnd server)
+	// to htlcswitch package (link)
 	GetAliases func(base lnwire.ShortChannelID) []lnwire.ShortChannelID
 
 	// RequestAlias allows the Brontide struct to request an alias to send
@@ -986,6 +990,19 @@ func (p *Brontide) addLink(chanPoint *wire.OutPoint,
 		HtlcNotifier:            p.cfg.HtlcNotifier,
 		GetAliases:              p.cfg.GetAliases,
 		NodeKeyECDH:             p.cfg.NodeKeyECDH,
+		// DecryptBlindedPayload: func(nodeID keychain.SingleKeyECDH, blindingPoint *btcec.PublicKey,
+		// 	payload []byte) ([]byte, error) {
+		// 	return sphinx.DecryptBlindedData(
+		// 		nodeID, blindingPoint, payload,
+		// 	)
+		// },
+		// NextBlindingPoint: func(nodeID keychain.SingleKeyECDH, blindingPoint *btcec.PublicKey) (
+		// 	*btcec.PublicKey, error) {
+		// 	// NOTE(8/8/22): We have pulled the sphinx dependency
+		// 	// out of 'htlcswitch' only to depend on it here?
+		// 	// To what end?
+		// 	return sphinx.NextEphemeral(nodeID, blindingPoint)
+		// },
 	}
 
 	// Before adding our new link, purge the switch of any pending or live

@@ -1,9 +1,11 @@
 package htlcswitch
 
 import (
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/invoices"
+	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/lightningnetwork/lnd/lnpeer"
 	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwallet"
@@ -67,6 +69,37 @@ type dustHandler interface {
 	// getDustClosure returns a closure that can evaluate whether a passed
 	// HTLC is dust.
 	getDustClosure() dustClosure
+}
+
+// NOTE(9/25/22): We could define a blindHopProcessor interface here.
+// Be careful when modeling any interface for route blinding after below.
+// The interface for scidAliasHandler does not define the interface between
+// two packages? To export or not to export?
+
+// blindHopProcessor provides the functionality necessary for
+// the channel link to process hops as part of a blinded route.
+//
+// NOTE(10/18/22): This abstracts the route blinding functionality.
+// This handles the functionality which directly comprises
+// the interface between ChannelLink and Sphinx packages ONLY.
+// The use of an interface helps avoid a sphinx dependency.
+// Validation of what the BlindHopProcessor provides is still performed
+// "link side" (of the interface).
+type blindHopProcessor interface {
+	// // DeriveBlindingFactor...
+	// // Note(8/8/22): This is not needed with Elle's current implementation.
+	// DeriveBlindingFactor(*btcec.PrivateKey, *btcec.PublicKey) (
+	// 	*btcec.PrivateKey, error)
+
+	// DecryptBlindedPayload decrypts the route blinding payload.
+	DecryptBlindedPayload(nodeID keychain.SingleKeyECDH, blindingPoint *btcec.PublicKey,
+		payload []byte) ([]byte, error)
+
+	// NextBlindingPoint computes the ephemeral blinding point
+	// that the next hop (our downstream peer) in a blinded route
+	// will need in order to decrypt the onion.
+	NextBlindingPoint(keychain.SingleKeyECDH, *btcec.PublicKey) (
+		*btcec.PublicKey, error)
 }
 
 // scidAliasHandler is an interface that the ChannelLink implements so it can
@@ -137,6 +170,11 @@ type ChannelUpdateHandler interface {
 	// close negotiation which require a clean channel state.
 	ShutdownIfChannelClean() error
 }
+
+// NOTE(9/25/22): Although the ChannelLink and Switch structs were deemed
+// similar enough to place in the same package (for good reason),
+// this interface defines the connection between the two. The Switch expects
+// certain functionality from its links.
 
 // ChannelLink is an interface which represents the subsystem for managing the
 // incoming htlc requests, applying the changes to the channel, and also

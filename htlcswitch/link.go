@@ -9,11 +9,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btclog"
 	"github.com/davecgh/go-spew/spew"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/go-errors/errors"
+
 	"github.com/lightningnetwork/lnd/build"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/contractcourt"
@@ -27,6 +30,7 @@ import (
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/queue"
+	"github.com/lightningnetwork/lnd/record"
 	"github.com/lightningnetwork/lnd/ticker"
 )
 
@@ -154,6 +158,23 @@ type ChannelLinkConfig struct {
 	// are always presented for the same identifier.
 	DecodeHopIterators func([]byte, []hop.DecodeHopIteratorRequest) (
 		[]hop.DecodeHopIteratorResponse, error)
+
+	// // DeriveBlindingFactor...
+	// DeriveBlindingFactor func(*btcec.PrivateKey, *btcec.PublicKey) (
+	// 	*btcec.PrivateKey, error)
+
+	// // DecryptBlindedPayload...
+	// // QUESTION(4/9/22): Should we avoid sphinx dependency? If so, why?
+	// DecryptBlindedPayload func(nodeID keychain.SingleKeyECDH, blindingPoint *btcec.PublicKey,
+	// 	payload []byte) ([]byte, error)
+
+	// // NextBlindingPoint provides
+	// NextBlindingPoint func(nodeID keychain.SingleKeyECDH, blindingPoint *btcec.PublicKey) (
+	// 	*btcec.PublicKey, error)
+
+	// blindHopProcessor provides the functionality necessary for
+	// the channel link to process hops as part of a blinded route.
+	blindHopProcessor
 
 	// ExtractErrorEncrypter function is responsible for decoding HTLC
 	// Sphinx onion blob, and creating onion failure obfuscator.
@@ -1822,6 +1843,10 @@ func (l *channelLink) handleUpstreamMsg(msg lnwire.Message) {
 			failure = &lnwire.FailInvalidOnionKey{
 				OnionSHA256: msg.ShaOnionBlob,
 			}
+
+		case lnwire.CodeInvalidOnionBlinding:
+			failure = lnwire.NewInvalidOnionBlinding(msg.ShaOnionBlob[:])
+
 		default:
 			l.log.Warnf("unexpected failure code received in "+
 				"UpdateFailMailformedHTLC: %v", msg.FailureCode)
@@ -2405,6 +2430,11 @@ func dustHelper(chantype channeldb.ChannelType, localDustLimit,
 	return isDust
 }
 
+// NOTE(9/25/22): The ChannelLink is implementing a private interface called
+// 'scidAliasHandler'. Being private/internal, this is NOT an interface
+// defining the connection between two packages (is this true?).
+// That is we are adding the functions as methods/member functions
+
 // zeroConfConfirmed returns whether or not the zero-conf channel has
 // confirmed on-chain.
 //
@@ -2893,6 +2923,12 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 				OnionReader:  onionReader,
 				RHash:        pd.RHash[:],
 				IncomingCltv: pd.Timeout,
+				// If this HTLC has an ephemeral blinding point,
+				// it will be needed to decrypt the onion as the
+				// onion encryptor is expected to have encrypted
+				// the onion to a blinded form of our node ID,
+				// rather than to our persistent node ID.
+				BlindingPoint: pd.BlindingPoint,
 			}
 
 			decodeReqs = append(decodeReqs, req)
@@ -2954,6 +2990,8 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 				"iterator: %v", failureCode)
 			continue
 		}
+		// action := chanIterator.IsExitHop()
+		// l.log.Debugf("Sphinx packet decode action: %d", action)
 
 		// Retrieve onion obfuscator from onion blob in order to
 		// produce initial obfuscation of the onion failureCode.
@@ -2976,6 +3014,7 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 		heightNow := l.cfg.BestHeight()
 
 		pld, err := chanIterator.HopPayload()
+		l.log.Debugf("[processRemoteAdds()]: parsed top level onion tlv payload: %+v", pld)
 		if err != nil {
 			// If we're unable to process the onion payload, or we
 			// received invalid onion payload failure, then we
@@ -3004,8 +3043,57 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 
 		fwdInfo := pld.ForwardingInfo()
 
-		switch fwdInfo.NextHop {
-		case hop.Exit:
+		var nextBlindingPoint *btcec.PublicKey
+		var blindPayload *hop.BlindHopPayload
+		// var nextHop lnwire.ShortChannelID
+
+		// Process the route blinding payload if present.
+		isBlindedHop := pld.RouteBlindingEncryptedData != nil
+		if isBlindedHop {
+			// All blinded hop processing can be handled by this
+			// subroutine, whether introduction point or otherwise.
+			blindPayload, nextBlindingPoint, err =
+				l.processBlindHop(
+					pd, &fwdInfo, pld,
+					chanIterator.IsExitHop(),
+				)
+			if err != nil {
+				// Do we need to fail the link?
+				failure := lnwire.NewInvalidOnionBlinding(
+					pd.ShaOnionBlob[:],
+				)
+
+				// TODO(8/14/22):
+				// - Delay sending error if we are the
+				//   introduction node.
+				// - Go over error handling with a microscope as
+				//   apparently it is fraught with danger.
+				l.sendMalformedHTLCError(pd.HtlcIndex, failure.Code(),
+					onionBlob[:], pd.SourceRef)
+
+				l.log.Errorf("unable to process blinded hop: "+
+					"%v", err)
+
+				continue
+			}
+		}
+		l.log.Debugf("[processRemoteAdds()]: hop forwarding info: %+v", fwdInfo)
+
+		// NOTE(9/15/22): We return to to our roots and consider 32
+		// 0x00 byte onion HMAC as the signal that we are the final hop.
+		// We cannot rely on the presence of short_channel_id in the top
+		// level onion TLV payload, as it will not be set for hops in a
+		// blinded route. We will need this knowledge for BOLT-04
+		// validation.
+		// if chanIterator.IsExitHop() {}
+		switch chanIterator.IsExitHop() {
+		// switch fwdInfo.NextHop {
+		// switch action {
+		// case hop.Exit:
+		// case 0:
+		case true:
+			// fmt.Printf("[Route Blinding Debug]: processing exit hop @ %v\n", l.cfg.NodeKeyECDH.PubKey().SerializeCompressed())
+			// fmt.Printf("[Route Blinding Debug]: processing exit hop @ %v\n", l.cfg.Switch.nodeIDPrivateKey.PubKey().SerializeCompressed())
 			err := l.processExitHop(
 				pd, obfuscator, fwdInfo, heightNow, pld,
 			)
@@ -3015,6 +3103,24 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 				)
 
 				return
+			}
+
+			// A blind payload indicates we processed this hop
+			// as a part of a blinded route. We'll verify that
+			// the path ID data matches what we expect.
+			if blindPayload != nil {
+				l.log.Debugf(
+					"[processRemoteAdds()]: blind route "+
+						"path ID: %v, payment hash: "+
+						"%+v, match: %t\n",
+					blindPayload.PathID, pd.RHash,
+					bytes.Equal(blindPayload.PathID,
+						pd.RHash[:]),
+				)
+				// TODO(9/10/22): Check that this is as expected.
+				// Could store payment secret and verify that it
+				// hashes to the payment hash we provide the
+				// sender in the invoice.
 			}
 
 		// There are additional channels left within this route. So
@@ -3046,6 +3152,11 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 					Expiry:      fwdInfo.OutgoingCTLV,
 					Amount:      fwdInfo.AmountToForward,
 					PaymentHash: pd.RHash,
+					// TODO(10/17/22): Better understand
+					// this code path to determine whether
+					// we need to include the blinding point
+					// here as well.
+					BlindingPoint: nextBlindingPoint,
 				}
 
 				// Finally, we'll encode the onion packet for
@@ -3071,6 +3182,7 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 					outgoingTimeout: fwdInfo.OutgoingCTLV,
 					customRecords:   pld.CustomRecords(),
 				}
+
 				switchPackets = append(
 					switchPackets, updatePacket,
 				)
@@ -3085,9 +3197,10 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 			// create the outgoing HTLC using the parameters as
 			// specified in the forwarding info.
 			addMsg := &lnwire.UpdateAddHTLC{
-				Expiry:      fwdInfo.OutgoingCTLV,
-				Amount:      fwdInfo.AmountToForward,
-				PaymentHash: pd.RHash,
+				Expiry:        fwdInfo.OutgoingCTLV,
+				Amount:        fwdInfo.AmountToForward,
+				PaymentHash:   pd.RHash,
+				BlindingPoint: nextBlindingPoint,
 			}
 
 			// Finally, we'll encode the onion packet for the
@@ -3171,6 +3284,537 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 	l.forwardBatch(replay, switchPackets...)
 }
 
+// TODO(10/5/22): Decide whether to go with human readable error or
+// TLV type error (hop.ErrInvalidPayload) for validation errors.
+// Would we benefit from a human readable string? Who is consuming the error?
+// Is it weird to use another package's error type?
+
+// ValidateTopLevelPayloadRouteBlinding verifies that the top level onion TLV
+// payload and UpdateAddHTLC message are properly formed for blinded hops
+// as described in BOLT-04.
+func ValidateTopLevelPayloadRouteBlinding(p *hop.Payload, pd *lnwallet.PaymentDescriptor) error {
+
+	// Blind hops must contain an encrypted route blinding payload.
+	if p.RouteBlindingEncryptedData == nil { // ||
+		// len(p.RecipientEncryptedData) == 0 {
+		// return fmt.Errorf("blind hop must contain route " +
+		// 	"blinding TLV payload")
+		return hop.ErrInvalidPayload{
+			Type:      record.RouteBlindingEncryptedDataOnionType,
+			Violation: hop.OmittedViolation,
+		}
+	}
+
+	// Do not accept HTLCs for which a blinding point has been set
+	// in both the onion TLV payload and the UpdateAddHTLC message.
+	if p.BlindingPoint != nil && pd.BlindingPoint != nil {
+		// return fmt.Errorf("blind hop must set blinding point " +
+		// 	"in either UpdateAddHTLC or the onion TLV " +
+		// 	"payload, but not both")
+		return hop.ErrInvalidPayload{
+			Type:      record.BlindingPointOnionType,
+			Violation: hop.OverloadedViolation,
+		}
+	}
+
+	// Do not accept HTLCs for which we have no blinding point in
+	// either the onion TLV payload or the UpdateAddHTLC message.
+	// The sender is trying to use route blinding, but we didn't receive
+	// the blinding point used to derive the key needed to decrypt the
+	// onion. The sender or the previous peer is buggy or malicious. (eclair)
+	if p.BlindingPoint == nil && pd.BlindingPoint == nil {
+		// return fmt.Errorf("blind hop must contain blinding " +
+		// 	"point in either UpdateAddHTLC or the onion " +
+		// 	"TLV payload, but does not have either")
+		return hop.ErrInvalidPayload{
+			Type:      record.BlindingPointOnionType,
+			Violation: hop.OmittedViolation,
+		}
+	}
+
+	return nil
+}
+
+// ValidateRouteBlindingPayload validates that the route blinding
+// TLV payload is properly formed relative to the top level onion
+// TLV payload as described in BOLT-04.
+//
+// NOTE(9/2/22): We now have validation to do across two levels of TLV
+// payloads. What is present in one payload effects our expectation of what
+// is present in the other payload. As a result, this stage of validation
+// must wait until AFTER the route blinding payload is decrypted.
+// func ValidateRouteBlindingPayload(blindPld *hop.BlindHopPayload, pld *hop.Payload) error {
+func ValidateRouteBlindingPayload(blindPld *hop.BlindHopPayload,
+	pld *hop.Payload, isFinalHop bool) error {
+
+	// TODO(9/10/22): Figure out how to actually distinguish the final
+	// hop in a blinded route as TLV payload reader.
+	// var isFinalHop bool = blindPld.NextNodeID == nil &&
+	// 	blindPld.NextHop == hop.Exit
+
+	// Validation for intermediate hops.
+	if !isFinalHop {
+		fmt.Printf("[validateRouteBlindingPayload]: intermediate hop: %+v\n", pld.FwdInfo)
+		// We MUST not use ANY TLVs other than encrypted_recipient_data
+		// & current_blinding_point.
+		if pld.FwdInfo.AmountToForward != 0 {
+			// return fmt.Errorf("unexpected field (amt) in top level "+
+			// 	"onion payload: %d", pld.FwdInfo.AmountToForward)
+			return hop.ErrInvalidPayload{
+				Type:      record.AmtOnionType,
+				Violation: hop.IncludedViolation,
+			}
+		}
+		if pld.FwdInfo.OutgoingCTLV != 0 {
+			// return fmt.Errorf("unexpected field (cltv) in top level "+
+			// 	"onion payload: %d", pld.FwdInfo.OutgoingCTLV)
+			return hop.ErrInvalidPayload{
+				Type:      record.LockTimeOnionType,
+				Violation: hop.IncludedViolation,
+			}
+		}
+		// The top level onion payload should not list the next hop
+		// we should forward to. This will be found in the encrypted
+		// route blinding TLV payload.
+		if pld.FwdInfo.NextHop != hop.Exit {
+			// return fmt.Errorf("unexpected field (short_channel_id) in top level "+
+			// 	"onion payload: %+v", pld.FwdInfo.NextHop)
+			return hop.ErrInvalidPayload{
+				Type:      record.NextHopOnionType,
+				Violation: hop.IncludedViolation,
+			}
+		}
+
+		if pld.MPP != nil {
+			// return fmt.Errorf("unexpected field (mpp) in top level "+
+			// 	"onion payload: %+v", pld.MPP)
+			return hop.ErrInvalidPayload{
+				Type:      record.MPPOnionType,
+				Violation: hop.IncludedViolation,
+			}
+		}
+		if pld.AMP != nil {
+			// return fmt.Errorf("unexpected field (amp) in top level "+
+			// 	"onion payload: %+v", pld.AMP)
+			return hop.ErrInvalidPayload{
+				Type:      record.AMPOnionType,
+				Violation: hop.IncludedViolation,
+			}
+		}
+		if pld.Metadata() != nil {
+			// return fmt.Errorf("unexpected field (metadata) in top level "+
+			// 	"onion payload: %+v", pld.Metadata())
+			return hop.ErrInvalidPayload{
+				Type:      record.MetadataOnionType,
+				Violation: hop.IncludedViolation,
+			}
+		}
+		if pld.TotalAmountMsat != 0 {
+			// return fmt.Errorf("unexpected field (total_amount_msat) in top level "+
+			// 	"onion payload: %+v", pld.TotalAmountMsat)
+			return hop.ErrInvalidPayload{
+				Type:      record.TotalAmountMsatOnionType,
+				Violation: hop.IncludedViolation,
+			}
+		}
+	}
+
+	// Validation for final hops.
+	if isFinalHop {
+		fmt.Printf("[validateRouteBlindingPayload]: final hop: %+v\n", pld.FwdInfo)
+		// We MUST use amt_to_forward & outgoing_cltv_value.
+		if pld.FwdInfo.AmountToForward == 0 {
+			// return fmt.Errorf("expected field (amt) in top level "+
+			// 	"onion payload: %d", pld.FwdInfo.AmountToForward)
+			return hop.ErrInvalidPayload{
+				Type:      record.AmtOnionType,
+				Violation: hop.OmittedViolation,
+				FinalHop:  true,
+			}
+		}
+		if pld.FwdInfo.OutgoingCTLV == 0 {
+			// return fmt.Errorf("expected field (cltv) in top level "+
+			// 	"onion payload: %d", pld.FwdInfo.OutgoingCTLV)
+			return hop.ErrInvalidPayload{
+				Type:      record.LockTimeOnionType,
+				Violation: hop.OmittedViolation,
+				FinalHop:  true,
+			}
+		}
+
+		// We MUST NOT use ANY TLVs other than encrypted_recipient_data,
+		// current_blinding_point, amt_to_forward, outgoing_cltv_value,
+		// & total_amount_msat.
+		if pld.FwdInfo.NextHop != hop.Exit {
+			// return fmt.Errorf("unexpected field (short_channel_id) in top level "+
+			// 	"onion payload: %+v", pld.FwdInfo.NextHop)
+			return hop.ErrInvalidPayload{
+				Type:      record.NextHopOnionType,
+				Violation: hop.IncludedViolation,
+				FinalHop:  true,
+			}
+		}
+		// QUESTION(9/11/22): Does route blinding preclude us from using
+		// AMP or MPP? Should we remove these checks?
+		// if pld.MPP != nil {
+		// 	return fmt.Errorf("unexpected field (mpp) in top level "+
+		// 		"onion payload: %+v", pld.MPP)
+		// }
+		if pld.AMP != nil {
+			// return fmt.Errorf("unexpected field (amp) in top level "+
+			// 	"onion payload: %+v", pld.AMP)
+			return hop.ErrInvalidPayload{
+				Type:      record.AMPOnionType,
+				Violation: hop.IncludedViolation,
+				FinalHop:  true,
+			}
+		}
+		if pld.Metadata() != nil {
+			// return fmt.Errorf("unexpected field (metadata) in top level "+
+			// 	"onion payload: %+v", pld.Metadata())
+			return hop.ErrInvalidPayload{
+				Type:      record.MetadataOnionType,
+				Violation: hop.IncludedViolation,
+				FinalHop:  true,
+			}
+		}
+		if pld.TotalAmountMsat != 0 {
+			// return fmt.Errorf("unexpected field (total_amount_msat) in top level "+
+			// 	"onion payload: %+v", pld.TotalAmountMsat)
+			return hop.ErrInvalidPayload{
+				Type:      record.TotalAmountMsatOnionType,
+				Violation: hop.IncludedViolation,
+				FinalHop:  true,
+			}
+		}
+	}
+
+	return nil
+}
+
+// ValidateRouteBlindingPaymentConstraints verifies the incoming payment
+// satisfies the set of payment constraints specified by the creator of
+// the blinded route. The constraints are chosen by the route blinder in
+// order to limit an adversary's ability to unblind nodes within the route.
+// NOTE: These are additional constraints on forwarded payments
+// above and beyond our usual forwarding policy.
+func ValidateRouteBlindingPaymentConstraints(p *hop.BlindHopPayload,
+	pd *lnwallet.PaymentDescriptor) error {
+
+	// Only validate payment constraints if included by the route blinder.
+	if p.PaymentConstraints == nil {
+		return nil
+	}
+
+	maxCltvExpiry := p.PaymentConstraints.MaxCltvExpiryDelta
+	minimumHtlcMsat := p.PaymentConstraints.HtlcMinimumMsat
+	// allowedFeatures := p.PaymentConstraints.AllowedFeatures
+
+	// If the builder of the blinded route included payment
+	// constraints then we should validate that our forwarding
+	// information satisfies them here.
+	// - MUST return an error if the expiry is greater than
+	// `encrypted_recipient_data.payment_constraints.max_cltv_expiry`.'
+	if pd.Timeout > maxCltvExpiry {
+		// return fmt.Errorf("expired blinded route. "+
+		// 	"ctlv expiry for hop %d exceeds the maximum "+
+		// 	"specified limit: %d", pd.Timeout,
+		// 	maxCltvExpiry,
+		// )
+		// TODO(10/5/22): Figure out if this error type
+		// works here. Would it not be better to provide info
+		// on how the value is insufficient?
+		return hop.ErrInvalidPayload{
+			Type:      record.LockTimeOnionType,
+			Violation: hop.InsufficientViolation,
+		}
+
+	}
+
+	// - MUST return an error if the amount is below
+	// `encrypted_recipient_data.payment_constraints.htlc_minimum_msat`.
+	if uint64(pd.Amount) < minimumHtlcMsat {
+		// return fmt.Errorf("blind hop must forward at least "+
+		// 	"%d milli-satoshis, attempted to forward %d sats",
+		// 	minimumHtlcMsat,
+		// 	pd.Amount,
+		// )
+		return hop.ErrInvalidPayload{
+			Type:      record.AmtOnionType,
+			Violation: hop.InsufficientViolation,
+		}
+	}
+
+	// TODO(8/14/22): at some point we may need to check
+	// that payments do not attempt to use features which
+	// have not been explicitly permitted.
+	// - MUST return an error if `encrypted_recipient_data.allowed_features.features` contains an unknown feature bit (even if it is odd)
+	// - MUST return an error if the payment uses a feature not included in `encrypted_recipient_data.payment_constraints.allowed_features`.
+	// UPDATE(8/24/22): This is being moved to its own TLV record.
+	// UPDATE(9/2/22): We need to make sure our node knows
+	// about ALL features, even the it's okay to be ODD ones.
+	// if allowedFeatures == nil {
+	// 	return fmt.Errorf("blind hop made use of " +
+	// 		"disallowed feature")
+	// }
+
+	return nil
+}
+
+const (
+	// feeRateParts is the total number of parts used to express fee rates.
+	feeRateParts = 1000000
+)
+
+// QUESTION(10/17/22): Should there be something apart from the function
+// signature to indicate these are to be used for blinded hops?
+func computeAmountToForward(incomingAmt lnwire.MilliSatoshi,
+	paymentRelay *record.PaymentRelay) lnwire.MilliSatoshi {
+
+	var base, rate uint64
+	if paymentRelay != nil {
+		base = uint64(paymentRelay.BaseFee)
+		rate = uint64(paymentRelay.FeeRate) //* 1000 // ppm
+		fmt.Printf("payment relay: %+v\n", paymentRelay)
+		// NOTE(10/17/22): Could consider swapping base/rate fee
+		// to uint64 at the source.
+	}
+	// NOTE(10/16/22): If this is made a method of PaymentRelay then
+	// it can never be nil when invoked so this nil check goes away.
+	// But then we can blow up with nil pointer dereference! so we
+	// must check in the body of the driver function, which is actually worse.
+
+	amt := uint64(incomingAmt)
+
+	// NOTE(10/17/22): In normal routing, we are given the amount to
+	// forward directly in the onion payload. We need only verify that
+	// the difference between incoming and outgoing amounts satisfies
+	// our fee requirement.
+	//
+	// When forwarding a payment, the fee we take is calculated, not on
+	// the incoming amount, but rather on the amount we forward. We charge
+	// fees based on our own liquidity we are forwarding downstream.
+	// With route blinding, we are NOT given the amount to forward.
+	// This unintuitive looking formula comes from the fact that without
+	// the amount to forward, we cannot compute the fees taken directly.
+	//
+	// The amount to be forwarded can be computed as follows:
+	//
+	// 	amtFwd = incomingAmt - totalFees
+	//	totalFees(amtFwd): a function of the amount to forward
+	//
+	// After substitution and some you massaging you will get:
+	//
+	// 	amtFwd = (incomingAmt - baseFee) / ( 1 + feeRate / 1000000 )
+	//
+	// From there we use a ceiling formula for integer division so that
+	// we always round up, otherwise the sender may receive slightly
+	// less than intended:
+	//
+	// 	ceil(a/b) = (a + b - 1)/(b)
+	//
+	fwdAmount := ((amt-base)*feeRateParts + feeRateParts + rate - 1) /
+		(feeRateParts + rate)
+	// fwdAmount := divideCeil(
+	// 	feeRateParts*(amt-base),
+	// 	feeRateParts+rate,
+	// )
+	fmt.Printf("[computeAmountToForward]: incoming sats: %d, gearing up "+
+		"to forward %d satoshis\n", incomingAmt, fwdAmount)
+
+	return lnwire.MilliSatoshi(fwdAmount)
+}
+
+// // divideCeil divides dividend by factor and rounds the result up.
+// func divideCeil(dividend, factor uint64) uint64 {
+// 	return (dividend + factor - 1) / factor
+// }
+
+func computeOutgoingCtlv(incomingTimelock uint32,
+	paymentRelay *record.PaymentRelay) uint32 {
+
+	if paymentRelay == nil {
+		return incomingTimelock
+	}
+
+	return incomingTimelock - uint32(paymentRelay.CltvExpiryDelta)
+}
+
+// TODO(9/22/22): Make this description crisp!
+// processBlindHop handles an htlc for which the link is a blinded hop.
+// Processing nodes in the blinded portion of a route...
+// and provides the blinding point which the next routing node will need
+// in order to decrypt the onion. The blinding point is to be communicated with
+// the next hop in the route via TLV extension to the UpdateAddHtlc message.
+// func (l *channelLink) processBlindHop(pd *lnwallet.PaymentDescriptor,
+// 	fwdInfo *hop.ForwardingInfo,
+// 	payload *hop.Payload) (*hop.BlindHopPayload, *btcec.PublicKey, error) {
+func (l *channelLink) processBlindHop(pd *lnwallet.PaymentDescriptor,
+	fwdInfo *hop.ForwardingInfo,
+	payload *hop.Payload,
+	isFinalHop bool) (*hop.BlindHopPayload, *btcec.PublicKey, error) {
+
+	// Validate that top level onion TLV payload adheres to route
+	// blinding specification.
+	err := ValidateTopLevelPayloadRouteBlinding(payload, pd)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Grab the ephemeral blinding point as it's needed to
+	// decrypt the route blinding TLV payload.
+	// NOTE: Remember that only the introduction node gets its
+	// ephemeral blinding point from the TLV onion payload!!
+	// The rest of the processing nodes in the blinded route receive
+	// their ephemeral blinding point in the TLV extension of UpdateAddHTLC!
+	var ephemeralBlindingPoint *btcec.PublicKey
+	if pd.BlindingPoint != nil {
+		// blinding point came from UpdateAddHTLC. this is NOT introduction node.
+		l.log.Debug("we are NOT the introduction node!!!")
+		ephemeralBlindingPoint = pd.BlindingPoint
+	}
+
+	if payload.BlindingPoint != nil {
+		l.log.Debug("we are the introduction node to a blinded route!!!")
+		ephemeralBlindingPoint = payload.BlindingPoint
+	}
+
+	// Decrypt the route blinding payload left for us
+	// by the builder of the blinded route.
+	blindedPayload := payload.RouteBlindingEncryptedData
+	routeBlindingPayload, err := l.cfg.DecryptBlindedPayload(
+		l.cfg.NodeKeyECDH, ephemeralBlindingPoint, blindedPayload,
+	)
+	l.log.Debugf("encrypted route blinding payload: %+v", blindedPayload)
+	// NOTE(8/8/22): Shared secret between routing node and blinded route builder
+	// is computed twice by sphinx package. Once for generating the routing node's
+	// blinded ID key pair needed to decrypt the onion packet and again for decrypting the inner
+	// route blinding payload. Would it be better to compute the shared secret once and pass as
+	// dependency to both functions?
+	// routeBlindingPayload, err := sphinx.DecryptBlindedData(
+	// 	l.cfg.NodeKeyECDH, ephemeralBlindingPoint, blindedPayload,
+	// )
+	if err != nil {
+		// There are two possibilities in this case:
+		//  - the blinding point is invalid: the sender or the previous node is buggy or malicious
+		//    NOTE(9/22/22): This is not true. If the blinding point
+		//    were invalid, we could not have decrypted the onion payload.
+		//  - the encrypted data is invalid: the recipient is buggy or malicious
+		//    or the sender is including bogus route blinding data.
+		return nil, nil, err
+	}
+	l.log.Debugf("raw route blinding payload: %+v", routeBlindingPayload)
+
+	// Parse routing information from route blinding TLV payload.
+	blindHopPayload, err := hop.NewBlindHopPayloadFromReader(
+		bytes.NewReader(
+			routeBlindingPayload,
+		), isFinalHop)
+	if err != nil {
+		return nil, nil, err
+	}
+	l.log.Debugf("parsed route blinding payload: %+v", blindHopPayload)
+	l.log.Debugf("payment constraints: %+v", blindHopPayload.PaymentConstraints)
+
+	// TODO(7/26/22): Validate that payload conforms to BOLT-O4 specification.
+	// If we perform validation here (or prior to this point), it will
+	// simplify the functions for computing amount/timelock below as
+	// they will not need nil checks.
+
+	// NOTE(8/9/22): This functionality might be better moved to
+	// when the route blinding payload is parsed. However some might
+	// only be knowable with the greater context of the htlc.
+	err = ValidateRouteBlindingPayload(blindHopPayload, payload, isFinalHop)
+	if err != nil {
+		return blindHopPayload, nil, err
+	}
+
+	// Apply payment constraints as requested by the creator
+	// of the blinded route.
+	// NOTE: These are additional constraints on forwarded payments
+	// above and beyond our usual forwarding policy.
+
+	// TODO(8/7/22): Check computed forwarding parameters (amount and timelock) against payment constraints specified
+	// by the recipient. The constraints are chosen to limit an adversary's ability to unblind
+	// nodes within the blinded route. Dishonest/adversarial implementations may ignore these
+	// constraints.
+	// NOTE(9/2/22): We may elect to validate the payment constraints
+	// separately from the other TLV payload constraints as these involve
+	// the route blinding TLV payload ONLY. We do not have cross TLV payload
+	// validation here.
+	// err = ValidateRouteBlindingPaymentConstraints(fwdInfo, blindHopPayload)
+	err = ValidateRouteBlindingPaymentConstraints(blindHopPayload, pd)
+	if err != nil {
+		return blindHopPayload, nil, err
+	}
+
+	// TODO(9/8/22): Can we bail on processing early and return control to
+	// the caller if we are the exit hop? Or should we continue to process
+	// as there may be dummy hops? Can we put path ID in an intermediate hop?
+	// If we're the recipient but there are more dummy hops does it make
+	// sense for the path ID to be buried in the last dummy hop?
+	// NOTE(9/8/22): This is still how we signal the end of the route!!
+	// It just cannot be determined prior to now!
+	if blindHopPayload.NextHop == hop.Exit {
+		l.log.Debug("[processBlindHop()]: we are probably the final hop!")
+	}
+	// TODO(9/10/22): Figure out how to actually distinguish the final
+	// hop in a blinded route as TLV payload reader.
+	// UPDATE(9/22/22): According to BOLT-04 this is supposed to be
+	// indicated by the sphinx implementation when it encounters
+	// an all-zero onion HMAC.
+	// TODO(9/22/22): Sort out how this works with dummy hops.
+	// var isFinalHop bool = blindHopPayload.NextNodeID == nil &&
+	// 	blindHopPayload.NextHop == hop.Exit
+	if isFinalHop {
+		l.log.Debug("[processBlindHop()]: we ARE the final hop!!! returning BEFORE computing amount and timelock!")
+		return blindHopPayload, nil, nil
+	}
+
+	// Compute the amount and timelock we'll extend to the next hop.
+	// Assemble the forwarding information necessary to forward the
+	// htlc to the next hop in the blinded route.
+	// TODO(7/24/22): Consider if this is the best way to merge the blinded hop
+	// forwarding info with the default/usual forwarding info.
+	// QUESTION(8/8/22): This seems to be the bare miminum needed to forward
+	// the onion. Is there any other information we are missing?
+	// QUESTION(9/15/22): What about if we only have NextNodeID?
+	// Can we convert from public key to short channel ID? We would
+	// need a peer & channel lookup.
+	// fwdInfo.NextHop = computeNextHop(blindHopPayload)
+	fwdInfo.NextHop = blindHopPayload.NextHop
+	fwdInfo.AmountToForward = computeAmountToForward(pd.Amount,
+		blindHopPayload.PaymentRelay)
+	fwdInfo.OutgoingCTLV = computeOutgoingCtlv(pd.Timeout,
+		blindHopPayload.PaymentRelay)
+	// fwdInfo.AmountToForward = computeAmountToForward(blindHopPayload, pd)
+	// fwdInfo.OutgoingCTLV = computeOutgoingCtlv(blindHopPayload, pd)
+
+	// Compute the ephemeral route blinding point for next node in route.
+	var nextBlindingPoint *secp256k1.PublicKey
+
+	// If the route blinder provided a blinding point override,
+	// we will send it to the downstream peer.
+	if blindHopPayload.BlindingPointOverride != nil {
+		nextBlindingPoint = blindHopPayload.BlindingPointOverride
+		return blindHopPayload, nextBlindingPoint, nil
+
+	}
+
+	// Otherwise, we'll compute the next blinding point ourselves.
+	nextBlindingPoint, err = l.cfg.NextBlindingPoint(
+		l.cfg.NodeKeyECDH, ephemeralBlindingPoint,
+	)
+	// nextBlindingPoint, err := sphinx.NextEphemeral(
+	// 	l.cfg.NodeKeyECDH, ephemeralBlindingPoint,
+	// )
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return blindHopPayload, nextBlindingPoint, nil
+}
+
 // processExitHop handles an htlc for which this link is the exit hop. It
 // returns a boolean indicating whether the commitment tx needs an update.
 func (l *channelLink) processExitHop(pd *lnwallet.PaymentDescriptor,
@@ -3228,6 +3872,12 @@ func (l *channelLink) processExitHop(pd *lnwallet.PaymentDescriptor,
 		HtlcID: pd.HtlcIndex,
 	}
 
+	// QUESTION(9/10/22): Might this be where we can check that
+	// the path ID data matches what we expect in the case we
+	// are an exit hop in a blinded route? The path ID field
+	// should contain information only we as the recipient
+	// and route blinder would know. This helps us prevent
+	// responding to garbage blinded routes that we did not generate.
 	event, err := l.cfg.Registry.NotifyExitHopHtlc(
 		invoiceHash, pd.Amount, pd.Timeout, int32(heightNow),
 		circuitKey, l.hodlQueue.ChanIn(), payload,

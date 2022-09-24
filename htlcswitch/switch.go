@@ -141,6 +141,9 @@ type Config struct {
 	// persistent circuit map.
 	DB kvdb.Backend
 
+	//
+	blindHopProcessor blindHopProcessor
+
 	// FetchAllOpenChannels is a function that fetches all currently open
 	// channels from the channel database.
 	FetchAllOpenChannels func() ([]*channeldb.OpenChannel, error)
@@ -2256,10 +2259,44 @@ func (s *Switch) Stop() error {
 	return nil
 }
 
+// func WithRouteBlinding(b BlindHopProcessor) SwitchOption {
+// 	// func WithRouteBlinding(h *HtlcSwitch, b BlindHopProcessor) SwitchOption {
+// 	// h.BlindHopProcessor = ??? // don't we need to get this from our caller?
+// 	return func(h *HtlcSwitch) {
+// 		h.BlindHopProcessor = b
+// 	}
+// }
+
+func (h *Switch) WithRouteBlinding() {
+	log.Debug("Switch is being configured to support route blinding!")
+	h.cfg.blindHopProcessor = &hop.BlindHopProcessor{}
+}
+
+// func (h *Switch) WithRouteBlinding(b BlindHopProcessor) {
+// 	log.Debug("Switch is being configured to support route blinding!")
+// 	h.BlindHopProcessor = b
+// }
+
+func (h *Switch) SupportRouteBlinding() bool {
+	log.Debugf("Switch is configured to support route blinding? "+
+		"%t", h.cfg.blindHopProcessor != nil)
+	return h.cfg.blindHopProcessor != nil
+}
+
 // CreateAndAddLink will create a link and then add it to the internal maps
 // when given a ChannelLinkConfig and LightningChannel.
 func (s *Switch) CreateAndAddLink(linkCfg ChannelLinkConfig,
 	lnChan *lnwallet.LightningChannel) error {
+
+	if s.SupportRouteBlinding() {
+		log.Debug("Switch is configured to support route blinding. " +
+			"Adding blind hop processor to Link")
+		linkCfg.blindHopProcessor = s.cfg.blindHopProcessor // (if we create the implementation elsewhere and pass it to the htlcswitch package)
+		// linkCfg.BlindHopProcessor = hop.BlindHopProcessor // (if we define the implementation elsewhere?)
+		// linkCfg.RouteBlinding == true
+	} else {
+		log.Debug("Switch is NOT configured to support route blinding.")
+	}
 
 	link := NewChannelLink(linkCfg, lnChan)
 	return s.AddLink(link)

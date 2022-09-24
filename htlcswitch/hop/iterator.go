@@ -83,6 +83,7 @@ func (r *sphinxHopIterator) EncodeNextHop(w io.Writer) error {
 // also contain any additional TLV fields provided by the sender.
 //
 // NOTE: Part of the HopIterator interface.
+// QUESTION(9/15/22): Does this function indicate whether we are the final hop?
 func (r *sphinxHopIterator) HopPayload() (*Payload, error) {
 	switch r.processedPacket.Payload.Type {
 
@@ -95,6 +96,7 @@ func (r *sphinxHopIterator) HopPayload() (*Payload, error) {
 	// Otherwise, if this is the TLV payload, then we'll make a new stream
 	// to decode only what we need to make routing decisions.
 	case sphinx.PayloadTLV:
+		fmt.Printf("[processRemoteAdds()]: raw top level onion tlv payload: %+v\n", r.processedPacket.Payload.Payload)
 		return NewPayloadFromReader(bytes.NewReader(
 			r.processedPacket.Payload.Payload,
 		), r.IsExitHop())
@@ -235,6 +237,10 @@ type DecodeHopIteratorRequest struct {
 	OnionReader  io.Reader
 	RHash        []byte
 	IncomingCltv uint32
+
+	// An ephemeral public key which is used to decrypt the onion
+	// when forwarding in the blinded portion of a route.
+	BlindingPoint *btcec.PublicKey
 }
 
 // DecodeHopIteratorResponse encapsulates the outcome of a batched sphinx onion
@@ -291,7 +297,7 @@ func (p *OnionProcessor) DecodeHopIterators(id []byte,
 		}
 
 		err = tx.ProcessOnionPacket(
-			seqNum, onionPkt, req.RHash, req.IncomingCltv, nil,
+			seqNum, onionPkt, req.RHash, req.IncomingCltv, req.BlindingPoint,
 		)
 		switch err {
 		case nil:

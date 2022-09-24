@@ -477,6 +477,8 @@ func (o *mockDeobfuscator) DecryptError(reason lnwire.OpaqueReason) (*Forwarding
 
 var _ ErrorDecrypter = (*mockDeobfuscator)(nil)
 
+// TODO(9/22/22): Will this need updating to support decoding blinded hops?
+
 // mockIteratorDecoder test version of hop iterator decoder which decodes the
 // encoded array of hops.
 type mockIteratorDecoder struct {
@@ -494,7 +496,7 @@ func newMockIteratorDecoder() *mockIteratorDecoder {
 }
 
 func (p *mockIteratorDecoder) DecodeHopIterator(r io.Reader, rHash []byte,
-	cltv uint32) (hop.Iterator, lnwire.FailCode) {
+	cltv uint32, blindingFactor *btcec.PrivateKey) (hop.Iterator, lnwire.FailCode) {
 
 	var b [4]byte
 	_, err := r.Read(b[:])
@@ -543,7 +545,7 @@ func (p *mockIteratorDecoder) DecodeHopIterators(id []byte,
 	resps := make([]hop.DecodeHopIteratorResponse, 0, batchSize)
 	for _, req := range reqs {
 		iterator, failcode := p.DecodeHopIterator(
-			req.OnionReader, req.RHash, req.IncomingCltv,
+			req.OnionReader, req.RHash, req.IncomingCltv, nil,
 		)
 
 		if p.decodeFail {
