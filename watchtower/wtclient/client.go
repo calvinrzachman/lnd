@@ -792,6 +792,12 @@ func (c *TowerClient) backupDispatcher() {
 			case msg := <-c.newTowers:
 				msg.errChan <- c.handleNewTower(msg)
 
+				// We do not currently have an active session, so notify the
+				// session negotiator of newly added tower. This avoids us
+				// from having to wait for the exponential backoff delay
+				// in session negotiation.
+				c.negotiator.NotifyNewTower()
+
 			// A tower has been requested to be removed. We'll
 			// immediately return an error as we want to avoid the
 			// possibility of a new session being negotiated with

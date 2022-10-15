@@ -27,6 +27,13 @@ type SessionNegotiator interface {
 	// will be delivered.
 	NewSessions() <-chan *wtdb.ClientSession
 
+	// NotifyNewTower signals to the session negotiatior that the client
+	// added a new candidate tower. This can be used to bypass the delay
+	// in session negotiation.
+	// QUESTION: Is this too implementation specific to be in the high
+	// level interface type? Could we do this another way?
+	NotifyNewTower()
+
 	// Start safely initializes the session negotiator.
 	Start() error
 
@@ -108,6 +115,8 @@ type sessionNegotiator struct {
 	newSessions            chan *wtdb.ClientSession
 	successfulNegotiations chan *wtdb.ClientSession
 
+	newTowerNtfn chan struct{}
+
 	wg   sync.WaitGroup
 	quit chan struct{}
 }
@@ -140,6 +149,7 @@ func newSessionNegotiator(cfg *NegotiatorConfig) *sessionNegotiator {
 		localInit:              localInit,
 		dispatcher:             make(chan struct{}, 1),
 		newSessions:            make(chan *wtdb.ClientSession),
+		newTowerNtfn:           make(chan struct{}),
 		successfulNegotiations: make(chan *wtdb.ClientSession),
 		quit:                   make(chan struct{}),
 	}
@@ -181,6 +191,15 @@ func (n *sessionNegotiator) NewSessions() <-chan *wtdb.ClientSession {
 func (n *sessionNegotiator) RequestSession() {
 	select {
 	case n.dispatcher <- struct{}{}:
+	default:
+	}
+}
+
+// NotifyNewTower notifies the sessionNegotiator of a new candidate
+// tower. Can be used to negotiate a session without delay.
+func (n *sessionNegotiator) NotifyNewTower() {
+	select {
+	case n.newTowerNtfn <- struct{}{}:
 	default:
 	}
 }
@@ -267,6 +286,10 @@ retryWithBackoff:
 	if backoff > 0 {
 		select {
 		case <-time.After(backoff):
+		case <-n.newTowerNtfn:
+			// bypass exponential backoff delay and
+			// immediately negotiate session with newly added tower.
+			n.log.Debug("New candidate tower added. Negotiating session without delay")
 		case <-n.quit:
 			return
 		}
