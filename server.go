@@ -540,7 +540,11 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 		NoKeysend:                !cfg.AcceptKeySend,
 		NoOptionScidAlias:        !cfg.ProtocolOptions.ScidAlias(),
 		NoZeroConf:               !cfg.ProtocolOptions.ZeroConf(),
-		NoAnySegwit:              cfg.ProtocolOptions.NoAnySegwit(),
+		// RouteBlinding:            false,
+		RouteBlinding: cfg.ProtocolOptions.RouteBlinding(),
+		// NOTE(9/24/22): Should route blinding be on by default?
+		// NoRouteBlinding: !cfg.ProtocolOptions.RouteBlinding(),
+		NoAnySegwit: cfg.ProtocolOptions.NoAnySegwit(),
 	})
 	if err != nil {
 		return nil, err
@@ -673,6 +677,15 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 		s.htlcSwitch, lncfg.DefaultFinalCltvRejectDelta,
 		s.cfg.RequireInterceptor,
 	)
+
+	// If route blinding is enabled, we'll configure the htlcswitch
+	// so it's ready to process blinded hops.
+	if cfg.ProtocolOptions.RouteBlinding() {
+		// if cfg.RouteBlinding {
+		// s.htlcSwitch.WithRouteBlinding(&hop.BlindHopProcessor{})
+		s.htlcSwitch.WithRouteBlinding()
+		// s.htlcSwitch.WithRouteBlindingFlag()
+	}
 
 	s.witnessBeacon = newPreimageBeacon(
 		dbs.ChanStateDB.NewWitnessCache(),
@@ -3733,10 +3746,15 @@ func (s *server) peerConnected(conn net.Conn, connReq *connmgr.ConnReq,
 		PendingCommitInterval:  s.cfg.PendingCommitInterval,
 		ChannelCommitBatchSize: s.cfg.ChannelCommitBatchSize,
 		HandleCustomMessage:    s.handleCustomMessage,
-		GetAliases:             s.aliasMgr.GetAliases,
-		RequestAlias:           s.aliasMgr.RequestAlias,
-		AddLocalAlias:          s.aliasMgr.AddLocalAlias,
-		Quit:                   s.quit,
+		// NOTE(9/25/22): Rather than define its own interface for the
+		// behavior it expects, the peer package takes config functions
+		// for the behavior it needs.
+		// TODO: check to see if peer package uses these functions or
+		// if it passes them onto someone else.
+		GetAliases:    s.aliasMgr.GetAliases,    // passed to ChannelLink only! So we could take the same approach as Eugene.
+		RequestAlias:  s.aliasMgr.RequestAlias,  // actually used by peer package in negoitation with channel counter party.
+		AddLocalAlias: s.aliasMgr.AddLocalAlias, // actually used by peer package.
+		Quit:          s.quit,
 	}
 
 	copy(pCfg.PubKeyBytes[:], peerAddr.IdentityKey.SerializeCompressed())

@@ -129,6 +129,28 @@ const (
 	// transactions, which also imply anchor commitments.
 	AnchorsZeroFeeHtlcTxOptional FeatureBit = 23
 
+	// QUESTION: The phrasing of required/optional seems a bit funky
+	// when talking about nodes which are not our direct channel peers.
+	// We can make no requirement on other nodes to join the network (the
+	// negotiations of other network peers is not up to us).
+	// TODO (3/27/22): Use larger # for experimental features
+	//
+	// RouteBlindingRequired is a required feature bit that signals that the
+	// node supports sending to/receiving from blinded routes.
+	RouteBlindingRequired FeatureBit = 24
+
+	// RouteBlindingOptional is an optional feature bit that signals that the
+	// node supports sending to/receiving from blinded routes.
+	RouteBlindingOptional FeatureBit = 25
+
+	// If these bits are present, then both sides can examine the new
+	// UpdateAddHTLC TLV field that's present, extract route blinding data
+	// and use this in place of the existing forwarding method.
+	// - lnwire
+	// - thread through new blinded routing information to forwarding process
+	// - lncfg
+	// - lnrpc (do this last as we should be able to test without it)
+
 	// ShutdownAnySegwitRequired is an required feature bit that signals
 	// that the sender is able to properly handle/parse segwit witness
 	// programs up to version 16. This enables utilization of Taproot
@@ -268,6 +290,8 @@ var Features = map[FeatureBit]string{
 	AMPOptional:                   "amp",
 	PaymentMetadataOptional:       "payment-metadata",
 	PaymentMetadataRequired:       "payment-metadata",
+	RouteBlindingRequired:         "route-blinding",
+	RouteBlindingOptional:         "route-blinding",
 	ExplicitChannelTypeOptional:   "explicit-commitment-type",
 	ExplicitChannelTypeRequired:   "explicit-commitment-type",
 	KeysendOptional:               "keysend",
