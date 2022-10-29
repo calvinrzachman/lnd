@@ -2804,7 +2804,7 @@ func TestLocalPaymentNoForwardingEvents(t *testing.T) {
 	require.NoError(t, err, "unable to create channel")
 
 	n := newThreeHopNetwork(t, channels.aliceToBob, channels.bobToAlice,
-		channels.bobToCarol, channels.carolToBob, testStartingHeight)
+		channels.bobToCarol, channels.carolToBob, testStartingHeight, nil)
 	if err := n.start(); err != nil {
 		t.Fatalf("unable to start three hop network: %v", err)
 	}
@@ -2861,7 +2861,7 @@ func TestMultiHopPaymentForwardingEvents(t *testing.T) {
 	require.NoError(t, err, "unable to create channel")
 
 	n := newThreeHopNetwork(t, channels.aliceToBob, channels.bobToAlice,
-		channels.bobToCarol, channels.carolToBob, testStartingHeight)
+		channels.bobToCarol, channels.carolToBob, testStartingHeight, nil)
 	if err := n.start(); err != nil {
 		t.Fatalf("unable to start three hop network: %v", err)
 	}
@@ -3016,7 +3016,7 @@ func TestUpdateFailMalformedHTLCErrorConversion(t *testing.T) {
 
 	n := newThreeHopNetwork(
 		t, channels.aliceToBob, channels.bobToAlice,
-		channels.bobToCarol, channels.carolToBob, testStartingHeight,
+		channels.bobToCarol, channels.carolToBob, testStartingHeight, nil,
 	)
 	if err := n.start(); err != nil {
 		t.Fatalf("unable to start three hop network: %v", err)
@@ -3464,7 +3464,7 @@ func testHtcNotifier(t *testing.T, testOpts []serverOption, iterations int,
 	n := newThreeHopNetwork(
 		t, channels.aliceToBob,
 		channels.bobToAlice, channels.bobToCarol,
-		channels.carolToBob, testStartingHeight,
+		channels.carolToBob, testStartingHeight, nil,
 		options...,
 	)
 	if err := n.start(); err != nil {
@@ -4121,7 +4121,7 @@ func TestSwitchDustForwarding(t *testing.T) {
 
 	n := newThreeHopNetwork(
 		t, channels.aliceToBob, channels.bobToAlice,
-		channels.bobToCarol, channels.carolToBob, testStartingHeight,
+		channels.bobToCarol, channels.carolToBob, testStartingHeight, nil,
 	)
 	err = n.start()
 	require.NoError(t, err)

@@ -147,6 +147,23 @@ func NewLegacyPayload(f *sphinx.HopData) *Payload {
 	}
 }
 
+// NOTE(10/26/22): Given that we use TLV en/decoding I am a bit unsure how
+// this function will behave/get access to the information it would need.
+// Will we need one for both normal and blind hops?
+// The data included in a TLV payload is highly variable. That is why it makes
+// sense to define a struct and then TLV encode each of the structs types
+// that the user sets.
+// TODO: Inspect the encoding function PackHopPayload in the route/routing package.
+func NewTLVPayload() *Payload {
+
+	// Set the unexported customRecords field so that we can carry
+	// on with our Link testing.
+	return &Payload{
+		FwdInfo:       ForwardingInfo{},
+		customRecords: make(record.CustomSet),
+	}
+}
+
 // BlindHopPayload encapsulates all the route blinding information which
 // will be parsed by forwarding nodes in the blinded portion of a route.
 type BlindHopPayload struct {
@@ -160,6 +177,80 @@ type BlindHopPayload struct {
 	PaymentRelay          *record.PaymentRelay
 	PaymentConstraints    *record.PaymentConstraints
 	// AllowedFeatures    *record.AllowedFeatures
+}
+
+// NOTE(10/26/22): This currently lives in the route package and is outside
+// the scope of our first PR for blind hop processing. However, it could be
+// that our testing code can be made cleaner if we bring something like this
+// in to our first PR as it provides a more general way of encoding a route
+// blinding TLV payload. Build the struct{}, then call this method.
+//
+// PackRouteBlindingPayload writes the series of bytes that can be placed
+// directly into the route blinding TLV payload for this hop. This will
+// include the required information for relaying payment, as well as any
+// constraints meant to be enforced by processing nodes in the blinded route.
+// nextChanID is the unique channel ID that references the _outgoing_ channel
+// ID that follows this hop. This field follows the same semantics as the
+// NextAddress field in the onion: it should be set to zero to indicate the terminal hop.
+// TODO(10/26/22): Better explain why we accept the next SCID.
+func (b *BlindHopPayload) PackRouteBlindingPayload(w io.Writer, nextChanID uint64) error {
+
+	// Encode route blinding payload as TLV stream.
+	var records = []tlv.Record{}
+
+	// NOTE(8/13/22): The following checks ensure that we do not waste
+	// bytes on the wire for empty TLV fields.
+	// As an example, if we encode a nil slice in our TLV stream we will
+	// waste 2 bytes on the type and length (0).
+	if b.Padding != nil {
+		records = append(records,
+			record.NewPaddingRecord(&b.Padding),
+		)
+	}
+
+	if nextChanID != 0 {
+		records = append(records,
+			record.NewBlindedNextHopRecord(&nextChanID),
+		)
+	}
+
+	if b.NextNodeID != nil {
+		fmt.Printf("[Packing Route Blinding Payload]: next node ID - %+v\n", b.NextNodeID.SerializeCompressed())
+		records = append(records,
+			record.NewNextNodeIDRecord(&b.NextNodeID),
+		)
+	}
+
+	if b.PathID != nil {
+		fmt.Printf("[Packing Route Blinding Payload]: next node ID - %+v\n", b.PathID)
+		records = append(records, record.NewPathIDRecord(&b.PathID))
+	}
+
+	if b.BlindingPointOverride != nil {
+		fmt.Printf("[Packing Route Blinding Payload]: blinding point override - %+v\n", b.BlindingPointOverride.SerializeCompressed())
+		records = append(records,
+			record.NewBlindingOverrideRecord(
+				&b.BlindingPointOverride,
+			),
+		)
+	}
+
+	if b.PaymentRelay != nil {
+		fmt.Printf("[Packing Route Blinding Payload]: payment relay details - %d\n", b.PaymentRelay)
+		records = append(records, b.PaymentRelay.Record())
+	}
+
+	if b.PaymentConstraints != nil {
+		fmt.Printf("[Packing Route Blinding Payload]: payment constraint details - %d\n", b.PaymentConstraints)
+		records = append(records, b.PaymentConstraints.Record())
+	}
+
+	tlvStream, err := tlv.NewStream(records...)
+	if err != nil {
+		return err
+	}
+
+	return tlvStream.Encode(w)
 }
 
 // TODO(7/15/22): should be able to create a unit test for this pretty easily.
@@ -273,6 +364,7 @@ func NewPayloadFromReader(r io.Reader, isFinalHop bool) (*Payload, error) {
 		blindedData   []byte
 		blindingPoint *btcec.PublicKey
 	)
+	fmt.Println("[hop.NewPayloadFromReader]: parsing hop payload")
 
 	tlvStream, err := tlv.NewStream(
 		record.NewAmtToFwdRecord(&amt),
@@ -336,6 +428,7 @@ func NewPayloadFromReader(r io.Reader, isFinalHop bool) (*Payload, error) {
 
 	// Filter out the custom records.
 	customRecords := NewCustomRecords(parsedTypes)
+	fmt.Printf("[hop.NewPayloadFromReader]: custom records nil? %t\n", customRecords == nil)
 
 	return &Payload{
 		FwdInfo: ForwardingInfo{
@@ -361,6 +454,19 @@ func NewPayloadFromReader(r io.Reader, isFinalHop bool) (*Payload, error) {
 func (h *Payload) ForwardingInfo() ForwardingInfo {
 	return h.FwdInfo
 }
+
+// QUESTION(10/22/22): Would there be any use (convenience) to a ForwardingInfo
+// method for blind hop payloads?
+// ForwardingInfo returns the basic parameters required for HTLC forwarding,
+// e.g. amount, cltv, and next hop.
+// func (h *BlindHopPayload) ForwardingInfo() ForwardingInfo {
+// 	return ForwardingInfo{
+// 		Network:         BitcoinNetwork,
+// 		AmountToForward: computeAmountToForward(),
+// 		// NextHop:         b.NextHop, // assumes the next channel ID is given
+// 		NextHop: computeNextHop(b), // can use either the next channel ID if listed directly in blind hop payload OR convert the next node ID to a channel ID?
+// 	}
+// }
 
 // NewCustomRecords filters the types parsed from the tlv stream for custom
 // records.

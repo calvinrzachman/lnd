@@ -575,10 +575,12 @@ func (i *InvoiceRegistry) AddInvoice(invoice *channeldb.Invoice,
 
 	ref := channeldb.InvoiceRefByHash(paymentHash)
 	log.Debugf("Invoice%v: added with terms %v", ref, invoice.Terms)
+	fmt.Printf("[invoiceRegistry.AddInvoice]: Invoice%v: added with terms %v\n", ref, invoice.Terms)
 
 	addIndex, err := i.cdb.AddInvoice(invoice, paymentHash)
 	if err != nil {
 		i.Unlock()
+		fmt.Printf("[invoiceRegistry.AddInvoice]: failed trying to add invoice %v\n", err)
 		return 0, err
 	}
 
@@ -913,6 +915,7 @@ func (i *InvoiceRegistry) NotifyExitHopHtlc(rHash lntypes.Hash,
 	circuitKey channeldb.CircuitKey, hodlChan chan<- interface{},
 	payload Payload) (HtlcResolution, error) {
 
+	fmt.Println("[NotifyExitHopHtlc]: Find where we fail!")
 	// Create the update context containing the relevant details of the
 	// incoming htlc.
 	ctx := invoiceUpdateCtx{
@@ -927,6 +930,8 @@ func (i *InvoiceRegistry) NotifyExitHopHtlc(rHash lntypes.Hash,
 		amp:                  payload.AMPRecord(),
 		metadata:             payload.Metadata(),
 	}
+	fmt.Printf("[NotifyExitHopHtlc]: invoice update context: %+v, nil custom records? %t\n",
+		ctx, ctx.customRecords == nil)
 
 	switch {
 	// If we are accepting spontaneous AMP payments and this payload
@@ -968,6 +973,7 @@ func (i *InvoiceRegistry) NotifyExitHopHtlc(rHash lntypes.Hash,
 	}
 
 	if invoiceToExpire != nil {
+		fmt.Println("[NotifyExitHopHtlc]: add invoice!")
 		i.expiryWatcher.AddInvoices(invoiceToExpire)
 	}
 
@@ -976,6 +982,7 @@ func (i *InvoiceRegistry) NotifyExitHopHtlc(rHash lntypes.Hash,
 	// be auto-released, because otherwise a deadlock may happen with the
 	// main event loop.
 	case *htlcAcceptResolution:
+		fmt.Println("[NotifyExitHopHtlc]: htlc accept")
 		if r.autoRelease {
 			var invRef channeldb.InvoiceRef
 			if ctx.amp != nil {
@@ -999,10 +1006,12 @@ func (i *InvoiceRegistry) NotifyExitHopHtlc(rHash lntypes.Hash,
 
 	// A direct resolution was received for this htlc.
 	case HtlcResolution:
+		fmt.Println("[NotifyExitHopHtlc]: htlc res!")
 		return r, nil
 
 	// Fail if an unknown resolution type was received.
 	default:
+		fmt.Println("[NotifyExitHopHtlc]: default")
 		return nil, errors.New("invalid resolution type")
 	}
 }
@@ -1014,6 +1023,7 @@ func (i *InvoiceRegistry) notifyExitHopHtlcLocked(
 	ctx *invoiceUpdateCtx, hodlChan chan<- interface{}) (
 	HtlcResolution, invoiceExpiry, error) {
 
+	fmt.Println("[notifyExitHopHtlc]: Find where we fail!")
 	// We'll attempt to settle an invoice matching this rHash on disk (if
 	// one exists). The callback will update the invoice state and/or htlcs.
 	var (
@@ -1041,6 +1051,7 @@ func (i *InvoiceRegistry) notifyExitHopHtlcLocked(
 			return updateDesc, nil
 		},
 	)
+	fmt.Printf("[notifyExitHopHtlc]: completed invoice update! err: %+v\n", err)
 
 	if _, ok := err.(channeldb.ErrDuplicateSetID); ok {
 		return NewFailResolution(
@@ -1068,13 +1079,16 @@ func (i *InvoiceRegistry) notifyExitHopHtlcLocked(
 
 	default:
 		ctx.log(err.Error())
+		fmt.Println("[notifyExitHopHtlc]: failing in the default case!")
 		return nil, nil, err
 	}
 
+	fmt.Println("[notifyExitHopHtlc]: haven't failed yet, 23!")
 	var invoiceToExpire invoiceExpiry
 
 	switch res := resolution.(type) {
 	case *HtlcFailResolution:
+		fmt.Println("[notifyExitHopHtlc]: we got a fail resolution!")
 		// Inspect latest htlc state on the invoice. If it is found,
 		// we will update the accept height as it was recorded in the
 		// invoice database (which occurs in the case where the htlc
@@ -1090,6 +1104,10 @@ func (i *InvoiceRegistry) notifyExitHopHtlcLocked(
 		ctx.log(fmt.Sprintf("failure resolution result "+
 			"outcome: %v, at accept height: %v",
 			res.Outcome, res.AcceptHeight))
+
+		fmt.Printf("[notifyExitHopHtlc]: failure resolution result "+
+			"outcome: %v, at accept height: %v\n",
+			res.Outcome, res.AcceptHeight)
 
 		// Some failures apply to the entire HTLC set. Break here if
 		// this isn't one of them.
@@ -1115,6 +1133,10 @@ func (i *InvoiceRegistry) notifyExitHopHtlcLocked(
 		ctx.log(fmt.Sprintf("settle resolution result "+
 			"outcome: %v, at accept height: %v",
 			res.Outcome, res.AcceptHeight))
+
+		fmt.Printf("[notifyExitHopHtlc]: settle resolution result "+
+			"outcome: %v, at accept height: %v\n",
+			res.Outcome, res.AcceptHeight)
 
 		// Also settle any previously accepted htlcs. If a htlc is
 		// marked as settled, we should follow now and settle the htlc

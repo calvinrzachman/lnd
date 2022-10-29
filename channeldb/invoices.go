@@ -2711,11 +2711,13 @@ func (d *DB) updateInvoice(hash *lntypes.Hash, refSetID *SetID, invoices,
 			return nil, fmt.Errorf("duplicate add of htlc %v", key)
 		}
 
+		fmt.Println("[channeldb.updateInvoice]: custom records check")
 		// Force caller to supply htlc without custom records in a
 		// consistent way.
 		if htlcUpdate.CustomRecords == nil {
 			return nil, errors.New("nil custom records map")
 		}
+		fmt.Println("[channeldb.updateInvoice]: survived custom records check")
 
 		// If a newly added HTLC has an associated set id, use it to
 		// index this invoice in the set id index. An error is returned

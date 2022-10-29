@@ -3,6 +3,7 @@ package invoices
 import (
 	"encoding/hex"
 	"errors"
+	"fmt"
 
 	"github.com/lightningnetwork/lnd/amp"
 	"github.com/lightningnetwork/lnd/channeldb"
@@ -105,9 +106,11 @@ func updateInvoice(ctx *invoiceUpdateCtx, inv *channeldb.Invoice) (
 			return nil, ctx.failRes(ResultReplayToCanceled), nil
 
 		case channeldb.HtlcStateAccepted:
+			fmt.Println("[updateInvoice]: HTLC State accepted")
 			return nil, ctx.acceptRes(resultReplayToAccepted), nil
 
 		case channeldb.HtlcStateSettled:
+			fmt.Println("[updateInvoice]: HTLC State settled")
 			pre := inv.Terms.PaymentPreimage
 
 			// Terms.PaymentPreimage will be nil for AMP invoices.
@@ -129,10 +132,14 @@ func updateInvoice(ctx *invoiceUpdateCtx, inv *channeldb.Invoice) (
 	// If no MPP payload was provided, then we expect this to be a keysend,
 	// or a payment to an invoice created before we started to require the
 	// MPP payload.
+	// NOTE(10/25/22): Our Link test is getting stuck here with an amount
+	// lower than what is expected. I think we hit this for itest.
 	if ctx.mpp == nil {
+		fmt.Println("[updateInvoice]: handling legacy payment with legacy payload")
 		return updateLegacy(ctx, inv)
 	}
 
+	fmt.Println("[updateInvoice]: handling payment with MPP payload")
 	return updateMpp(ctx, inv)
 }
 
@@ -379,7 +386,9 @@ func updateLegacy(ctx *invoiceUpdateCtx,
 	// check this for duplicate payments if the invoice is already settled
 	// or accepted. In case this is a zero-valued invoice, it will always be
 	// enough.
+	fmt.Printf("[updateLegacy]: amount. want: %d got: %d\n", inv.Terms.Value, ctx.amtPaid)
 	if ctx.amtPaid < inv.Terms.Value {
+		fmt.Printf("[updateLegacy]: amount too low. want: %d got: %d\n", inv.Terms.Value, ctx.amtPaid)
 		return nil, ctx.failRes(ResultAmountTooLow), nil
 	}
 
@@ -417,6 +426,7 @@ func updateLegacy(ctx *invoiceUpdateCtx,
 	}
 
 	// Record HTLC in the invoice database.
+	fmt.Printf("[updateLegacy]: building htlc accept description. ctx: %+v, nil records?: %+v\n", ctx, ctx.customRecords == nil)
 	newHtlcs := map[channeldb.CircuitKey]*channeldb.HtlcAcceptDesc{
 		ctx.circuitKey: {
 			Amt:           ctx.amtPaid,
@@ -457,6 +467,7 @@ func updateLegacy(ctx *invoiceUpdateCtx,
 		Preimage: inv.Terms.PaymentPreimage,
 	}
 
+	fmt.Println("[updateLegacy]: calling settle res")
 	return &update, ctx.settleRes(
 		*inv.Terms.PaymentPreimage, ResultSettled,
 	), nil
