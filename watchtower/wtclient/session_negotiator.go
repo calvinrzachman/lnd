@@ -272,6 +272,24 @@ retryWithBackoff:
 		}
 	}
 
+	// Wait until we have at least one candidate tower
+	// with which to request a session.
+	if n.cfg.Candidates.IsEmpty() {
+		n.log.Trace("No candidate towers. Waiting for tower before " +
+			"requesting session.")
+
+		select {
+		// Begin session negotiation as soon as we receive a new
+		// candidate tower.
+		case tower := <-n.cfg.Candidates.NewTower():
+			n.log.Tracef("Received new candidate tower=%x",
+				tower.IdentityKey.SerializeCompressed()[:10])
+
+		case <-n.quit:
+			return
+		}
+	}
+
 	for {
 		select {
 		case <-n.quit:

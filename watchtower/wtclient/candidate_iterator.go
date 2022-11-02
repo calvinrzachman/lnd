@@ -2,6 +2,7 @@ package wtclient
 
 import (
 	"container/list"
+	"fmt"
 	"net"
 	"sync"
 
@@ -29,6 +30,10 @@ type TowerCandidateIterator interface {
 	// with which we could potentially establish a session.
 	IsEmpty() bool
 
+	// NewTower is a read-only channel where the IDs of newly added
+	// towers will be delivered on a best effort basis.
+	NewTower() <-chan *Tower
+
 	// Reset clears any internal iterator state, making previously taken
 	// candidates available as long as they remain in the set.
 	Reset() error
@@ -45,6 +50,9 @@ type towerListIterator struct {
 	queue         *list.List
 	nextCandidate *list.Element
 	candidates    map[wtdb.TowerID]*Tower
+	newTowers     chan *Tower
+	// newTower      chan *ClientSession
+	// newSessions   chan *ClientSession
 }
 
 // Compile-time constraint to ensure *towerListIterator implements the
@@ -57,6 +65,8 @@ func newTowerListIterator(candidates ...*Tower) *towerListIterator {
 	iter := &towerListIterator{
 		queue:      list.New(),
 		candidates: make(map[wtdb.TowerID]*Tower),
+		newTowers:  make(chan *Tower),
+		// newTower:   make(chan *ClientSession),
 	}
 
 	for _, candidate := range candidates {
@@ -124,6 +134,17 @@ func (t *towerListIterator) AddCandidate(candidate *Tower) {
 		if t.nextCandidate == nil {
 			t.nextCandidate = t.queue.Back()
 		}
+
+		// Perform best effort notification that we have
+		// receieved a new tower.
+		// NOTE: We do not want to block inside this method.
+		select {
+		case t.newTowers <- candidate:
+			fmt.Printf("notifying of added tower: %+v\n", candidate)
+		default:
+			fmt.Println("nobody awaiting notification")
+		}
+
 	} else {
 		candidate.Addresses.Reset()
 		firstAddr := candidate.Addresses.Peek()
@@ -185,6 +206,12 @@ func (t *towerListIterator) IsEmpty() bool {
 	defer t.mu.Unlock()
 
 	return len(t.candidates) == 0
+}
+
+// NewTower indicates whether the iterator has any candidate towers
+// with which we could potentially establish a session.
+func (t *towerListIterator) NewTower() <-chan *Tower {
+	return t.newTowers
 }
 
 // TODO(conner): implement graph-backed candidate iterator for public towers.
