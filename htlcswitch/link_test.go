@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
@@ -34,6 +35,7 @@ import (
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 	"github.com/lightningnetwork/lnd/lnwire"
+	"github.com/lightningnetwork/lnd/record"
 	"github.com/lightningnetwork/lnd/ticker"
 	"github.com/stretchr/testify/require"
 )
@@ -6558,4 +6560,424 @@ func assertFailureCode(t *testing.T, err error, code lnwire.FailCode) {
 		t.Fatalf("expected %v but got %v",
 			code, rtErr.WireMessage().Code())
 	}
+}
+
+type validateOnionPayloadTest struct {
+	name string
+	// payload       []byte
+	parsedPayload *hop.Payload
+	// This would assume the route blinding TLV payload
+	// as already been extracted from the top level onion TLV payload.
+	// routeBlindingPayload []byte
+	// This would assume the route blinding TLV payload
+	// as already been parsed into a hop.BlindPayload{} struct.
+	parsedRouteBlindingPayload *hop.BlindHopPayload
+	// The internal representation of the information contained
+	// in the update message for this htlc (UpdateAddHTLC).
+	// Decide which is better to use for the test.
+	updateAddHtlc lnwallet.PaymentDescriptor
+	// UpdateAddHTLC lnwire.UpdateAddHTLC
+	expectedErr error
+	errExpected bool
+	isFinalHop  bool // NOTE(9/16/22): determined by sphinx package before TLVs are parsed!
+}
+
+var validateOnionPayloadTests = []validateOnionPayloadTest{
+	{
+		name:                       "introduction node blinded route",
+		parsedPayload:              generatePayload("intro"),
+		parsedRouteBlindingPayload: generateBlindPayload("intro"),
+	},
+	{
+		name:                       "intermediate hop blinded route w/ next hop",
+		parsedPayload:              generatePayload("intermediate"),
+		parsedRouteBlindingPayload: generateBlindPayload("intermediate"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{}, // intermediate node receives blinding point in update message
+		},
+	},
+	{
+		name:                       "final hop blinded route",
+		parsedPayload:              generatePayload("final"),
+		parsedRouteBlindingPayload: generateBlindPayload("final"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{}, // final node receives blinding point in update message
+		},
+		isFinalHop: true,
+	},
+	{
+		name:                       "blind hop with blinding point in both msg and tlv payload", // error case
+		parsedPayload:              generatePayload("intro"),
+		parsedRouteBlindingPayload: generateBlindPayload("intro"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{},
+		},
+		// TODO(9/10/22): figure out how to confirm correct errors.
+		// We have 3 separate TLV BOLT-04 validation functions.
+		// Depending on the setup, we exect an error any one of them.
+		errExpected: true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.BlindingPointOnionType,
+			Violation: hop.OverloadedViolation,
+		},
+	},
+	{
+		name: "blind hop missing blinding point in msg and tlv payload", // error case
+		parsedPayload: &hop.Payload{
+			RouteBlindingEncryptedData: []byte{},
+		},
+		parsedRouteBlindingPayload: &hop.BlindHopPayload{},
+		updateAddHtlc:              lnwallet.PaymentDescriptor{},
+		errExpected:                true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.BlindingPointOnionType,
+			Violation: hop.OmittedViolation,
+		},
+	},
+	// {
+	// 	name:                       "blind hop missing payment_relay", // error case (covered at parse time!!)
+	// 	parsedPayload:              generatePayload("intermediate"),
+	// 	parsedRouteBlindingPayload: generateBlindPayload("unsatisfiable-constraints"),
+	// 	updateAddHtlc: lnwallet.PaymentDescriptor{
+	// 		BlindingPoint: &btcec.PublicKey{},
+	// 	},
+	// 	// errExpected: true,
+	// },
+	{
+		name:                       "blind hop payment_relay which fails to meet constraints", // error case
+		parsedPayload:              generatePayload("intermediate"),
+		parsedRouteBlindingPayload: generateBlindPayload("unsatisfiable-constraints"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{},
+		},
+		errExpected: true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.AmtOnionType,
+			Violation: hop.InsufficientViolation,
+		},
+	},
+	{
+		name:          "blind hop payment_relay fails to meet constraints - expired", // error case
+		parsedPayload: generatePayload("intermediate"),
+		parsedRouteBlindingPayload: func() *hop.BlindHopPayload {
+			pld := generateBlindPayload("unsatisfiable-constraints")
+			pld.PaymentConstraints.MaxCltvExpiryDelta = 100
+			return pld
+		}(),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{},
+			Timeout:       101,
+		},
+		errExpected: true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.LockTimeOnionType,
+			Violation: hop.InsufficientViolation,
+		},
+	},
+	{
+		name: "blind hop with amt_to_forward improperly set in top level TLV payload", // error case
+		parsedPayload: &hop.Payload{
+			FwdInfo: hop.ForwardingInfo{
+				AmountToForward: lnwire.MilliSatoshi(100),
+			},
+			RouteBlindingEncryptedData: []byte{},
+		},
+		parsedRouteBlindingPayload: generateBlindPayload("intermediate"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{},
+		},
+		errExpected: true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.AmtOnionType,
+			Violation: hop.IncludedViolation,
+		},
+	},
+	{
+		name: "blind hop with timelock improperly set in top level TLV payload", // error case
+		parsedPayload: func() *hop.Payload {
+			pld := generatePayload("intermediate")
+			pld.FwdInfo.OutgoingCTLV = 1000
+			return pld
+		}(),
+		parsedRouteBlindingPayload: generateBlindPayload("intermediate"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{},
+		},
+		errExpected: true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.LockTimeOnionType,
+			Violation: hop.IncludedViolation,
+		},
+	},
+	{
+		name: "blind hop with short_channel_id improperly set in top level TLV payload", // error case
+		parsedPayload: func() *hop.Payload {
+			pld := generatePayload("intermediate")
+			pld.FwdInfo.NextHop = lnwire.NewShortChanIDFromInt(1)
+			return pld
+		}(),
+		parsedRouteBlindingPayload: generateBlindPayload("intermediate"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{},
+		},
+		errExpected: true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.NextHopOnionType,
+			Violation: hop.IncludedViolation,
+		},
+	},
+	{
+		name: "blind hop with MPP improperly set in top level TLV payload", // error case
+		parsedPayload: &hop.Payload{
+			RouteBlindingEncryptedData: []byte{},
+			MPP:                        &record.MPP{},
+		},
+		parsedRouteBlindingPayload: generateBlindPayload("intermediate"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{},
+		},
+		errExpected: true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.MPPOnionType,
+			Violation: hop.IncludedViolation,
+		},
+	},
+	{
+		name: "blind hop with AMP improperly set in top level TLV payload", // error case
+		parsedPayload: &hop.Payload{
+			RouteBlindingEncryptedData: []byte{},
+			AMP:                        &record.AMP{},
+		},
+		parsedRouteBlindingPayload: generateBlindPayload("intermediate"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{},
+		},
+		errExpected: true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.AMPOnionType,
+			Violation: hop.IncludedViolation,
+		},
+	},
+	// {
+	// 	name: "blind hop with metadata improperly set in top level TLV payload", // error case
+	// 	parsedPayload: &hop.Payload{
+	// 		RouteBlindingEncryptedData: []byte{},
+	// 	},
+	// 	parsedRouteBlindingPayload: generateBlindPayload("intermediate"),
+	// 	updateAddHtlc: lnwallet.PaymentDescriptor{
+	// 		BlindingPoint: &btcec.PublicKey{},
+	// 	},
+	// 	errExpected:                 true,
+	// },
+	{
+		name: "blind hop with total_amount_msat improperly set in top level TLV payload", // error case
+		parsedPayload: &hop.Payload{
+			RouteBlindingEncryptedData: []byte{},
+			TotalAmountMsat:            lnwire.MilliSatoshi(100),
+		},
+		parsedRouteBlindingPayload: generateBlindPayload("intermediate"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{},
+		},
+		errExpected: true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.TotalAmountMsatOnionType,
+			Violation: hop.IncludedViolation,
+		},
+	},
+	{
+		name: "final hop blinded route missing amt in top level TLV payload",
+		parsedPayload: func() *hop.Payload {
+			pld := generatePayload("final")
+			pld.FwdInfo.AmountToForward = lnwire.MilliSatoshi(0)
+			return pld
+		}(),
+		parsedRouteBlindingPayload: generateBlindPayload("final"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{}, // final node receives blinding point in update message
+		},
+		errExpected: true,
+		isFinalHop:  true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.AmtOnionType,
+			Violation: hop.OmittedViolation,
+			FinalHop:  true,
+		},
+	},
+	{
+		name: "final hop blinded route missing outgoing_cltv_value in top level TLV payload",
+		parsedPayload: func() *hop.Payload {
+			pld := generatePayload("final")
+			pld.FwdInfo.OutgoingCTLV = 0
+			return pld
+		}(),
+		parsedRouteBlindingPayload: generateBlindPayload("final"),
+		updateAddHtlc: lnwallet.PaymentDescriptor{
+			BlindingPoint: &btcec.PublicKey{}, // final node receives blinding point in update message
+		},
+		errExpected: true,
+		isFinalHop:  true,
+		expectedErr: hop.ErrInvalidPayload{
+			Type:      record.LockTimeOnionType,
+			Violation: hop.OmittedViolation,
+			FinalHop:  true,
+		},
+	},
+	{
+		name: "intro node is last node",
+		parsedPayload: func() *hop.Payload {
+			pld := generatePayload("intro")
+			// The sender must add
+			pld.FwdInfo.AmountToForward = lnwire.MilliSatoshi(100)
+			pld.FwdInfo.OutgoingCTLV = 100
+			pld.TotalAmountMsat = lnwire.MilliSatoshi(100)
+			return pld
+		}(),
+		parsedRouteBlindingPayload: generateBlindPayload("final"),
+		updateAddHtlc:              lnwallet.PaymentDescriptor{},
+		isFinalHop:                 true,
+	},
+}
+
+// generateBlindPayload creates a variety of route blinding TLV payloads.
+func generateBlindPayload(typ string) *hop.BlindHopPayload {
+	var blindPayload *hop.BlindHopPayload
+
+	switch typ {
+	case "intro":
+		blindPayload = &hop.BlindHopPayload{
+			Padding: []byte{0, 0, 0, 0},
+			NextHop: lnwire.NewShortChanIDFromInt(1),
+			PaymentRelay: &record.PaymentRelay{
+				CltvExpiryDelta: 0,
+				FeeRate:         0,
+				BaseFee:         100,
+			},
+			PaymentConstraints: &record.PaymentConstraints{
+				MaxCltvExpiryDelta: 1000,
+				HtlcMinimumMsat:    0,
+				// AllowedFeatures: []byte,
+			},
+		}
+
+	case "intermediate":
+		blindPayload = &hop.BlindHopPayload{
+			Padding: []byte{0, 0, 0, 0},
+			NextHop: lnwire.NewShortChanIDFromInt(1),
+			PaymentRelay: &record.PaymentRelay{
+				CltvExpiryDelta: 0,
+				FeeRate:         0,
+				BaseFee:         100,
+			},
+			PaymentConstraints: &record.PaymentConstraints{
+				MaxCltvExpiryDelta: 1000,
+				HtlcMinimumMsat:    0,
+				// AllowedFeatures: []byte,
+			},
+		}
+
+	case "final":
+		blindPayload = &hop.BlindHopPayload{
+			Padding: []byte{0, 0, 0, 0},
+			PathID:  []byte{0xff, 0x00, 0xff, 0x00},
+			PaymentConstraints: &record.PaymentConstraints{
+				MaxCltvExpiryDelta: 1000,
+				HtlcMinimumMsat:    0,
+				// AllowedFeatures: []byte,
+			},
+		}
+
+	case "unsatisfiable-constraints":
+		blindPayload = &hop.BlindHopPayload{
+			Padding: []byte{0, 0, 0, 0},
+			NextHop: lnwire.NewShortChanIDFromInt(1),
+			PaymentRelay: &record.PaymentRelay{
+				CltvExpiryDelta: 0,
+				FeeRate:         0,
+				BaseFee:         100,
+			},
+			PaymentConstraints: &record.PaymentConstraints{
+				MaxCltvExpiryDelta: 0,
+				HtlcMinimumMsat:    ^uint64(0), // max value
+				// AllowedFeatures: []byte,
+			},
+		}
+
+	default:
+		blindPayload = nil
+	}
+
+	return blindPayload
+}
+
+// generatePayload creates a variety of top level onion TLV payloads.
+func generatePayload(typ string) *hop.Payload {
+	var hopPayload *hop.Payload
+	pubkeyBytes, _ := hex.DecodeString("02bedd1e7865e7476f522b02b13f137f418105154312b48c45985dd72cbf47c143")
+	pubKey, _ := btcec.ParsePubKey(pubkeyBytes)
+
+	switch typ {
+	case "intro":
+		hopPayload = &hop.Payload{
+			RouteBlindingEncryptedData: []byte{},
+			BlindingPoint:              pubKey,
+		}
+
+	case "intermediate":
+		hopPayload = &hop.Payload{
+			RouteBlindingEncryptedData: []byte{},
+		}
+
+	case "final":
+		hopPayload = &hop.Payload{
+			FwdInfo: hop.ForwardingInfo{
+				NextHop:         hop.Exit,
+				AmountToForward: lnwire.MilliSatoshi(100),
+				OutgoingCTLV:    1000,
+			},
+			TotalAmountMsat:            lnwire.MilliSatoshi(100),
+			RouteBlindingEncryptedData: []byte{},
+		}
+
+	default:
+		hopPayload = nil
+	}
+
+	return hopPayload
+}
+
+// TestHopPayloadRecordValidation validates that the top level onion TLV
+// payload, route blinding TLV payload, and UpdateAddHTLC message conform
+// to the BOLT-04 specification.
+func TestRouteBlindingRecordValidation(t *testing.T) {
+	for _, test := range validateOnionPayloadTests {
+		t.Run(test.name, func(t *testing.T) {
+			testRouteBlindingValidation(t, test)
+		})
+	}
+}
+
+func testRouteBlindingValidation(t *testing.T, test validateOnionPayloadTest) {
+
+	errTop := ValidateTopLevelPayloadAndAddMsg(test.parsedPayload, &test.updateAddHtlc)
+	errRB := ValidateTopLevelPayloadRouteBlinding(test.parsedPayload, test.isFinalHop)
+	errPC := ValidateRouteBlindingPaymentConstraints(test.parsedRouteBlindingPayload, &test.updateAddHtlc)
+
+	var err error
+	if errTop != nil {
+		err = errTop
+	}
+	if errRB != nil {
+		err = errRB
+	}
+	if errPC != nil {
+		err = errPC
+	}
+
+	if test.errExpected {
+		require.ErrorIsf(t, err, test.expectedErr, "unexpected error. want: %v, got:%v")
+	} else {
+		require.NoError(t, err)
+	}
+
 }
