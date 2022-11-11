@@ -885,3 +885,7 @@ func testDecodeBlindHopPayloadValidation(t *testing.T, test decodeRouteBlindingP
 	}
 
 }
+
+// TODO(10/16/22): Test compute to amount forward requires it be exported
+// as our test code lives in a different package.
+// func TestComputeAmountToForward(t *testing.T) {}
