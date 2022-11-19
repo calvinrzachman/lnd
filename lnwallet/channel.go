@@ -381,7 +381,8 @@ type PaymentDescriptor struct {
 	// version of our persistent node ID key pair for decrypting the onion
 	// when forwarding in the blinded portion of a route. Our upstream peer
 	// is expected to include this as a TLV extension to UpdateAddHTLC.
-	BlindingPoint *btcec.PublicKey
+	BlindingPoint    *btcec.PublicKey
+	IntroductionNode bool
 }
 
 // PayDescsFromRemoteLogUpdates converts a slice of LogUpdates received from the
@@ -5295,6 +5296,13 @@ func (lc *LightningChannel) MayAddOutgoingHtlc(amt lnwire.MilliSatoshi) error {
 func (lc *LightningChannel) htlcAddDescriptor(htlc *lnwire.UpdateAddHTLC,
 	openKey *channeldb.CircuitKey) *PaymentDescriptor {
 
+	if htlc.BlindingPoint != nil {
+		fmt.Printf("[LightningChannel.AddHTLC()]: adding htlc with "+
+			"ephemeral route blinding point: %x\n",
+			htlc.BlindingPoint.SerializeCompressed()[:10],
+		)
+	}
+
 	return &PaymentDescriptor{
 		EntryType:      Add,
 		RHash:          PaymentHash(htlc.PaymentHash),
@@ -5539,6 +5547,9 @@ func (lc *LightningChannel) FailHTLC(htlcIndex uint64, reason []byte,
 	lc.Lock()
 	defer lc.Unlock()
 
+	// NOTE(11/21/22): Any HTLC failure we're about to send
+	// to our peer MUST correspond to an ADD they've previously
+	// told us about, thus it'll be in our remote update log.
 	htlc := lc.remoteUpdateLog.lookupHtlc(htlcIndex)
 	if htlc == nil {
 		return ErrUnknownHtlcIndex{lc.ShortChanID(), htlcIndex}
@@ -5560,8 +5571,26 @@ func (lc *LightningChannel) FailHTLC(htlcIndex uint64, reason []byte,
 		SourceRef:        sourceRef,
 		DestRef:          destRef,
 		ClosedCircuitKey: closeKey,
+		// IMPORTANT NOTE(11/17/22):
+		// The LN state machine stores the blinding point
+		// associated with an Add if the ADD was associated
+		// with a blinded route. If that Add is now being
+		// failed, we'll want a reference to its ephemeral
+		// blinding point so we can use it to determine which
+		// error will be forwarded back towards the sender.
+		// NOTE(11/17/22): Not sure whether this should be set
+		// here or somewhere similar like ReceiveFailHTLC().
+		// BlindingPoint: htlc.BlindingPoint,
+	}
+	if htlc.BlindingPoint != nil {
+		fmt.Printf("[LightningChannel.FailHTLC()]: failing htlc. corresponding "+
+			"add's ephemeral route blinding point: %x\n",
+			htlc.BlindingPoint.SerializeCompressed()[:10],
+		)
 	}
 
+	// NOTE(11/21/22): Add payment descriptor to our update log
+	// as this update is from this link and will be sent to our peer.
 	lc.localUpdateLog.appendUpdate(pd)
 
 	// With the fail added to the remote log, we'll now mark the HTLC as
@@ -5609,6 +5638,13 @@ func (lc *LightningChannel) MalformedFailHTLC(htlcIndex uint64,
 		FailCode:     failCode,
 		ShaOnionBlob: shaOnionBlob,
 		SourceRef:    sourceRef,
+		// BlindingPoint: htlc.BlindingPoint,
+	}
+	if htlc.BlindingPoint != nil {
+		fmt.Printf("[LightningChannel.MalformedFailHTLC()]: failing htlc. corresponding "+
+			"add's ephemeral route blinding point: %x\n",
+			htlc.BlindingPoint.SerializeCompressed()[:10],
+		)
 	}
 
 	lc.localUpdateLog.appendUpdate(pd)
@@ -5628,9 +5664,13 @@ func (lc *LightningChannel) MalformedFailHTLC(htlcIndex uint64,
 func (lc *LightningChannel) ReceiveFailHTLC(htlcIndex uint64, reason []byte,
 ) error {
 
+	fmt.Println("[LightningChannel.ReceiveFailHTLC()]: failing htlc.")
+
 	lc.Lock()
 	defer lc.Unlock()
 
+	// NOTE(11/21/22): Any HTLC failure MUST correspond to an ADD
+	// we preivously put in our local update log.
 	htlc := lc.localUpdateLog.lookupHtlc(htlcIndex)
 	if htlc == nil {
 		return ErrUnknownHtlcIndex{lc.ShortChanID(), htlcIndex}
@@ -5662,7 +5702,15 @@ func (lc *LightningChannel) ReceiveFailHTLC(htlcIndex uint64, reason []byte,
 		// error will be forwarded back towards the sender.
 		BlindingPoint: htlc.BlindingPoint,
 	}
+	if htlc.BlindingPoint != nil {
+		fmt.Printf("[LightningChannel.ReceiveFailHTLC()]: failing htlc. corresponding "+
+			"add's ephemeral route blinding point: %x\n",
+			htlc.BlindingPoint.SerializeCompressed()[:10],
+		)
+	}
 
+	// NOTE(11/21/22): Add payment descriptor to remote update log
+	// as this update was from the remote peer.
 	lc.remoteUpdateLog.appendUpdate(pd)
 
 	// With the fail added to the remote log, we'll now mark the HTLC as
