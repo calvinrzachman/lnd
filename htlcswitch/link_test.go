@@ -675,6 +675,466 @@ func TestChannelLinkBlindedPathPayment(t *testing.T) {
 			testLinkEnforcesBOLT04(t)
 		},
 	)
+	t.Run("blind hop processing downstream error creation",
+		func(t *testing.T) {
+			testLinkDownstreamBlindHopError(t)
+		},
+	)
+	t.Run("blind hop processing downstream error obfuscation",
+		func(t *testing.T) {
+			testLinkObfuscateDownstreamBlindHopErrors(t)
+		},
+	)
+	// TODO(11/17/22): test link/switch dummy hop processing.
+}
+
+// testLinkObfuscateDownstreamBlindHopErrors verifies that if we receive
+// an UpdateFailHTLC for an HTLC on a blinded route/circuit, then we
+// should convert any potentially privacy leaking downstream error
+// into the opaque InvalidOnionBlinding (good guy privacy protector).
+//
+// NOTE(11/17/22): This test might need to look a bit different
+// than our other link tests because we need more control
+// over what kind of error is returned downstream in the route.
+func testLinkObfuscateDownstreamBlindHopErrors(t *testing.T) {
+	t.Parallel()
+
+	channels, _, err := createClusterChannels(
+		t, btcutil.SatoshiPerBitcoin*3, btcutil.SatoshiPerBitcoin*5,
+	)
+	require.NoError(t, err, "unable to create channel")
+
+	n := newThreeHopNetwork(
+		t, channels.aliceToBob, channels.bobToAlice,
+		channels.bobToCarol, channels.carolToBob,
+		testStartingHeight,
+	)
+
+	if err := n.start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(n.stop)
+
+	debug := false
+	if debug {
+		// Log messages that alice receives from bob.
+		n.aliceServer.intersect(createLogFunc("[alice]<-bob<-carol: ",
+			n.aliceChannelLink.ChanID()))
+
+		// Log messages that bob receives from alice.
+		n.bobServer.intersect(createLogFunc("alice->[bob]->carol: ",
+			n.firstBobChannelLink.ChanID()))
+
+		// Log messages that bob receives from carol.
+		n.bobServer.intersect(createLogFunc("alice<-[bob]<-carol: ",
+			n.secondBobChannelLink.ChanID()))
+
+		// Log messages that carol receives from bob.
+		n.carolServer.intersect(createLogFunc("alice->bob->[carol]",
+			n.carolChannelLink.ChanID()))
+	}
+
+	// Generate blinded hops. For ease of testing the
+	// route blinding payload is NOT encrypted.
+	amount := lnwire.NewMSatFromSatoshis(btcutil.SatoshiPerBitcoin)
+	htlcAmt, totalTimelock, hops := generateBlindHops(
+		amount, testStartingHeight, nil,
+		n.firstBobChannelLink, n.carolChannelLink,
+	)
+	t.Logf("amount: %d, htlc amount: %d, # of hops: %d", amount, htlcAmt, len(hops))
+
+	blob, err := generateRoute(hops...)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Configure the links to support blind hop processing.
+	n.aliceChannelLink.cfg.RouteBlindingEnabled = true
+	n.firstBobChannelLink.cfg.RouteBlindingEnabled = true
+	n.secondBobChannelLink.cfg.RouteBlindingEnabled = true
+	n.carolChannelLink.cfg.RouteBlindingEnabled = true
+
+	// Generate a fresh invoice and payment hash for every
+	// test. This way we get unique payment hashes and
+	// payment addresses across tests.
+	preimage, rhash, _ := generatePaymentSecret()
+	payAddr, _ := generatePaymentAddress()
+
+	invoice, htlc, pid, err := generatePaymentWithPreimage(
+		amount, htlcAmt, totalTimelock,
+		blob, &preimage, rhash, payAddr,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Add the invoice to Carol's invoice registry so that she's
+	// expecting payment.
+	err = n.carolServer.registry.AddInvoice(*invoice, htlc.PaymentHash)
+	require.NoError(t, err, "unable to add invoice in carol registry")
+
+	// Set Carol in hodl ExitSettle mode so that she won't respond
+	// immediately to the htlc's meant for her. This allows us to control
+	// the responses she gives back to Bob.
+	n.carolChannelLink.cfg.HodlMask = hodl.ExitSettle.Mask()
+
+	// NOTE(11/18/22): Not sure if we need this, but
+	// it might be useful in sychronizing what follows.
+	mitmBobCarol := NewManInTheMiddle(n.bobServer, n.carolServer, n.carolChannelLink.ShortChanID())
+
+	// Let Alice send the HTLC to Carol, using Bob as an intermediate hop.
+	// Carol will receive and irrevocably commit to the HTLC, but since she
+	// is in ExitSettle mode, she will not immediately begin processing the
+	// HTLC as an exit hop. We will then take over and provide targeted fail
+	// messages to test the link's ability to convert downstream errors inside
+	// a blind route.
+	err = n.aliceServer.htlcSwitch.SendHTLC(
+		n.firstBobChannelLink.ShortChanID(),
+		pid, htlc,
+	)
+	require.NoError(t, err, "unable to send payment to carol")
+
+	// We cannot inject our improper UpdateFailHTLC
+	// for an HTLC which Carol has not even heard of yet,
+	// so we'll eavesdrop on Carol and wait for her to begin
+	// irrevocably committing the HTLC.
+	msg := <-mitmBobCarol.leftSentMessages
+	fmt.Println("bob sent message: ", msg.MsgType())
+	msg = <-mitmBobCarol.rightSentMessages
+	fmt.Println("carol sent message: ", msg.MsgType())
+
+	// Now, we'll take over Carol's node and force it to send
+	// an error which provides too much information to the sender
+	// and which could be used to probe the blinded route.
+	// Construct an improper UpdateFailHTLC and inject it into
+	// Carol's link for processing.
+	obfuscator := NewMockObfuscator()
+	privacyLeakingReason, err := obfuscator.EncryptFirstHop(
+		lnwire.NewFinalExpiryTooSoon(),
+	)
+	require.NoError(t, err, "unable obfuscate failure")
+
+	fail := &htlcPacket{
+		incomingChanID: n.secondBobChannelLink.ShortChanID(),
+		incomingHTLCID: 0,
+		obfuscator:     obfuscator,
+		htlc: &lnwire.UpdateFailHTLC{
+			ID:     0,
+			Reason: privacyLeakingReason,
+			// Reason: lnwire.OpaqueReason([]byte("privacy leaking error details!")),
+		},
+	}
+	_ = n.carolChannelLink.handleSwitchPacket(fail)
+
+	// Verify that Bob's node/link properly converts that error back into
+	// an InvalidOnionBlinding (ie: the UpdateFailHTLC{FinalExpiryTooSoon} does
+	// NOT propagate back to the sender. The sender instead receives
+	// InvalidOnionBlinding). In this case the chain of privacy preservation
+	// is as strong as its strongest link!
+	//
+	// NOTE(11/17/22): We verify this, not by eavesdropping or inspecting
+	// the message sent by Bob, but by examining the payment result the
+	// sender, Alice, ends up receiving.
+	resultChan, err := n.aliceServer.htlcSwitch.GetPaymentResult(
+		pid, htlc.PaymentHash,
+		newMockDeobfuscator(),
+	)
+	require.NoError(t, err, "unable to get payment result")
+
+	select {
+	case result, ok := <-resultChan:
+		if !ok {
+			t.Fatalf("unexpected shutdown")
+		}
+
+		// Expect that ultimately this payment fails with an
+		// InvalidOnionBlinding error returned back to the sender.
+		assertFailureCode(t, result.Error, lnwire.CodeInvalidOnionBlinding)
+
+	case <-time.After(5 * time.Second):
+		t.Fatalf("payment result did not arrive")
+	}
+
+}
+
+func testLinkDownstreamBlindHopError(t *testing.T) {
+	t.Parallel()
+
+	// aliceLink, _, _, start, _, err :=
+	// 	// NOTE(11/17/22): This uses a mockPeer which lets us intercept
+	// 	// the messages sent. newThreeHopNetwork does not use a mockPeer
+	// 	// but rather a mockServer. Perhaps it has its own way of letting
+	// 	// us spy on messages. Otherwise maybe we can wrap the mockServer
+	// 	// with some additional features.
+	// 	newSingleLinkTestHarness(t, chanAmt, chanReserve)
+
+	// var (
+	// 	coreLink = aliceLink.(*channelLink)
+	// 	// NOTE(11/17/22): We do have a way to spy messages sent by
+	// 	// each link. Could use this to verify that UpdateFailHTLC
+	// 	// and UpdateFailMalformedHTLC are sent as expected depending
+	// 	// on whether a node is introduction, intermediate, or final.
+	// 	_ = coreLink.cfg.Peer.(*mockPeer).sentMsgs
+	// )
+
+	channels, _, err := createClusterChannels(
+		t, btcutil.SatoshiPerBitcoin*3, btcutil.SatoshiPerBitcoin*5,
+	)
+	require.NoError(t, err, "unable to create channel")
+
+	n := newThreeHopNetwork(
+		t, channels.aliceToBob, channels.bobToAlice,
+		channels.bobToCarol, channels.carolToBob,
+		testStartingHeight,
+	)
+
+	if err := n.start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(n.stop)
+
+	debug := false
+	if debug {
+		// Log messages that alice receives from bob.
+		n.aliceServer.intersect(createLogFunc("[alice]<-bob<-carol: ",
+			n.aliceChannelLink.ChanID()))
+
+		// Log messages that bob receives from alice.
+		n.bobServer.intersect(createLogFunc("alice->[bob]->carol: ",
+			n.firstBobChannelLink.ChanID()))
+
+		// Log messages that bob receives from carol.
+		n.bobServer.intersect(createLogFunc("alice<-[bob]<-carol: ",
+			n.secondBobChannelLink.ChanID()))
+
+		// Log messages that carol receives from bob.
+		n.carolServer.intersect(createLogFunc("alice->bob->[carol]",
+			n.carolChannelLink.ChanID()))
+	}
+
+	// Generate blinded hops. For ease of testing the
+	// route blinding payload is NOT encrypted.
+	amount := lnwire.NewMSatFromSatoshis(btcutil.SatoshiPerBitcoin)
+	htlcAmt, totalTimelock, hops := generateBlindHops(
+		amount, testStartingHeight, nil,
+		n.firstBobChannelLink, n.carolChannelLink,
+	)
+	t.Logf("amount: %d, htlc amount: %d", amount, htlcAmt)
+
+	// Configure the links to support blind hop processing.
+	n.aliceChannelLink.cfg.RouteBlindingEnabled = true
+	n.firstBobChannelLink.cfg.RouteBlindingEnabled = true
+	n.secondBobChannelLink.cfg.RouteBlindingEnabled = true
+	n.carolChannelLink.cfg.RouteBlindingEnabled = true
+
+	// Configure Carol such that she will return an error while processing
+	// blind hop. Expect this one to be UpdateFailMalformedHTLC
+	n.carolChannelLink.cfg.BlindHopProcessor = &brokenBlindHopProcessor{
+		errOnDecrypt: true,
+	}
+
+	blob, err := generateRoute(hops...)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Generate a fresh invoice and payment hash for every
+	// test. This way we get unique payment hashes and
+	// payment addresses across tests.
+	// NOTE(11/20/22): The following might be conveniently
+	// bundled together in its own function. OR
+	// we could try having generatePaymentWithPreimage return the
+	// preimage that it used.
+	preimage, rhash, _ := generatePaymentSecret()
+	payAddr, _ := generatePaymentAddress()
+
+	invoice, htlc, pid, err := generatePaymentWithPreimage(
+		amount, htlcAmt, totalTimelock,
+		blob, &preimage, rhash, payAddr,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Add the invoice to Carol's invoice registry so that she's
+	// expecting payment.
+	err = n.carolServer.registry.AddInvoice(*invoice, htlc.PaymentHash)
+	require.NoError(t, err, "unable to add invoice in carol registry")
+
+	assertExpectedMsg := func(expectedType, msgType lnwire.MessageType) bool {
+		if msgType != expectedType {
+			t.Logf("unexpected message type. want: %s, got: %s", expectedType, msgType)
+			return false
+		}
+		return true
+	}
+
+	// manInMiddle sets up a man in the middle attack on the
+	// target channel link. Any messages sent by the target
+	// will be observable. This faciliates test assertions
+	// which seek to verify that the target link is sending
+	// the appropriate message type.
+	var expectedMsgType lnwire.MessageType
+	manInMiddle := func(victim *channelLink, quit chan struct{}) {
+
+		mitm := &EavesdroppablePeer{
+			victim.cfg.Peer.(*mockServer),
+			mockPeer{
+				sentMsgs: make(chan lnwire.Message, 2000),
+				quit:     make(chan struct{}),
+			},
+		}
+
+		// Overwrite the victims peer with the new
+		// eavesdroppable peer which lets us listen
+		// in on any messages our target sends!
+		victim.cfg.Peer = mitm
+
+		// Log any messages we intercept.
+		// TODO: Use these to make test assertions.
+		var mustIntercept lnwire.MessageType = expectedMsgType
+		var msgFound bool
+		for {
+			select {
+			case msg := <-mitm.sentMsgs:
+				fmt.Printf("[man-in-middle]: victim sent message of type=(%s)\n", msg.MsgType().String())
+				if assertExpectedMsg(mustIntercept, msg.MsgType()) {
+					fmt.Println("[man-in-middle]: victim sent message we were looking for!")
+					msgFound = true
+				}
+			case <-quit:
+				fmt.Println("[man-in-middle]: done spying")
+				if !msgFound {
+					t.Fail()
+					t.Logf("victim never sent expected message. expected to intercept message of type: %s", mustIntercept)
+				}
+				return
+			}
+		}
+	}
+
+	// Spy on Carol's messages.
+	quitSpy := make(chan struct{})
+	expectedMsgType = lnwire.MsgUpdateFailMalformedHTLC
+	go manInMiddle(n.carolChannelLink, quitSpy)
+
+	// Send the payment.
+	err = n.aliceServer.htlcSwitch.SendHTLC(
+		n.firstBobChannelLink.ShortChanID(),
+		pid, htlc,
+	)
+	require.NoError(t, err, "unable to send payment to carol")
+
+	resultChan, err := n.aliceServer.htlcSwitch.GetPaymentResult(
+		pid, htlc.PaymentHash,
+		newMockDeobfuscator(),
+	)
+	require.NoError(t, err, "unable to get payment result")
+
+	select {
+	case result, ok := <-resultChan:
+		if !ok {
+			t.Fatalf("unexpected shutdown")
+		}
+
+		t.Log("got payment result!")
+		payErr := result.Error
+
+		// Expect that ultimately this payment fails with an
+		// InvalidOnionBlinding error returned back to the sender.
+		require.Error(t, payErr)
+		assertFailureCode(t, payErr, lnwire.CodeInvalidOnionBlinding)
+
+	case <-time.After(5 * time.Second):
+		t.Fatalf("payment result did not arrive")
+	}
+
+	// Release our spy on Carol.
+	close(quitSpy)
+
+	// Create another invoice for payment. This time we'll have
+	// Bob fail to process the blind hop and check that he forwards
+	// the expected message type as an introduction node.
+
+	// Generate a fresh invoice and payment hash for every
+	// test. This way we get unique payment hashes and
+	// payment addresses across tests.
+	// NOTE(11/20/22): The following might be conveniently
+	// bundled together in its own function. OR
+	// we could try having generatePaymentWithPreimage return the
+	// preimage that it used.
+	preimage, rhash, _ = generatePaymentSecret()
+	payAddr, _ = generatePaymentAddress()
+
+	invoice, htlc, pid, err = generatePaymentWithPreimage(
+		amount, htlcAmt, totalTimelock,
+		blob, &preimage, rhash, payAddr,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Add the invoice to Carol's invoice registry so that she's
+	// expecting payment.
+	err = n.carolServer.registry.AddInvoice(*invoice, htlc.PaymentHash)
+	require.NoError(t, err, "unable to add invoice in carol registry")
+
+	// Configure Bob such that he will return an error while processing
+	// blind hop. Expect this one to be UpdateFailHTLC as Bob is the
+	// introduction node.
+	n.firstBobChannelLink.cfg.BlindHopProcessor = &brokenBlindHopProcessor{
+		errOnDecrypt: true,
+	}
+
+	// Eavesdrop on the messages Bob sends to Alice.
+	// Assert that Bob sends UpdateFailHTLC!
+	quitSpy = make(chan struct{})
+	expectedMsgType = lnwire.MsgUpdateFailHTLC
+	go manInMiddle(n.firstBobChannelLink, quitSpy)
+
+	// NOTE(11/20/22): Could we replace all of this
+	// with a slimer version which checks the message
+	// sent at the source?
+	// select {
+	// case msg := <-bobMsgs:
+	// 	t.Logf("bob sent message: %+v", msg)
+	// }
+
+	// Send the payment.
+	err = n.aliceServer.htlcSwitch.SendHTLC(
+		n.firstBobChannelLink.ShortChanID(),
+		pid, htlc,
+	)
+	require.NoError(t, err, "unable to send payment to carol")
+
+	resultChan, err = n.aliceServer.htlcSwitch.GetPaymentResult(
+		pid, htlc.PaymentHash,
+		newMockDeobfuscator(),
+	)
+	require.NoError(t, err, "unable to get payment result")
+
+	select {
+	case result, ok := <-resultChan:
+		if !ok {
+			t.Fatalf("unexpected shutdown")
+		}
+
+		t.Log("got payment result!")
+		payErr := result.Error
+
+		// Expect that ultimately this payment fails with an
+		// InvalidOnionBlinding error returned back to the sender.
+		assertFailureCode(t, payErr, lnwire.CodeInvalidOnionBlinding)
+
+	case <-time.After(5 * time.Second):
+		t.Fatalf("payment result did not arrive")
+	}
+
+	// Release our spy on Bob.
+	// NOTE(11/20/22): If you forget to do this, the test will be accurate.
+	// We only check that the correct message was sent after the spy ends.
+	close(quitSpy)
+
 }
 
 var (
@@ -1051,6 +1511,36 @@ func testLinkEnforcesBOLT04(t *testing.T) {
 				// No ephemeral blinding point in UpdateAddHTLC.
 			},
 		},
+		{ // NOTE(11/20/22): A few introduction node failure cases.
+			name: "introduction node blinded route missing payment relay",
+			onionPayload: &hop.Payload{
+				BlindingPoint: ephemeralBlindingPoint,
+			},
+			routeBlindingPayload: &hop.BlindHopPayload{
+				NextHop: n.carolChannelLink.ShortChanID(),
+			},
+			htlc: &lnwire.UpdateAddHTLC{
+				Amount: htlcAmt,
+				Expiry: totalTimelock,
+				// No ephemeral blinding point in UpdateAddHTLC.
+			},
+			errExpected: true,
+		},
+		{
+			name: "introduction node blinded route missing next hop",
+			onionPayload: &hop.Payload{
+				BlindingPoint: ephemeralBlindingPoint,
+			},
+			routeBlindingPayload: &hop.BlindHopPayload{
+				PaymentRelay: computePaymentRelay(n.secondBobChannelLink),
+			},
+			htlc: &lnwire.UpdateAddHTLC{
+				Amount: htlcAmt,
+				Expiry: totalTimelock,
+				// No ephemeral blinding point in UpdateAddHTLC.
+			},
+			errExpected: true,
+		},
 		{
 			name:         "intermediate hop blinded route w/ next hop",
 			onionPayload: &hop.Payload{},
@@ -1146,7 +1636,7 @@ func testLinkEnforcesBOLT04(t *testing.T) {
 			errExpected: true,
 		},
 		{
-			name:         "blind hop missing payment_relay", // error case (covered at parse time!!)
+			name:         "intermediate blind hop missing payment_relay", // error case (covered at parse time!!)
 			onionPayload: &hop.Payload{},
 			routeBlindingPayload: &hop.BlindHopPayload{
 				NextHop: n.carolChannelLink.ShortChanID(),
@@ -1175,7 +1665,7 @@ func testLinkEnforcesBOLT04(t *testing.T) {
 			errExpected: true,
 		},
 		{
-			name:         "blind hop payment_relay which fails to meet constraints", // error case (payment constraints)
+			name:         "intermediate blind hop payment_relay which fails to meet constraints", // error case (payment constraints)
 			onionPayload: &hop.Payload{},
 			routeBlindingPayload: &hop.BlindHopPayload{
 				Padding:      []byte{0, 0, 0, 0},
@@ -1195,7 +1685,7 @@ func testLinkEnforcesBOLT04(t *testing.T) {
 			errExpected: true,
 		},
 		{
-			name:         "blind hop payment_relay fails to meet constraints - expired", // error case (payment constraints)
+			name:         "intermediate blind hop payment_relay fails to meet constraints - expired", // error case (payment constraints)
 			onionPayload: &hop.Payload{},
 			routeBlindingPayload: &hop.BlindHopPayload{
 				Padding:      []byte{0, 0, 0, 0},
@@ -1215,7 +1705,7 @@ func testLinkEnforcesBOLT04(t *testing.T) {
 			errExpected: true,
 		},
 		{
-			name: "blind hop with amt_to_forward improperly set in top level TLV payload", // error case (cross onion + RB payload)
+			name: "intermediate blind hop with amt_to_forward improperly set in top level TLV payload", // error case (cross onion + RB payload)
 			onionPayload: &hop.Payload{
 				FwdInfo: hop.ForwardingInfo{
 					AmountToForward: 100,
@@ -1239,7 +1729,7 @@ func testLinkEnforcesBOLT04(t *testing.T) {
 			errExpected: true,
 		},
 		{
-			name: "blind hop with timelock improperly set in top level TLV payload", // error case (cross onion + RB payload)
+			name: "intermediate blind hop with timelock improperly set in top level TLV payload", // error case (cross onion + RB payload)
 			onionPayload: &hop.Payload{
 				FwdInfo: hop.ForwardingInfo{
 					OutgoingCTLV: 10,
@@ -1263,7 +1753,7 @@ func testLinkEnforcesBOLT04(t *testing.T) {
 			errExpected: true,
 		},
 		{
-			name: "blind hop with short_channel_id improperly set in top level TLV payload", // error case (cross onion + RB payload)
+			name: "intermediate blind hop with short_channel_id improperly set in top level TLV payload", // error case (cross onion + RB payload)
 			onionPayload: &hop.Payload{
 				FwdInfo: hop.ForwardingInfo{
 					NextHop: n.carolChannelLink.ShortChanID(),
@@ -1337,7 +1827,7 @@ func testLinkEnforcesBOLT04(t *testing.T) {
 		// 	failureCode: lnwire.CodeInvalidOnionBlinding,
 		// },
 		{
-			name: "final hop blinded route missing amt in top level TLV payload", // error case (cross onion + RB payload)
+			name: "final blind hop missing amt in top level TLV payload", // error case (cross onion + RB payload)
 			onionPayload: &hop.Payload{
 				FwdInfo: hop.ForwardingInfo{
 					NextHop:      hop.Exit,
@@ -1357,7 +1847,7 @@ func testLinkEnforcesBOLT04(t *testing.T) {
 			errExpected: true,
 		},
 		{
-			name: "final hop blinded route missing outgoing_cltv_value in top level TLV payload", // error case (cross onion + RB payload)
+			name: "final blind hop missing outgoing_cltv_value in top level TLV payload", // error case (cross onion + RB payload)
 			onionPayload: &hop.Payload{
 				FwdInfo: hop.ForwardingInfo{
 					NextHop:         hop.Exit,
@@ -1479,9 +1969,14 @@ func testLinkEnforcesBOLT04(t *testing.T) {
 				}
 
 				payErr := result.Error
+				t.Logf("got payment result! result=%+v", result)
+				t.Logf("got payment result! pay error=%v", payErr)
 
 				if test.errExpected {
 					assertFailureCode(t, payErr, lnwire.CodeInvalidOnionBlinding)
+
+					// TODO(11/17/22): Differentiate between UpdateFailHTLC and
+					// UpdateFailMalformedHTLC?
 				} else {
 					require.NoError(t, payErr)
 				}
@@ -2608,6 +3103,107 @@ func TestChannelLinkSingleHopMessageOrdering(t *testing.T) {
 	).Wait(30 * time.Second)
 	require.NoError(t, err, "unable to make the payment")
 }
+
+type EavesdroppablePeer struct {
+	// A "real" mock server representing
+	// our peer.
+	peer *mockServer
+	// peer lnpeer.Peer
+
+	// The mockPeer this codebase is
+	// used to using.
+	mockPeer
+}
+
+// Allows the caller to eavesdrop on messages sent from
+// the local side of the given channel link to the remote peer.
+func NewEavesDroppablePeer(peer *channelLink) *EavesdroppablePeer {
+	// func NewEavesDroppablePeer(peer *mockServer) *EavesdroppablePeer {
+	return &EavesdroppablePeer{
+		// peer: peer,
+		peer: peer.cfg.Peer.(*mockServer),
+		mockPeer: mockPeer{
+			sentMsgs: make(chan lnwire.Message, 2000),
+			quit:     make(chan struct{}),
+		},
+	}
+}
+
+type ManInTheMiddle struct {
+	// left  *mockServer
+	// right *mockServer
+
+	leftSentMessages  <-chan lnwire.Message
+	rightSentMessages <-chan lnwire.Message
+
+	// TODO: received messages?
+}
+
+func NewManInTheMiddle(left, right *mockServer, scid lnwire.ShortChannelID) *ManInTheMiddle {
+	// Find the channel these two nodes have in common.
+	// What if there are multiple channels?
+	// Alternatively could rely on the caller to provide
+	// the correct channel.
+	link, ok := left.htlcSwitch.forwardingIndex[scid].(*channelLink)
+	if !ok {
+		panic("no channel link with provided scid")
+	}
+	rLink, ok := right.htlcSwitch.forwardingIndex[scid].(*channelLink)
+	if !ok {
+		panic("no channel link with provided scid")
+	}
+
+	leftPeer := NewEavesDroppablePeer(link)
+	rightPeer := NewEavesDroppablePeer(rLink)
+
+	// Replace the servers peers with eavesdroppable versions.
+	link.cfg.Peer = leftPeer
+	rLink.cfg.Peer = rightPeer
+
+	return &ManInTheMiddle{
+		// left:              left,
+		// right:             right,
+		leftSentMessages:  leftPeer.sentMsgs,
+		rightSentMessages: rightPeer.sentMsgs,
+	}
+}
+
+func (p *EavesdroppablePeer) PubKey() [33]byte {
+	return p.peer.PubKey()
+}
+
+func (p *EavesdroppablePeer) SendMessage(sync bool, msgs ...lnwire.Message) error {
+	if p.disconnected {
+		return fmt.Errorf("disconnected")
+	}
+
+	// Send the message to channel so it can be
+	// eavesdropped on.
+	for _, msg := range msgs {
+		select {
+		case p.sentMsgs <- msg:
+			fmt.Printf("[eavesdroppablePeer.SendMessage]: sent (%s) message to eavesdropper\n",
+				msg.MsgType())
+		case <-p.quit:
+			return fmt.Errorf("eavesdroppablePeer shutting down")
+		}
+	}
+
+	// Actually send the message to the remote peer.
+	for _, msg := range msgs {
+		select {
+		case p.peer.messages <- msg:
+			fmt.Printf("[eavesdroppablePeer.SendMessage]: forwarded (%s) message to actual peer\n",
+				msg.MsgType())
+		case <-p.quit:
+			return fmt.Errorf("eavesdroppablePeer shutting down")
+		}
+	}
+
+	return nil
+}
+
+var _ lnpeer.Peer = (*EavesdroppablePeer)(nil)
 
 type mockPeer struct {
 	sync.Mutex

@@ -710,6 +710,7 @@ func (s *Switch) ForwardPackets(linkQuit chan struct{},
 			circuits = append(circuits, circuit)
 			addBatch = append(addBatch, packet)
 		default:
+			fmt.Printf("[switch.ForwardPackets]: forwarding Settle/Fail: %+v\n", packet)
 			err := s.routeAsync(packet, fwdChan, linkQuit)
 			if err != nil {
 				return fmt.Errorf("failed to forward packet %v", err)
@@ -755,6 +756,7 @@ func (s *Switch) ForwardPackets(linkQuit chan struct{},
 	// Now, forward any packets for circuits that were successfully added to
 	// the switch's circuit map.
 	for _, packet := range addedPackets {
+		fmt.Printf("[switch.ForwardPackets]: forwarding ADD: %+v\n", packet)
 		err := s.routeAsync(packet, fwdChan, linkQuit)
 		if err != nil {
 			return fmt.Errorf("failed to forward packet %v", err)
@@ -1102,6 +1104,7 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 	// payment circuit within our internal state so we can properly forward
 	// the ultimate settle message back latter.
 	case *lnwire.UpdateAddHTLC:
+		fmt.Println("[switch.handlPacketForward]: forwarding ADD")
 		// Check if the node is set to reject all onward HTLCs and also make
 		// sure that HTLC is not from the source node.
 		if s.cfg.RejectHTLC {
@@ -1148,6 +1151,7 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 			return s.failAddPacket(packet, linkError)
 		}
 		targetPeerKey := targetLink.Peer().PubKey()
+		fmt.Printf("[switch.handlPacketForward]: link lookup using key: %v\n", targetPeerKey[:])
 		interfaceLinks, _ := s.getLinks(targetPeerKey)
 		s.indexMtx.RUnlock()
 
@@ -1157,6 +1161,7 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 		// trying all links to utilize our available bandwidth.
 		linkErrs := make(map[lnwire.ShortChannelID]*LinkError)
 
+		fmt.Printf("[switch.handlPacketForward]: non-strict forwarding using %d links\n", len(interfaceLinks))
 		// Find all destination channel links with appropriate
 		// bandwidth.
 		var destinations []ChannelLink
@@ -1214,10 +1219,19 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 					packet.outgoingChanID, newLogClosure(func() string {
 						return spew.Sdump(linkErrs)
 					}))
+				fmt.Printf("[switch.handlePacketForward]: unable to find err source for "+
+					"outgoing_link=%v, errors=%v\n",
+					packet.outgoingChanID, newLogClosure(func() string {
+						return spew.Sdump(linkErrs)
+					}))
 			}
 
 			log.Tracef("incoming HTLC(%x) violated "+
 				"target outgoing link (id=%v) policy: %v",
+				htlc.PaymentHash[:], packet.outgoingChanID,
+				linkErr)
+			fmt.Printf("[switch.handlePacketForward]: incoming HTLC(%x) violated "+
+				"target outgoing link (id=%v) policy: %v\n",
 				htlc.PaymentHash[:], packet.outgoingChanID,
 				linkErr)
 
@@ -1229,6 +1243,7 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 		// distribute the htlc load without making assumptions about
 		// what the best channel is.
 		destination := destinations[rand.Intn(len(destinations))] // nolint:gosec
+		fmt.Println("[switch.handlPacketForward]: found outgoing link to forward to!")
 
 		// Retrieve the incoming link by its ShortChannelID. Note that
 		// the incomingChanID is never set to hop.Source here.
@@ -1280,6 +1295,7 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 		return destination.handleSwitchPacket(packet)
 
 	case *lnwire.UpdateFailHTLC, *lnwire.UpdateFulfillHTLC:
+		fmt.Println("[switch.handlPacketForward]: forwarding SETTLE/FAIL")
 		// If the source of this packet has not been set, use the
 		// circuit map to lookup the origin.
 		circuit, err := s.closeCircuit(packet)
@@ -1325,11 +1341,22 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 					packet.incomingChanID, packet.incomingHTLCID,
 					packet.outgoingChanID, packet.outgoingHTLCID)
 
+				fmt.Printf("[switch.handlePacketForward]: Converting malformed HTLC error "+
+					"for circuit for Circuit(%x: "+
+					"(%s, %d) <-> (%s, %d))\n", packet.circuit.PaymentHash,
+					packet.incomingChanID, packet.incomingHTLCID,
+					packet.outgoingChanID, packet.outgoingHTLCID)
+
+				fmt.Printf("[switch.handlePacketForward]: failure reason: %v\n", fail.Reason)
+
 				fail.Reason = circuit.ErrorEncrypter.EncryptMalformedError(
 					fail.Reason,
 				)
 
 			default:
+				// NOTE(11/19/22): Is there anything which could be done
+				// to distinguish between introduction and intermediate node?
+
 				// Otherwise, it's a forwarded error, so we'll perform a
 				// wrapper encryption as normal.
 				fail.Reason = circuit.ErrorEncrypter.IntermediateEncrypt(
@@ -1364,6 +1391,8 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 				s.fwdEventMtx.Unlock()
 			}
 		}
+
+		fmt.Printf("[switch.handlePacketForward]: handling FAIL")
 
 		// A blank IncomingChanID in a circuit indicates that it is a pending
 		// user-initiated payment.
