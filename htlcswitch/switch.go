@@ -722,6 +722,9 @@ func (s *Switch) ForwardPackets(linkQuit chan struct{},
 	}
 
 	// Write any circuits that we found to disk.
+	//
+	// NOTE(11/19/22): This makes record that the Adds have reached
+	// the Switch.
 	actions, err := s.circuits.CommitCircuits(circuits...)
 	if err != nil {
 		log.Errorf("unable to commit circuits in switch: %v", err)
@@ -751,6 +754,11 @@ func (s *Switch) ForwardPackets(linkQuit chan struct{},
 
 	// Now, forward any packets for circuits that were successfully added to
 	// the switch's circuit map.
+	//
+	// NOTE(11/19/22): This will be called only for ADDs which were previously
+	// unseen. That is, the ADDs have never made it to forwarding before.
+	// Using our persistent state we are able to enforce "at most once" semantics
+	// for HTLC forwarding!
 	for _, packet := range addedPackets {
 		err := s.routeAsync(packet, fwdChan, linkQuit)
 		if err != nil {
@@ -1487,6 +1495,11 @@ func (s *Switch) failAddPacket(packet *htlcPacket, failure *LinkError) error {
 	}
 
 	// Route a fail packet back to the source link.
+	//
+	// NOTE(11/19/22): As soon as this is called, our incoming
+	// link will have a repsonse for its ADD. It may not have read
+	// the reply message yet and could attempt to re-forward the
+	// ADD. This is stopped with the nice check inside of link.forwardBatch().
 	err = s.mailOrchestrator.Deliver(failPkt.incomingChanID, failPkt)
 	if err != nil {
 		err = fmt.Errorf("source chanid=%v unable to "+
@@ -1570,6 +1583,8 @@ func (s *Switch) closeCircuit(pkt *htlcPacket) (*PaymentCircuit, error) {
 			// Add this SettleFailRef to the set of pending settle/fail entries
 			// awaiting acknowledgement.
 			s.pendingSettleFails = append(s.pendingSettleFails, *pkt.destRef)
+			// NOTE(11/21/22): The switch acknowledges these on a batch timer.
+			// This was apparently added to make "pipelining" Settles more efficient.
 		}
 
 		// If this is a settle, we will not log an error message as settles

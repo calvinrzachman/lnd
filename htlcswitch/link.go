@@ -1598,6 +1598,9 @@ func (l *channelLink) handleDownstreamPkt(pkt *htlcPacket) {
 			pkt.destRef,
 			&inKey,
 		)
+		// NOTE(11/21/22: If we encounter errors trying to update our
+		// channel state machine, we do some fowarding package cleanup
+		// in an attempt to prevent internal forwarding retries.
 		if err != nil {
 			l.log.Errorf("unable to cancel incoming HTLC for "+
 				"circuit-key=%v: %v", inKey, err)
@@ -2082,7 +2085,22 @@ func (l *channelLink) handleUpstreamMsg(msg lnwire.Message) {
 			}
 		}
 
+		// We are the outgoing link for these HTLC Settle/Fail updates.
+		// That is, these Settle/Fails should be responses to ADDs
+		// previously received by some other link of ours.
+		// We'll leave the Switch to take care of finding which one
+		// (using Payment Circuits/Circuit Map). Will the Switch
+		// also modify the Forwarding Packages?
+		//
+		// NOTE(11/19/22): We use the forwarding package to help
+		// us prevent reprocessing the same HTLC update again,
+		// but we do not modify the forwarding package here.
+		// Also, these Settle/Fails are responses to Adds in
+		// another link of ours. They never respond to adds
+		// on this link (unless circular/hairpin forward).
 		l.processRemoteSettleFails(fwdPkg, settleFails)
+
+		// We are the incoming link for these HTLC ADD updates.
 		l.processRemoteAdds(fwdPkg, adds)
 
 		// If the link failed during processing the adds, we must
@@ -2827,6 +2845,15 @@ func (l *channelLink) processRemoteSettleFails(fwdPkg *channeldb.FwdPkg,
 		// Skip any settles or fails that have already been
 		// acknowledged by the incoming link that originated the
 		// forwarded Add.
+		//
+		// NOTE(11/19/22): If this is the first time receiving
+		// a Settle/Fail, it of course could not already be
+		// acknowledged by the link which brought us the
+		// corresponding ADD. We will forward the Settle/Fail
+		// through the Switch. If the Settle/Fail is contained
+		// in the ForwardingPackage SettleFailFilter here,
+		// then we will not ask the incoming link to settle/fail
+		// the same HTLC a second time!!
 		if fwdPkg.SettleFailFilter.Contains(uint16(i)) {
 			continue
 		}
@@ -2839,6 +2866,11 @@ func (l *channelLink) processRemoteSettleFails(fwdPkg *channeldb.FwdPkg,
 		// A settle for an HTLC we previously forwarded HTLC has been
 		// received. So we'll forward the HTLC to the switch which will
 		// handle propagating the settle to the prior hop.
+		//
+		// NOTE(11/19/22): Couldn't this be a spurious Settle for
+		// an Add we never sent? My guess is that would have already been
+		// weeded out before we did the commitment dance with this
+		// Settle!
 		case lnwallet.Settle:
 			// If hodl.SettleIncoming is requested, we will not
 			// forward the SETTLE to the switch and will not signal
@@ -2851,7 +2883,11 @@ func (l *channelLink) processRemoteSettleFails(fwdPkg *channeldb.FwdPkg,
 			settlePacket := &htlcPacket{
 				outgoingChanID: l.ShortChanID(),
 				outgoingHTLCID: pd.ParentIndex,
-				destRef:        pd.DestRef,
+				// NOTE(11/19/22): We do not pass the forwarding
+				// package to the Switch. Rather we pass a way
+				// for the Switch to find the HTLC in the forwarding
+				// packages of the link involved, as it's a bit leaner.
+				destRef: pd.DestRef,
 				htlc: &lnwire.UpdateFulfillHTLC{
 					PaymentPreimage: pd.RPreimage,
 				},
@@ -2879,10 +2915,20 @@ func (l *channelLink) processRemoteSettleFails(fwdPkg *channeldb.FwdPkg,
 			// continue to propagate it. This failure originated
 			// from another node, so the linkFailure field is not
 			// set on the packet.
+			//
+			// NOTE(11/19/22): The reason for the failure would
+			// have already been stored by the LN channel state
+			// machine when the HTLC update first arrived (ie: via
+			// ReceiveFailHTLC). We simply read it off the payment
+			// descriptor that ReceiveRevocation hands to us.
 			failPacket := &htlcPacket{
 				outgoingChanID: l.ShortChanID(),
 				outgoingHTLCID: pd.ParentIndex,
-				destRef:        pd.DestRef,
+				// NOTE(11/19/22): We do not pass the forwarding
+				// package to the Switch. Rather we pass a way
+				// for the Switch to find the HTLC in the forwarding
+				// packages of the link involved, as it's a bit leaner.
+				destRef: pd.DestRef,
 				htlc: &lnwire.UpdateFailHTLC{
 					Reason: lnwire.OpaqueReason(
 						pd.FailReason,
@@ -2899,6 +2945,9 @@ func (l *channelLink) processRemoteSettleFails(fwdPkg *channeldb.FwdPkg,
 			// that we need to convert this error within the switch
 			// to an actual error, by encrypting it as if we were
 			// the originating hop.
+			//
+			// NOTE(11/19/22): We do not forward HTLCMalformed errors,
+			// but rather convert them to "actual" onion errors.
 			convertedErrorSize := lnwire.FailureMessageLength + 4
 			if len(pd.FailReason) == convertedErrorSize {
 				failPacket.convertedError = true
@@ -2971,6 +3020,9 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 	for i, pd := range lockedInHtlcs {
 		idx := uint16(i)
 
+		// This link has already processed the ADD and has received
+		// an (internal) acknowledgement of receipt from the Switch/outgoing link?
+		// We should not forward the ADD twice!
 		if fwdPkg.State == channeldb.FwdStateProcessed &&
 			fwdPkg.AckFilter.Contains(idx) {
 
@@ -3083,13 +3135,25 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 			}
 
 			switch fwdPkg.State {
+			// NOTE(11/19/22): This batch of HTLC updates to which this
+			// ADD belongs has been processed by this link before.
 			case channeldb.FwdStateProcessed:
+				// We have NOT received acknowledgement from the
+				// outgoing link/switch (which is it?). The outgoing link
+				// /Switch will set the packet as having been acked when?
+				// Something must have happened to the Switch/outgoing link,
+				// so we'll need to send the Add to the Switch again.
+
 				// This add was not forwarded on the previous
 				// processing phase, run it through our
 				// validation pipeline to reproduce an error.
 				// This may trigger a different error due to
 				// expiring timelocks, but we expect that an
 				// error will be reproduced.
+				//
+				// NOTE(11/19/22): This means that the Add
+				// never even made it to the Switch! (I think).
+				// So we will need to...
 				if !fwdPkg.FwdFilter.Contains(idx) {
 					break
 				}
@@ -3113,9 +3177,13 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 				chanIterator.EncodeNextHop(buf)
 
 				updatePacket := &htlcPacket{
-					incomingChanID:  l.ShortChanID(),
-					incomingHTLCID:  pd.HtlcIndex,
-					outgoingChanID:  fwdInfo.NextHop,
+					incomingChanID: l.ShortChanID(),
+					incomingHTLCID: pd.HtlcIndex,
+					outgoingChanID: fwdInfo.NextHop,
+					// NOTE(11/19/22): We do not pass the forwarding
+					// package to the Switch. Rather we pass a way
+					// for the Switch to find the HTLC in this link's
+					// forwarding package, as it's a bit leaner.
 					sourceRef:       pd.SourceRef,
 					incomingAmount:  pd.Amount,
 					amount:          addMsg.Amount,
@@ -3168,7 +3236,7 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 			}
 
 			// Now that this add has been reprocessed, only append
-			// it to our list of packets to forward to the switch
+			// it to our list of packets to forward to the switch if
 			// this is the first time processing the add. If the
 			// fwd pkg has already been processed, then we entered
 			// the above section to recreate a previous error.  If
@@ -3177,9 +3245,13 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 			// section.
 			if fwdPkg.State == channeldb.FwdStateLockedIn {
 				updatePacket := &htlcPacket{
-					incomingChanID:  l.ShortChanID(),
-					incomingHTLCID:  pd.HtlcIndex,
-					outgoingChanID:  fwdInfo.NextHop,
+					incomingChanID: l.ShortChanID(),
+					incomingHTLCID: pd.HtlcIndex,
+					outgoingChanID: fwdInfo.NextHop,
+					// NOTE(11/19/22): We do not pass the forwarding
+					// package to the Switch. Rather we pass a way
+					// for the Switch to find the HTLC in this link's
+					// forwarding package, as it's a bit leaner.
 					sourceRef:       pd.SourceRef,
 					incomingAmount:  pd.Amount,
 					amount:          addMsg.Amount,
@@ -3190,6 +3262,16 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 					customRecords:   pld.CustomRecords(),
 				}
 
+				// NOTE(11/19/22): This is our link signing
+				// off (in memory) that it has processed this Add.
+				// The ink on that signature will dry when record
+				// that we have processed this Add is when the
+				// entire state of the forwarding package (including
+				// the filter we set here) is persisted below.
+				// If the Add is reconsidered later, it will not
+				// flow through the same code path.
+				// The index is the index in the ForwardingPackage
+				// not the channel state machine HTLC update log.
 				fwdPkg.FwdFilter.Set(idx)
 				switchPackets = append(switchPackets,
 					updatePacket)
@@ -3199,6 +3281,11 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 
 	// Commit the htlcs we are intending to forward if this package has not
 	// been fully processed.
+	//
+	// NOTE(11/19/22): This is where the ink dries. If the batch of HTLC
+	// updates has just been locked in and this forwarding package is being
+	// processed for the first time (FwdStateLockedIn), then we will write
+	// that they have been processed to disk.
 	if fwdPkg.State == channeldb.FwdStateLockedIn {
 		err := l.channel.SetFwdFilter(fwdPkg.Height, fwdPkg.FwdFilter)
 		if err != nil {

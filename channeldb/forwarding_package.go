@@ -18,6 +18,7 @@ var ErrCorruptedFwdPkg = errors.New("fwding package db has been corrupted")
 // FwdState is an enum used to describe the lifecycle of a FwdPkg.
 type FwdState byte
 
+// Define a few interesting states for a ForwardingPackage to be in.
 const (
 	// FwdStateLockedIn is the starting state for all forwarding packages.
 	// Packages in this state have not yet committed to the exact set of
@@ -108,6 +109,9 @@ type PkgFilter struct {
 	filter []byte
 }
 
+// Created in order to track the forward progress of the desired # of HTLCs.
+// Once an HTLC Add is irrevocably committed on an inbound link, we set
+// up this filter to track its lifecycle through the Switch.
 // NewPkgFilter initializes an empty PkgFilter supporting `count` elements.
 func NewPkgFilter(count uint16) *PkgFilter {
 	// We add 7 to ensure that the integer division yields properly rounded
@@ -164,6 +168,7 @@ func (f *PkgFilter) Equal(f2 *PkgFilter) bool {
 func (f *PkgFilter) IsFull() bool {
 	// Batch validate bytes that are fully used.
 	for i := uint16(0); i < f.count/8; i++ {
+		// Check that each byte in the bitvector has all bits set.
 		if f.filter[i] != 0xFF {
 			return false
 		}

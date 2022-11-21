@@ -730,6 +730,8 @@ func (c *commitment) toDiskCommit(ourCommit bool) *channeldb.ChannelCommitment {
 		Htlcs:           make([]channeldb.HTLC, 0, numHtlcs),
 	}
 
+	// NOTE(11/22/22): Here we convert from payment descriptors to
+	// the format expected for use in the database (channeldb.HTLC)
 	for _, htlc := range c.outgoingHTLCs {
 		outputIndex := htlc.localOutputIndex
 		if !ourCommit {
@@ -755,6 +757,8 @@ func (c *commitment) toDiskCommit(ourCommit bool) *channeldb.ChannelCommitment {
 		commit.Htlcs = append(commit.Htlcs, h)
 	}
 
+	// NOTE(11/22/22): Here we convert from payment descriptors to
+	// the format expected for use in the database (channeldb.HTLC)
 	for _, htlc := range c.incomingHTLCs {
 		outputIndex := htlc.localOutputIndex
 		if !ourCommit {
@@ -1792,6 +1796,9 @@ func (lc *LightningChannel) restoreCommitState(
 
 	// Next, we'll check to see if we have an un-acked commitment state we
 	// extended to the remote party but which was never ACK'd.
+	//
+	// NOTE(11/19/22): This can happen if we restarted before getting a
+	// RevokeAndAck from the peer.
 	pendingRemoteCommitDiff, err = lc.channelState.RemoteCommitChainTip()
 	if err != nil && err != channeldb.ErrNoPendingCommit {
 		return err
@@ -1828,6 +1835,9 @@ func (lc *LightningChannel) restoreCommitState(
 	}
 
 	// Fetch remote updates that we have acked but not yet signed for.
+	//
+	// NOTE(11/19/22): This can happen if we died after sending
+	// RevokeAndAck but before sending CommitmentSigned.
 	unsignedAckedUpdates, err := lc.channelState.UnsignedAckedUpdates()
 	if err != nil {
 		return err
@@ -1951,6 +1961,9 @@ func (lc *LightningChannel) restoreStateLogs(
 	// remote update log. Since HTLCs are added first to the receiver's
 	// commitment, we don't have to restore outgoing HTLCs, as they will be
 	// restored from the remote commitment below.
+	//
+	// NOTE(11/19/22): An incoming HTLC came from the peer, so it must be
+	// in our update log we keep for the remote.
 	for i := range localCommitment.incomingHTLCs {
 		htlc := localCommitment.incomingHTLCs[i]
 
