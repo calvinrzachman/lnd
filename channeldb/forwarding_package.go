@@ -420,6 +420,9 @@ type FwdPackager interface {
 	// 1) We are not the exit node
 	// 2) Passed all validation
 	// 3) Should be forwarded to the switch immediately after a failure
+	//
+	// NOTE(11/23/22): The link writes a package filter to disk before
+	// forwarding any HTLC ADD updates to the Switch.
 	SetFwdFilter(tx kvdb.RwTx, height uint64, fwdFilter *PkgFilter) error
 
 	// AckAddHtlcs atomically updates the add filters in this channel's

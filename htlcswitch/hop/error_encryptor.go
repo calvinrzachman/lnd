@@ -27,8 +27,14 @@ const (
 	EncrypterTypeMock = 2
 )
 
+// NOTE(11/22/22): So we can recover the Error Encryptor (and all of its
+// state) from the sphinx.OnionPacket. Where does the sphinx.OnionPacket
+// live? This is an example of the package defining a local interface outlining
+// the exact functionality it expects. It doesn't care how it get it, it just wants
+// the following. In practice we will use a sphinx.OnionErrorEncrypter.
+//
 // ErrorEncrypterExtracter defines a function signature that extracts an
-// ErrorEncrypter from an sphinx OnionPacket.
+// ErrorEncrypter from a sphinx OnionPacket.
 type ErrorEncrypterExtracter func(*btcec.PublicKey) (ErrorEncrypter,
 	lnwire.FailCode)
 
@@ -47,6 +53,9 @@ type ErrorEncrypter interface {
 	// message. This method is used when we receive an
 	// UpdateFailMalformedHTLC from the remote peer and then need to
 	// convert that into a proper error from only the raw bytes.
+	//
+	// TODO(11/22/22): Still don't understand the UpdateFailMalformed -->
+	// UpdateFail conversion process or purpose.
 	EncryptMalformedError(lnwire.OpaqueReason) lnwire.OpaqueReason
 
 	// IntermediateEncrypt wraps an already encrypted opaque reason error
@@ -58,6 +67,9 @@ type ErrorEncrypter interface {
 	// backing this interface.
 	Type() EncrypterType
 
+	// NOTE(11/22/22): Carla is talking about putting the route blinding
+	// point here as a way to avoid having to touch channeldb.HTLC.
+	// The onion error encryptor is persisted as part of the PaymentCircuit.
 	// Encode serializes the encrypter's ephemeral public key to the given
 	// io.Writer.
 	Encode(io.Writer) error

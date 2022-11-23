@@ -2261,6 +2261,8 @@ func serializeCommitDiff(w io.Writer, diff *CommitDiff) error { // nolint: dupl
 		return err
 	}
 
+	// NOTE(11/23/22): All LogUpdates which are part of this commit diff
+	// are persisted to disk here!
 	if err := serializeLogUpdates(w, diff.LogUpdates); err != nil {
 		return err
 	}
@@ -2369,6 +2371,8 @@ func (c *OpenChannel) AppendRemoteCommitChain(diff *CommitDiff) error {
 		return ErrNoRestoredChannelMutation
 	}
 
+	// NOTE(11/22/22): Here is where we write some juicy forwarding packages
+	// to disk?
 	return kvdb.Update(c.Db.backend, func(tx kvdb.RwTx) error {
 		// First, we'll grab the writable bucket where this channel's
 		// data resides.
@@ -2394,6 +2398,11 @@ func (c *OpenChannel) AppendRemoteCommitChain(diff *CommitDiff) error {
 		// Mark all of these as being fully processed in our forwarding
 		// package, which prevents us from reprocessing them after
 		// startup.
+		// QUESTION(11/22/22): What happens with ADDs that are not
+		// fully processed? Are they sent to the Switch again?
+		// I believe we may rely on the Switch to decline to forward
+		// the same HTLC a second time, but our Link might be too dumb
+		// to know not to do that.
 		err = c.Packager.AckAddHtlcs(tx, diff.AddAcks...)
 		if err != nil {
 			return err
@@ -2423,6 +2432,9 @@ func (c *OpenChannel) AppendRemoteCommitChain(diff *CommitDiff) error {
 
 		// With the bucket retrieved, we'll now serialize the commit
 		// diff itself, and write it to disk.
+		//
+		// NOTE(11/23/22): All LogUpdates which are part of this commit diff
+		// are persisted to disk here!
 		var b2 bytes.Buffer
 		if err := serializeCommitDiff(&b2, diff); err != nil {
 			return err

@@ -956,6 +956,8 @@ func (s *Switch) handleLocalResponse(pkt *htlcPacket) {
 	// If this response is contained in a forwarding package, we'll start by
 	// acking the settle/fail so that we don't continue to retransmit the
 	// HTLC internally.
+	// NOTE(11/23/22): Forwarding package related information
+	// being consulted here!
 	if pkt.destRef != nil {
 		if err := s.ackSettleFail(*pkt.destRef); err != nil {
 			log.Warnf("Unable to ack settle/fail reference: %s: %v",
@@ -1117,6 +1119,16 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 
 			return s.failAddPacket(packet, failure)
 		}
+
+		// NOTE(11/23/22): ADDs which are being forwarded through the
+		// Switch WILL have a channeldb.AddRef pointing to the HTLC
+		// in the incoming link's forwarding package.
+		// packet.sourceRef
+		// packet.destRef
+		// packet.circuit.AddRef
+		// payment circuit does NOT have destination reference.
+		// It couldn't even exist until we have opened the payment circuit
+		// and received a response to the add.
 
 		// Before we attempt to find a non-strict forwarding path for
 		// this htlc, check whether the htlc is being routed over the
@@ -1281,6 +1293,9 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 
 		// Send the packet to the destination channel link which
 		// manages the channel.
+		//
+		// NOTE(11/23/22): This adds the ADD to the mailbox of the
+		// outgoing link.
 		packet.outgoingChanID = destination.ShortChanID()
 		return destination.handleSwitchPacket(packet)
 
@@ -1478,6 +1493,8 @@ func (s *Switch) failAddPacket(packet *htlcPacket, failure *LinkError) error {
 	// information about the htlc failure is included so that they can
 	// be included in link failure notifications.
 	failPkt := &htlcPacket{
+		// NOTE(11/23/22): Forwarding package related information
+		// being set up here!
 		sourceRef:       packet.sourceRef,
 		incomingChanID:  packet.incomingChanID,
 		incomingHTLCID:  packet.incomingHTLCID,
@@ -1557,6 +1574,8 @@ func (s *Switch) closeCircuit(pkt *htlcPacket) (*PaymentCircuit, error) {
 		pkt.incomingChanID = circuit.Incoming.ChanID
 		pkt.incomingHTLCID = circuit.Incoming.HtlcID
 		pkt.circuit = circuit
+		// NOTE(11/23/22): Forwarding package related information
+		// being set up here!
 		pkt.sourceRef = &circuit.AddRef
 
 		pktType := "SETTLE"
@@ -1579,6 +1598,8 @@ func (s *Switch) closeCircuit(pkt *htlcPacket) (*PaymentCircuit, error) {
 	// Failed to close circuit because it does not exist. This is likely
 	// because the circuit was already successfully closed.
 	case ErrUnknownCircuit:
+		// NOTE(11/23/22): Forwarding package related information
+		// being consulted!
 		if pkt.destRef != nil {
 			// Add this SettleFailRef to the set of pending settle/fail entries
 			// awaiting acknowledgement.
@@ -2204,7 +2225,9 @@ func (s *Switch) reforwardSettleFails(fwdPkgs []*channeldb.FwdPkg) {
 				settlePacket := &htlcPacket{
 					outgoingChanID: fwdPkg.Source,
 					outgoingHTLCID: pd.ParentIndex,
-					destRef:        pd.DestRef,
+					// NOTE(11/23/22): Forwarding package related information
+					// being consulted here!
+					destRef: pd.DestRef,
 					htlc: &lnwire.UpdateFulfillHTLC{
 						PaymentPreimage: pd.RPreimage,
 					},
@@ -2228,7 +2251,9 @@ func (s *Switch) reforwardSettleFails(fwdPkgs []*channeldb.FwdPkg) {
 				failPacket := &htlcPacket{
 					outgoingChanID: fwdPkg.Source,
 					outgoingHTLCID: pd.ParentIndex,
-					destRef:        pd.DestRef,
+					// NOTE(11/23/22): Forwarding package related information
+					// being consulted here!
+					destRef: pd.DestRef,
 					htlc: &lnwire.UpdateFailHTLC{
 						Reason: lnwire.OpaqueReason(pd.FailReason),
 					},

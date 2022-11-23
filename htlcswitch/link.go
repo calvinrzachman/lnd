@@ -867,6 +867,8 @@ func (l *channelLink) resolveFwdPkg(fwdPkg *channeldb.FwdPkg) error {
 
 	// If the package is fully acked but not completed, it must still have
 	// settles and fails to propagate.
+	// NOTE(11/23/22): It looks like we resurrect all Settle/Fail updates
+	// from this package and then reprocess them!
 	if !fwdPkg.SettleFailFilter.IsFull() {
 		settleFails, err := lnwallet.PayDescsFromRemoteLogUpdates(
 			fwdPkg.Source, fwdPkg.Height, fwdPkg.SettleFails,
@@ -883,6 +885,11 @@ func (l *channelLink) resolveFwdPkg(fwdPkg *channeldb.FwdPkg) error {
 	// downstream logic is able to filter out any duplicates, but we must
 	// shove the entire, original set of adds down the pipeline so that the
 	// batch of adds presented to the sphinx router does not ever change.
+	// NOTE(11/23/22): This is an interesting comment. Why does the sphinx
+	// router expect that a batch of adds never changes? Is it so it
+	// can detect replays?
+	// NOTE(11/23/22): It looks like we resurrect all ADD updates
+	// from this package and then reprocess them!
 	if !fwdPkg.AckFilter.IsFull() {
 		adds, err := lnwallet.PayDescsFromRemoteLogUpdates(
 			fwdPkg.Source, fwdPkg.Height, fwdPkg.Adds,
@@ -1528,7 +1535,14 @@ func (l *channelLink) handleDownstreamPkt(pkt *htlcPacket) {
 		err := l.channel.SettleHTLC(
 			htlc.PaymentPreimage,
 			pkt.incomingHTLCID,
+			// NOTE(11/23/22): If the packet we received from the switch
+			// has any channeldb.AddRef... to whose forwarding package?
 			pkt.sourceRef,
+			// NOTE(11/23/22): Thhe packet we received from the switch
+			// contains a reference to the HTLC (settle) update inside
+			// the outgoing links forwarding package. We will acknowledge
+			// this in the other link's forwarding package once we extend
+			// a new commitment with this HTLC update to our peer.
 			pkt.destRef,
 			&inKey,
 		)
@@ -3184,6 +3198,10 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 					// package to the Switch. Rather we pass a way
 					// for the Switch to find the HTLC in this link's
 					// forwarding package, as it's a bit leaner.
+					// As this is an (add) we are forwarding,
+					// it will have a reference to its location
+					// in this link's forwarding package created
+					// by ReceiveRevocation().
 					sourceRef:       pd.SourceRef,
 					incomingAmount:  pd.Amount,
 					amount:          addMsg.Amount,
@@ -3252,6 +3270,10 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 					// package to the Switch. Rather we pass a way
 					// for the Switch to find the HTLC in this link's
 					// forwarding package, as it's a bit leaner.
+					// As this is an (add) we are forwarding,
+					// it will have a reference to its location
+					// in this link's forwarding package created
+					// by ReceiveRevocation().
 					sourceRef:       pd.SourceRef,
 					incomingAmount:  pd.Amount,
 					amount:          addMsg.Amount,

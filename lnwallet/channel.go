@@ -283,6 +283,9 @@ type PaymentDescriptor struct {
 	// NOTE: This field will only be populated if EntryType is Fail or
 	// Settle, and the forwarded Add successfully included in an outgoing
 	// link's commitment txn.
+	// QUESTION(11/23/22): Does it also depend on whether the settle/fail
+	// is coming from the downstream link (and thus was included in that link's
+	// forwarding package) or from systems which handle on-chain HTLC resolution?
 	DestRef *channeldb.SettleFailRef
 
 	// OpenCircuitKey references the incoming Chan/HTLC ID of an Add HTLC
@@ -388,6 +391,10 @@ type PaymentDescriptor struct {
 //
 // NOTE: The provided `logUpdates` MUST corresponding exactly to either the Adds
 // or SettleFails in this channel's forwarding package at `height`.
+//
+// NOTE(11/23/22): SourceRef & DestRef are created here. When is this called?
+// - switch.reforwardSettleFails()
+// - link.resolveFwdPkg()
 func PayDescsFromRemoteLogUpdates(chanID lnwire.ShortChannelID, height uint64,
 	logUpdates []channeldb.LogUpdate) ([]*PaymentDescriptor, error) {
 
@@ -407,6 +414,22 @@ func PayDescsFromRemoteLogUpdates(chanID lnwire.ShortChannelID, height uint64,
 	// so that they can be ACK'd and garbage collected.
 	for i, logUpdate := range logUpdates {
 		var pd PaymentDescriptor
+
+		// NOTE(11/23/22):  We are restoring our in-memory state from
+		// LogUpdate which wraps an lnwire.Message.
+		// This function is GIVEN the LogUpdates from which the payment
+		// descriptors are built. The LogUpdates come from the forwarding
+		// package.
+		// I believe the message is internally constructed and does
+		// not as of yet have all the TLV extensions. Even if it did,
+		// the TLV extensions contain the incoming blinding point,
+		// but we want the outgoing link to receive the blinding point
+		// needed for the next node!
+		// UPDATE(11/23/22): The output of this function is given to
+		// l.processRemoteAdds(fwdPkg, adds) so we will be reprocessing
+		// the entire onion!? Why not persist the decrypted payload
+		// and only deal with that the second time around. Why decrypt
+		// twice?
 		switch wireMsg := logUpdate.UpdateMsg.(type) {
 
 		case *lnwire.UpdateAddHTLC:
@@ -3340,6 +3363,12 @@ func genRemoteHtlcSigJobs(keyRing *CommitmentKeyRing,
 // validate this new state. This function is called right before sending the
 // new commitment to the remote party. The commit diff returned contains all
 // information necessary for retransmission.
+//
+// NOTE(11/23/22):
+// - Pay careful attention to what we set up to be acknowledged
+//   in the construction of the CommitDiff.
+// - This is used when extending the remote party's commitment transaction
+//   via SignNextCommitment()
 func (lc *LightningChannel) createCommitDiff(
 	newCommit *commitment, commitSig lnwire.Sig,
 	htlcSigs []lnwire.Sig) (*channeldb.CommitDiff, error) {
@@ -3358,10 +3387,26 @@ func (lc *LightningChannel) createCommitDiff(
 		closedCircuitKeys []models.CircuitKey
 	)
 
+	// NOTE(11/23/22): We use the channel's local and remote update log
+	// to determine what we'll be signing for. Is there any chance this
+	// differs from the incoming/outgoing HTLCs listed on the commitment{}
+	// payDescs := newCommit.incomingHTLCs
+	// payDescks := newCommit.outgoingHTLCs
+
 	// We'll now run through our local update log to locate the items which
 	// were only just committed within this pending state. This will be the
 	// set of items we need to retransmit if we reconnect and find that
 	// they didn't process this new state fully.
+	//
+	// NOTE(11/23/22): HTLC updates from our link's local update log
+	// (ie: outgoing) are the updates which we have the responsibility of
+	// retransmitting externally to our peer.
+	//
+	// NOTE(11/23/22): When sending a commitment (ie: extending our peer’s
+	// commitment chain) and creating a new remote view, we include _all_ of
+	// our changes (pending or committed). I think this was already
+	// computed in fetchCommitmentView(). Are we not redoing some of
+	// that work here?
 	for e := lc.localUpdateLog.Front(); e != nil; e = e.Next() {
 		pd := e.Value.(*PaymentDescriptor)
 
@@ -3386,6 +3431,14 @@ func (lc *LightningChannel) createCommitDiff(
 		// messages obtained, we can simply read from disk and re-send
 		// them in the case of a needed channel sync.
 		switch pd.EntryType {
+
+		// NOTE(11/23/22): Here we take each of our pending (see drawings)
+		// local updates and build a corresponding LogUpdate. The LogUpdate wraps
+		// a locally constructed HTLC update message. It appears we do NOT
+		// persist the lnwire.Message (Add,Settle, Fail) we receive from
+		// our peer directly, but rather we persist a locally constructed
+		// version of the message which has been stripped down a bit.
+		// Relevant for route blinding, it does NOT include the TLV extensions.
 		case Add:
 			htlc := &lnwire.UpdateAddHTLC{
 				ChanID:      chanID,
@@ -3448,6 +3501,23 @@ func (lc *LightningChannel) createCommitDiff(
 		if pd.SourceRef != nil {
 			ackAddRefs = append(ackAddRefs, *pd.SourceRef)
 		}
+
+		// NOTE(11/23/22): This means that the settle/fail came in
+		// via another link, which created its own forwarding package
+		// which contains the settle/fail. The settle/fail has made
+		// it through the switch back to us (we are the link on which
+		// the corresponding 'add' first came in)
+		// The reference to the settle/fail in the (from perspective of
+		// 'add') forwarding package of the outgoing link (Note: we are
+		// the outgoing link for this settle/fail) will have been created
+		// when the outgoing link added the settle/fail to a forwarding
+		// package it created in ReceiveRevocation()
+		//
+		// As discussed in other comments, this value may be nil if
+		// the Settle/Fail was never added to the commitment transaction
+		// of an outgoing link (ie: never forwarded) or if the Settle/Fail
+		// update is coming, not from the downstream link, but from systems
+		// which handle on-chain HTLC resolution.
 		if pd.DestRef != nil {
 			settleFailRefs = append(settleFailRefs, *pd.DestRef)
 		}
@@ -3473,6 +3543,8 @@ func (lc *LightningChannel) createCommitDiff(
 			CommitSig: commitSig,
 			HtlcSigs:  htlcSigs,
 		},
+		// NOTE(11/23/22): We have built the log updates which will
+		// be persisted to disk inside lc.channelState.AppendRemoteCommitChain(commitDiff)!
 		LogUpdates:        logUpdates,
 		OpenedCircuitKeys: openCircuitKeys,
 		ClosedCircuitKeys: closedCircuitKeys,
@@ -3885,10 +3957,31 @@ func (lc *LightningChannel) SignNextCommitment() (lnwire.Sig, []lnwire.Sig,
 	// As we're about to proposer a new commitment state for the remote
 	// party, we'll write this pending state to disk before we exit, so we
 	// can retransmit it if necessary.
+	// NOTE(11/23/22): Recall, we are signing for any and all HTLC updates
+	// in our local update log! Because we can and it's correct with in
+	// order message delivery. These are updates we are forwarding to our peer.
+	// - Any Settle/Fail updates in our local update log are responses to
+	//   previous ADDs, and will be acknowledged when we write the commitment
+	//   diff to disk below.
+	// - Any ADD updates in our local update log, are ADD updates we have received
+	//   from our switch. These will be placed in a forwarding package once
+	//   we get Revocation and Acknowledgement from our peer. They do not need
+	//   internal acknowledgement.
+	// - When responding to a CommitmentSigned which extends our commitment
+	//   with an extending commitment for our peer, the new commitment view
+	//   will contain the remote peer's updates we would have just acknowledged
+	//   via RevokeAndAck(). These are remote updates and do not have
 	commitDiff, err := lc.createCommitDiff(newCommitView, sig, htlcSigs)
 	if err != nil {
 		return sig, htlcSigs, nil, err
 	}
+
+	// IMPORTANT NOTE: Adds, Settles, and Fails are always ack'd
+	// atomically with commitment signing.
+	// NOTE(11/23/22):
+	// - Pay careful attention to what we set up
+	//   to be acknowledged in the construction of the CommitDiff.
+	// - This is where we write the LogUpdates to disk!
 	err = lc.channelState.AppendRemoteCommitChain(commitDiff)
 	if err != nil {
 		return sig, htlcSigs, nil, err
@@ -4969,6 +5062,8 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 	// log updates and payment descriptors, allowing us to persist the log
 	// updates to disk and optimistically buffer the forwarding package in
 	// memory.
+	// NOTE(11/23/22): We are building LogUpdates for the received update
+	// case here! Sending case is in SignNextCommitment().
 	var (
 		addsToForward        []*PaymentDescriptor
 		addUpdates           []channeldb.LogUpdate
@@ -4977,8 +5072,22 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 	)
 
 	var addIndex, settleFailIndex uint16
+
+	// NOTE(11/23/22): We are going to determine the set of htlc updates we
+	// have received from our remote peer which need to be forwarded onwards
+	// through the Switch to towards their destination. Updates in our local
+	// update log have already came from the Switch and thus do NOT need
+	// to be forwarded.
 	for e := lc.remoteUpdateLog.Front(); e != nil; e = e.Next() {
 		pd := e.Value.(*PaymentDescriptor)
+		// NOTE(11/23/22): These payment descriptors will have a blinding
+		// point if the htlc we received via ReceiveHTLC() had one in its
+		// TLV extension. It is this very payment descriptor which the
+		// incoming link will eventually process in processRemoteAdds().
+		// This will be the incoming (route) blinding point needed to
+		// decrypt the onion and route blinding payload.
+		// The LogUpdate we create below will not have the blinding point
+		// directly or via TLV extension though so be careful!
 
 		// Fee updates are local to this particular channel, and should
 		// never be forwarded.
@@ -4994,6 +5103,8 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 		// both of the remote and local heights are non-zero. If either
 		// of these values is zero, it has yet to be committed in both
 		// the local and remote chains.
+		//
+		// TODO(11/23/22): I have never looked at these fields. Check them out.
 		committedAdd := pd.addCommitHeightRemote > 0 &&
 			pd.addCommitHeightLocal > 0
 		committedRmv := pd.removeCommitHeightRemote > 0 &&
@@ -5003,6 +5114,9 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 		// preemptively compute whether or not to forward this HTLC for
 		// the case in which this in an Add HTLC, or if this is a
 		// Settle, Fail, or MalformedFail.
+		//
+		// NOTE(11/23/22): This is a tricky bit. See if we can
+		// decipher it. Expand this comment when finished.
 		shouldFwdAdd := remoteChainTail == pd.addCommitHeightRemote &&
 			localChainTail >= pd.addCommitHeightLocal
 		shouldFwdRmv := remoteChainTail == pd.removeCommitHeightRemote &&
@@ -5018,6 +5132,19 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 			// Construct a reference specifying the location that
 			// this forwarded Add will be written in the forwarding
 			// package constructed at this remote height.
+			//
+			// NOTE(11/23/22): An payment descriptor first receives a
+			// forwarding package source reference when the HTLC
+			// update it describes, namely a new (add), arrives at our link
+			// from a peer and has been commmited to. We are the incoming
+			// link and will need to forward this HTLC through the switch
+			// on its way to the recipient. We will add a source reference
+			// to the payment descriptor. Will our outgoing link's payment
+			// descriptor have the same source reference?
+			// - Check AddHTLC()
+			// - Yes! Though payment descriptors remain local to the link
+			// for whose HTLC update log they were created, the channeldb.AddRefs
+			// are passed through the Switch via the htlcPacket structure
 			pd.SourceRef = &channeldb.AddRef{
 				Height: remoteChainTail,
 				Index:  addIndex,
@@ -5031,6 +5158,22 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 			// Construct a reference specifying the location that
 			// this forwarded Settle/Fail will be written in the
 			// forwarding package constructed at this remote height.
+			//
+			// NOTE(11/23/22): An payment descriptor first receives a
+			// forwarding package destination reference when the HTLC
+			// update it describes, namely a (settle/fail) response
+			// to a previously forwarded (add), arrives at our link
+			// from a peer and has been commmited to. From the perspective
+			// of the original (add), the response has arrived and
+			// been committed do by the outgoing link. It just needs
+			// to be returned to the incoming link via the switch
+			// and continued on its journey back towards the sender.
+			// Will our incoming link's payment descriptor have the
+			// same destination reference?
+			// - Check SettleHTLC() or FailHTLC()
+			// - Yes! Though payment descriptors remain local to the link
+			// for whose HTLC update log they were created, the channeldb.SettleFailRefs
+			// are passed through the Switch via the htlcPacket structure
 			pd.DestRef = &channeldb.SettleFailRef{
 				Source: source,
 				Height: remoteChainTail,
@@ -5057,6 +5200,14 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 		// updates into Adds and Settle/Fail/MalformedFail such that
 		// they can be written in the forwarding package. Adds are
 		// aggregated separately from the other types of HTLCs.
+		//
+		// NOTE(11/23/22): Here we take each of our pending/committed? (see drawings)
+		// remote updates and build a corresponding LogUpdate. The LogUpdate wraps a
+		// locally constructed HTLC update message. It appears we do NOT
+		// persist the lnwire.Message (Add,Settle, Fail) we receive from
+		// our peer directly, but rather we persist a locally constructed
+		// version of the message which has been stripped down a bit.
+		// Relevant for route blinding, it does NOT include the TLV extensions.
 		switch pd.EntryType {
 		case Add:
 			htlc := &lnwire.UpdateAddHTLC{
@@ -5109,6 +5260,10 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 	// Now that we have gathered the set of HTLCs to forward, separated by
 	// type, construct a forwarding package using the height that the remote
 	// commitment chain will be extended after persisting the revocation.
+	//
+	// NOTE(11/23/22): This is where a forwarding package is created for
+	// the very first time! The forwarding package contains the LogUpdates
+	// from our remote peer only??
 	fwdPkg := channeldb.NewFwdPkg(
 		source, remoteChainTail, addUpdates, settleFailUpdates,
 	)
@@ -5363,13 +5518,17 @@ func (lc *LightningChannel) htlcAddDescriptor(htlc *lnwire.UpdateAddHTLC,
 	openKey *models.CircuitKey) *PaymentDescriptor {
 
 	return &PaymentDescriptor{
-		EntryType:      Add,
-		RHash:          PaymentHash(htlc.PaymentHash),
-		Timeout:        htlc.Expiry,
-		Amount:         htlc.Amount,
-		LogIndex:       lc.localUpdateLog.logIndex,
-		HtlcIndex:      lc.localUpdateLog.htlcCounter,
-		OnionBlob:      htlc.OnionBlob[:],
+		EntryType: Add,
+		RHash:     PaymentHash(htlc.PaymentHash),
+		Timeout:   htlc.Expiry,
+		Amount:    htlc.Amount,
+		LogIndex:  lc.localUpdateLog.logIndex,
+		HtlcIndex: lc.localUpdateLog.htlcCounter,
+		OnionBlob: htlc.OnionBlob[:],
+		// NOTE: AddHTLC is called by the outgoing link.
+		// If the (add) came to us via the switch, then
+		// we will have an open circuit key.
+		// The circuit will later be commited once we...
 		OpenCircuitKey: openKey,
 	}
 }
@@ -5461,10 +5620,21 @@ func (lc *LightningChannel) ReceiveHTLC(htlc *lnwire.UpdateAddHTLC) (uint64, err
 //     HTLC does not originate as a response from the peer on the outgoing
 //     link, e.g. on-chain resolutions.
 //
-//   - closeKey: identifies the circuit that should be deleted after this Settle
-//     HTLC is included in a commitment txn. This value should only be nil if
-//     the HTLC was settled locally before committing a circuit to the circuit
-//     map.
+//      NOTE(11/23/22): This makes sense! SettleHTLC will be called by an outgoing
+//      link seeking to push the settle update to its peer. In "normal" operation,
+//      this settle is repsonding to a previous add, and thus will have came in on
+//      another link. This type of sail WILL have a destRef so that we can acknowledge
+//      the complete processing of the HTLC (add, settle) with the downstream link.
+//      If, as is said here, the incoming link is settling back an add which is not
+//      coming to our link (incoming) from the outgoing link, but rather systems which
+//      handle on-chain HTLC resolution, then the settle will of course NOT be in any
+//      other link's forwarding package, thus this 'destRef' will be nil!
+//      TODO: Find out where and when the AddRefs and SettleFailRefs are created!
+//
+//  * closeKey: identifies the circuit that should be deleted after this Settle
+//      HTLC is included in a commitment txn. This value should only be nil if
+//      the HTLC was settled locally before committing a circuit to the circuit
+//      map.
 //
 // NOTE: It is okay for sourceRef, destRef, and closeKey to be nil when unit
 // testing the wallet.
@@ -5572,10 +5742,20 @@ func (lc *LightningChannel) ReceiveHTLCSettle(preimage [32]byte, htlcIndex uint6
 //     originate as a response from the peer on the outgoing link, e.g.
 //     on-chain resolutions.
 //
-//   - closeKey: identifies the circuit that should be deleted after this Fail
-//     HTLC is included in a commitment txn. This value should only be nil if
-//     the HTLC was failed locally before committing a circuit to the circuit
-//     map.
+//      NOTE(11/23/22): This makes sense! FailHTLC will be called by an outgoing
+//      link seeking to push the fail update to its peer. In "normal" operation,
+//      this fail is repsonding to a previous add, and thus will have came in on
+//      another link. This type of fail WILL have a destRef so that we can acknowledge
+//      the complete processing of the HTLC (add, fail) with the downstream link.
+//      If, as is said here, the incoming link is failing back an add which never
+//      made it through our Switch and downstream to a peer, then the fail will
+//      of course NOT be in any other link's forwarding package, thus this 'destRef'
+//      will be nil!
+//
+//  * closeKey: identifies the circuit that should be deleted after this Fail
+//      HTLC is included in a commitment txn. This value should only be nil if
+//      the HTLC was failed locally before committing a circuit to the circuit
+//      map.
 //
 // NOTE: It is okay for sourceRef, destRef, and closeKey to be nil when unit
 // testing the wallet.
