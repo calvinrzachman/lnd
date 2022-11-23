@@ -7,6 +7,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/davecgh/go-spew/spew"
 	sphinx "github.com/lightningnetwork/lightning-onion"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/feature"
@@ -95,6 +96,289 @@ type finalHopParams struct {
 	metadata []byte
 }
 
+// NOTE(8/31/22): this presenlty assumes we're using same fees, min_htlc,
+// ctlv_delta for every hop in the blinded route. This is probably reasonable
+// in a first implementation for simplicity's sake, but this struct could be
+// made more general to support fees and timelocks which vary along the route.
+type BlindRoutePaymentParams struct {
+	BaseFee         uint32
+	FeeRate         uint32
+	MinHtlc         uint64
+	CltvDelta       uint16
+	RouteCltvExpiry uint32
+}
+
+// NOTE(8/31/22): given the information on paramters for each hop, we can
+// compute the cumulative feess & timelock across the entire route.
+type AggregateRouteParams struct {
+	AggregateBaseFee  uint64
+	AggregateFeeRate  uint64
+	AggregateTimeLock uint32
+	Hops              []*sphinx.BlindedPathHop
+}
+
+type BlindPayment struct {
+	BlindRoute *route.Route
+	BlindRoutePaymentParams
+	AggregateRouteParams
+}
+
+// func (r *ChannelRouter) BuildBlindRoute(expiry uint32) (*BlindPayment, error) {
+func (r *ChannelRouter) BuildBlindRoute(source, target *route.Vertex,
+	amt lnwire.MilliSatoshi,
+	// amt lnwire.MilliSatoshi, restrictions *RestrictParams,
+	routeExpiry uint32) (*BlindPayment, *sphinx.BlindedPath, error) {
+
+	// NOTE(8/26/22): temporarily removed these from consideration
+	// to simplify things. Add back in as function arguments/deps later.
+	var timePref float64 = 0
+	var finalHtlcExpiry int32 = 0
+	introductionNode := source
+	ourselves := r.cachedGraph.sourceNode()
+
+	// If the introduction node has not been selected yet,
+	// go ahead and select one now. Otherwise the introduction
+	// node has been specified by the caller.
+	selectIntroductionNode := func() *route.Vertex { return nil }
+	if source == nil {
+		introductionNode = selectIntroductionNode()
+		source = introductionNode
+	}
+
+	// In principle one can build blinded routes to any network node.
+	// If no target is specified we assume that we are creating a blinded
+	// route to ourself.
+	if target == nil {
+		target = &ourselves
+	}
+	log.Debugf("Searching for blinded path to %v, sending %v", target, amt)
+
+	// Restrict pathfinding to only edges which support route blinding.
+	routeBlindingRawFeatures := lnwire.NewRawFeatureVector(
+		lnwire.TLVOnionPayloadOptional,
+		lnwire.RouteBlindingOptional,
+	)
+	routeBlindingFeatures := lnwire.NewFeatureVector(
+		routeBlindingRawFeatures, lnwire.Features,
+	)
+
+	restrictions := &RestrictParams{
+		HopFeatures:   routeBlindingFeatures,
+		RouteBlinding: true,
+	}
+	// restrictions.HopFeatures = routeBlindingFeatures
+	// restrictions.RouteBlinding = true
+
+	// We'll fetch the current block height so we can properly calculate the
+	// required HTLC time locks within the route.
+	_, currentHeight, err := r.cfg.Chain.GetBestBlock()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig, source route.Vertex, target route.Vertex, amt lnwire.MilliSatoshi, timePref float64, finalHtlcExpiry int32)
+	// newBlindRoute(sourceVertex route.Vertex, pathEdges []*channeldb.CachedEdgePolicy, currentHeight uint32, finalHop finalHopParams)
+	// path, _ := findPath(c.cachedGraph, nil, nil, introductionNode, c.cachedGraph.sourceNode(), 100, 0, 0)
+	// hopsToBeBlinded, aggregateRouteParams := newBlindRoute()
+
+	// Find a path between introduction node and target (usually our node).
+	path, err := findPath(
+		&graphParams{
+			// additionalEdges: routeHints,
+			// bandwidthHints: bandwidthHints,
+			graph: r.cachedGraph,
+		},
+		restrictions,
+		&r.cfg.PathFindingConfig,
+		*source, *target, amt, timePref, finalHtlcExpiry,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Upon creation a route contains the minimum fee/time-lock needed to
+	// traverse each hop, as this is specified by the channel edge
+	// forwarding policy. We may, in general, re-write any route to use
+	// higher fees/time-locks than required for forwarding, and in fact
+	// we likely should do so to protect against an attacker who can
+	// leverage both the blinded route structure (construct initial
+	// anonymity set) & channel graph dynamics (ex: fee increases) in order
+	// to degrade the privacy offered by the blinded route over time.
+	// Build a route from the candidate path. This route will be post
+	// processed to ensure we leak minimal information to attackers.
+	// route := newRouteForBlinding()
+	//
+	// r.Blinder(route)
+	blindPayment, err := newBlindRoute(
+		*introductionNode, path, uint32(currentHeight),
+		finalHopParams{
+			amt:      amt,
+			totalAmt: amt,
+			// cltvDelta: finalHtlcExpiry,
+			// records:   destCustomRecords,
+		},
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	go log.Tracef("Obtained path to send %v to %x: %v",
+		amt, ourselves, newLogClosure(func() string {
+			return spew.Sdump(blindPayment)
+		}),
+	)
+
+	// Compute the route blinding TLV payloads for each hop in this route.
+	// routeBlindingPayloads, err := route.Blind()
+	// hopsToBeBlinded, aggregateRouteParams, err := blindPayment.BlindRoute.ToSphinxBlindPath()
+	hopsToBeBlinded, _ := blindPayment.BlindRoute.ToSphinxBlindPath()
+
+	// Actually build the blinded route (ie: blind the node ID public keys and encrypt the route blinding payloads).
+	sessionKey, _ := GenerateNewSessionKey()
+	blindRoute, _ := sphinx.BuildBlindedPath(sessionKey, hopsToBeBlinded)
+
+	// Either convert from sphinx.BlindPath ==> route.Route (route.Marshall/FromSphinx)
+	// or return sphinx.BlindPath along with aggregate route parameters.
+
+	return blindPayment, blindRoute, nil
+}
+
+// type BlindHopPadder interface {
+// 	// A function which computes the aggregate
+// 	ComputePadding() BlindRoutePaymentParams
+// }
+
+var selectBlindRouteParams = func(pathEdges []*channeldb.CachedEdgePolicy) BlindRoutePaymentParams {
+	var base, maxBaseFee, rate, maxFeeRate uint32
+	// var base, rate uint32 = 10000, 0
+	var maxCltvDelta, cltvDelta uint16
+	var minHtlc, maxSmallestHtlc uint64
+
+	// // Define our neighborhood.
+	// introductionNode := r.SourcePubKey
+	// routeLength := len(r.Hops)
+	// fmt.Printf("[selectBlindRouteParams]: intro hop: %+v, len: %d\n",
+	// 	introductionNode.String(), routeLength)
+
+	// Compute the minimum aggregate fee and timelock
+
+	// One simple way to select the route blinding forwarding
+	// parameters is to iterate through the route and take
+	// the largest value and then apply some safety margin.
+	//
+	// NOTE(8/26/22): This might be a place where we would
+	// want to allow people to inject their own algorithm
+	// for selecting these parameters. How can we facilitate that?
+	for _, hop := range pathEdges {
+		fmt.Printf("[selectBlindRouteParams]: hop info: %+v\n", hop)
+		base = uint32(hop.FeeBaseMSat)
+		rate = uint32(hop.FeeProportionalMillionths)
+		minHtlc = uint64(hop.MinHTLC)
+		cltvDelta = hop.TimeLockDelta
+
+		if base > maxBaseFee {
+			maxBaseFee = base
+		}
+		if rate > maxFeeRate {
+			maxFeeRate = rate
+		}
+		if minHtlc > maxSmallestHtlc {
+			maxSmallestHtlc = minHtlc
+		}
+		if cltvDelta > maxCltvDelta {
+			maxCltvDelta = cltvDelta
+		}
+
+	}
+
+	// Add additional margin which will allow the route to be used
+	// even under a scenario where routing nodes modify their
+	// forwarding parameters.
+	//
+	// As a sensible default we will double the largest value (100% margin).
+	var safetyMargin uint32 = 2
+	base = maxBaseFee * safetyMargin
+	rate = maxFeeRate * safetyMargin
+	// maxCltvDelta = uint16(uint32(maxCltvDelta) * safetyMargin)
+	// maxSmallestHtlc = uint64(uint32(maxSmallestHtlc) * safetyMargin)
+
+	paymentParams := BlindRoutePaymentParams{
+		base,
+		rate,
+		maxSmallestHtlc,
+		maxCltvDelta,
+		0,
+	}
+	fmt.Printf("[selectBlindRouteParams]: Blind Route Payment parameters: %+v\n", paymentParams)
+	return paymentParams
+	// return BlindRoutePaymentParams{
+	// 	base,
+	// 	rate,
+	// 	maxSmallestHtlc,
+	// 	maxCltvDelta,
+	// 	0,
+	// }
+	// return base, rate, maxCltvDelta, maxTimelock, maxSmallestHtlc
+}
+
+// newBlindRoute is just like newRoute except it does some route blinding stuff.
+func newBlindRoute(sourceVertex route.Vertex,
+	pathEdges []*channeldb.CachedEdgePolicy, currentHeight uint32,
+	finalHop finalHopParams) (*BlindPayment, error) {
+
+	rt, err := newRoute(sourceVertex, pathEdges, currentHeight, finalHop)
+	if err != nil {
+		return nil, err
+	}
+
+	var blindedRouteExpiry uint32 = 1000
+
+	// Using those values we can compute aggregates across the blinded
+	// route. A blinded route is opaque to senders. Rather than provide
+	// them with the forwarding information (amount/fee & timelock delta)
+	// for each hop, we will need to provide them with the sum total of
+	// these values across the entire blinded portion of the route.
+	// This way they know how many sats (amt) and timelock need to be
+	// "delivered" to the introduction node when they construct the
+	// complete route (clear + blind).
+
+	// We select values for (base, rate, min_htlc, & cltv_delta)
+	// such that we have a strong anonymity set.
+	blindPaymentParams := selectBlindRouteParams(pathEdges)
+	blindPaymentParams.RouteCltvExpiry = blindedRouteExpiry
+
+	// Compute aggregate route parameters. These will need to be
+	// communicated to senders so that they know by how much
+	// their route to the introduction node needs to be offset
+	// such that the payment can successfully transit the blinded
+	// portion of the route.
+	computeAggregateRouteParams := func(r *route.Route, b BlindRoutePaymentParams) *AggregateRouteParams {
+
+		routeFeeBase := b.BaseFee * uint32(len(r.Hops))     // slightly incorrect
+		routeFeeRate := b.FeeRate * uint32(len(r.Hops))     // a bit more incorrect
+		routeCltvDelta := b.CltvDelta * uint16(len(r.Hops)) // correct
+		return &AggregateRouteParams{
+			AggregateBaseFee:  uint64(routeFeeBase),
+			AggregateFeeRate:  uint64(routeFeeRate),
+			AggregateTimeLock: uint32(routeCltvDelta),
+		}
+	}
+
+	// QUESTION(8/25/22): Can I compute the necessary aggregate route
+	// parameters for route blinding like this? Or would it be better to
+	// expose the information I need (just minHTLC?) directly on route.Hop
+	// so it can be computed later?
+	aggregateRouteParams := computeAggregateRouteParams(rt, blindPaymentParams)
+
+	// Validate that all route hops support route blinding?
+
+	return &BlindPayment{
+		BlindRoute:              rt,
+		BlindRoutePaymentParams: blindPaymentParams,
+		AggregateRouteParams:    *aggregateRouteParams,
+	}, nil
+}
+
 // newRoute constructs a route using the provided path and final hop constraints.
 // Any destination specific fields from the final hop params  will be attached
 // assuming the destination's feature vector signals support, otherwise this
@@ -143,6 +427,7 @@ func newRoute(sourceVertex route.Vertex,
 			customRecords    record.CustomSet
 			mpp              *record.MPP
 			metadata         []byte
+			totalAmtMsat     lnwire.MilliSatoshi
 		)
 
 		// Define a helper function that checks this edge's feature
@@ -209,6 +494,8 @@ func newRoute(sourceVertex route.Vertex,
 			}
 
 			metadata = finalHop.metadata
+			totalAmtMsat = finalHop.totalAmt
+
 		} else {
 			// The amount that the current hop needs to forward is
 			// equal to the incoming amount of the next hop.
@@ -240,6 +527,8 @@ func newRoute(sourceVertex route.Vertex,
 			CustomRecords:    customRecords,
 			MPP:              mpp,
 			Metadata:         metadata,
+			MinimumHTLC:      uint64(edge.MinHTLC),
+			TotalAmountMsat:  lnwire.MilliSatoshi(totalAmtMsat),
 		}
 
 		hops = append([]*route.Hop{currentHop}, hops...)
@@ -334,6 +623,12 @@ type RestrictParams struct {
 	// features on the node announcement instead.
 	DestFeatures *lnwire.FeatureVector
 
+	// HopFeatures is a feature vector describing the features
+	// each hop is required to support. An example use is every hop
+	// in a blinded route must support route blinding feature
+	HopFeatures   *lnwire.FeatureVector
+	RouteBlinding bool
+
 	// PaymentAddr is a random 32-byte value generated by the receiver to
 	// mitigate probing vectors and payment sniping attacks on overpaid
 	// invoices.
@@ -413,6 +708,10 @@ func getOutgoingBalance(node route.Vertex, outgoingChans map[uint64]struct{},
 	return max, total, err
 }
 
+type EdgeProcessor func(fromVertex route.Vertex,
+	fromFeatures *lnwire.FeatureVector,
+	edge *channeldb.CachedEdgePolicy, toNodeDist *nodeWithDist)
+
 // findPath attempts to find a path from the source node within the ChannelGraph
 // to the target node that's capable of supporting a payment of `amt` value. The
 // current approach implemented is modified version of Dijkstra's algorithm to
@@ -445,6 +744,7 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 	features := r.DestFeatures
 	if features == nil {
 		var err error
+		// NOTE: We DO have the ability to grab the advertised features of arbitrary nodes!
 		features, err = g.graph.fetchNodeFeatures(target)
 		if err != nil {
 			return nil, err
@@ -460,6 +760,7 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 	}
 
 	// Ensure that all transitive dependencies are set.
+	// QUESTION(8/25/22): Does route blinding have "transitive dependencies"?
 	err = feature.ValidateDeps(features)
 	if err != nil {
 		log.Warnf("Pathfinding destination node features: %v", err)
@@ -480,6 +781,12 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 
 	// If the caller has a payment address to attach, check that our
 	// destination feature vector supports them.
+	//
+	// NOTE(8/25/22): strictly speaking I think all of these could be
+	// booleans. If our restrictions indicate we must use nodes with
+	// support for PaymentAddr then we need to check that the node
+	// supports payment addresses. We do not need the actual payment
+	// address here.
 	if r.PaymentAddr != nil &&
 		!features.HasFeature(lnwire.PaymentAddrOptional) {
 
@@ -492,6 +799,20 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 		!features.HasFeature(lnwire.TLVOnionPayloadOptional) {
 
 		return nil, errNoTlvPayload
+	}
+
+	// QUESTION: Should route blinding validation be done here?
+	// ANSWER: No! We need each hop in a path to adhere to our set of
+	// required features. This can only be known once you have a path
+	// or while building a path. We can validate the target though!
+	//
+	// Here we check that our target supports route blinding
+	// If pathfinding restrictions indicate we are searching for a
+	// blinded path, we check that our target supports route blinding.
+	routeBlindingRequired := r.RouteBlinding
+	if routeBlindingRequired &&
+		!features.HasFeature(lnwire.RouteBlindingOptional) {
+		return nil, errMissingPathDependentFeature
 	}
 
 	// Set up outgoing channel map for quicker access.
@@ -569,6 +890,7 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 		),
 		MPP:      mpp,
 		Metadata: r.Metadata,
+		// MinimumHTLC: uint64,
 	}
 
 	// We can't always assume that the end destination is publicly
@@ -623,6 +945,21 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 		edge *channeldb.CachedEdgePolicy, toNodeDist *nodeWithDist) {
 
 		edgesExpanded++
+
+		// Only consider hops which support required features.
+		// desiredHopFeatures := r.HopFeatures
+		// actualHopFeatures := fromFeatures
+		if r.HopFeatures != nil {
+			fmt.Printf("[findpath() inside processEdge]: (%v) supports "+
+				"features: %+v, required features: %+v", fromVertex.String(),
+				fromFeatures.Features(), r.HopFeatures.Features())
+		}
+
+		if !fromFeatures.HasFeatures(r.HopFeatures) {
+			fmt.Print(" ignoring edge...\n")
+			return
+		}
+		fmt.Println()
 
 		// Calculate amount that the candidate node would have to send
 		// out.

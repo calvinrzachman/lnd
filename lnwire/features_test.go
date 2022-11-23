@@ -16,6 +16,8 @@ var testFeatureNames = map[FeatureBit]string{
 	5: "feature3",
 }
 
+// TODO(8/26/22): write unit test for HasFeatures()
+
 func TestFeatureVectorSetUnset(t *testing.T) {
 	t.Parallel()
 
