@@ -422,6 +422,10 @@ func PayDescsFromRemoteLogUpdates(chanID lnwire.ShortChannelID, height uint64,
 					Height: height,
 					Index:  uint16(i),
 				},
+				// NOTE(11/23/22): When the incoming link is reforwarding
+				// the ADD through the switch it will need to set
+				// the blinding point. This will be the
+				BlindingPoint: wireMsg.BlindingPoint,
 			}
 			pd.OnionBlob = make([]byte, len(wireMsg.OnionBlob))
 			copy(pd.OnionBlob[:], wireMsg.OnionBlob[:])
@@ -3339,6 +3343,7 @@ func (lc *LightningChannel) createCommitDiff(
 				Amount:      pd.Amount,
 				Expiry:      pd.Timeout,
 				PaymentHash: pd.RHash,
+				// TODO: do we need blinding point here?
 			}
 			copy(htlc.OnionBlob[:], pd.OnionBlob)
 			logUpdate.UpdateMsg = htlc
@@ -3369,6 +3374,7 @@ func (lc *LightningChannel) createCommitDiff(
 				ChanID: chanID,
 				ID:     pd.ParentIndex,
 				Reason: pd.FailReason,
+				// TODO: do we need blinding point here?
 			}
 
 		case MalformedFail:
@@ -3377,6 +3383,7 @@ func (lc *LightningChannel) createCommitDiff(
 				ID:           pd.ParentIndex,
 				ShaOnionBlob: pd.ShaOnionBlob,
 				FailureCode:  pd.FailCode,
+				// TODO: do we need blinding point here?
 			}
 
 		case FeeUpdate:
@@ -5000,6 +5007,10 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 				Amount:      pd.Amount,
 				Expiry:      pd.Timeout,
 				PaymentHash: pd.RHash,
+				// We could add the blinding point
+				// as TLV extension here so it is
+				// serialized to disk but that
+				// does not seem ideal.
 			}
 			copy(htlc.OnionBlob[:], pd.OnionBlob)
 			logUpdate.UpdateMsg = htlc
