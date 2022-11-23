@@ -63,6 +63,10 @@ const (
 	// errMissingDependentFeature is returned when the destination node
 	// misses a feature that a feature that we require depends on.
 	errMissingDependentFeature
+
+	// errMissingPathDependentFeature is returned when there is no
+	// path which fully supports a list of the features we require.
+	errMissingPathDependentFeature
 )
 
 var (
@@ -96,6 +100,9 @@ func (e noRouteError) Error() string {
 	case errMissingDependentFeature:
 		return "missing dependent feature"
 
+	case errMissingPathDependentFeature:
+		return "missing path dependent feature"
+
 	default:
 		return "unknown no-route error"
 	}
@@ -110,7 +117,8 @@ func (e noRouteError) FailureReason() channeldb.FailureReason {
 		errNoPathFound,
 		errEmptyPaySession,
 		errUnknownRequiredFeature,
-		errMissingDependentFeature:
+		errMissingDependentFeature,
+		errMissingPathDependentFeature:
 
 		return channeldb.FailureReasonNoRoute
 
@@ -256,8 +264,13 @@ func (p *paymentSession) RequestRoute(maxAmt, feeLimit lnwire.MilliSatoshi,
 		CltvLimit:          cltvLimit,
 		DestCustomRecords:  p.payment.DestCustomRecords,
 		DestFeatures:       p.payment.DestFeatures,
-		PaymentAddr:        p.payment.PaymentAddr,
-		Metadata:           p.payment.Metadata,
+		// HopFeatures:        lnwire.NewFeatureVector(lnwire.NewRawFeatureVector(lnwire.RouteBlindingOptional), nil),
+		// HopFeatures: lnwire.NewFeatureVector(nil, map[lnwire.FeatureBit]string{
+		// 	lnwire.FeatureBit(lnwire.RouteBlindingOptional): "yes",
+		// }),
+		// RouteBlinding:      true,
+		PaymentAddr: p.payment.PaymentAddr,
+		Metadata:    p.payment.Metadata,
 	}
 
 	finalHtlcExpiry := int32(height) + int32(finalCltvDelta)
