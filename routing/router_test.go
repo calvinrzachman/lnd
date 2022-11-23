@@ -2952,6 +2952,15 @@ func TestSendToRouteMaxHops(t *testing.T) {
 	}
 }
 
+/*
+
+	Route Blinding??
+
+	TODO(7/23/22): Test finding/building routes between arbitrary node pairs.
+	This will be needed to build routes from introduction node to self (recipient).
+
+
+*/
 // TestBuildRoute tests whether correct routes are built.
 func TestBuildRoute(t *testing.T) {
 	// Setup a three node network.
@@ -3050,7 +3059,8 @@ func TestBuildRoute(t *testing.T) {
 
 	// Create hop list from the route node pubkeys.
 	hops := []route.Vertex{
-		ctx.aliases["b"], ctx.aliases["c"],
+		ctx.aliases["a"], ctx.aliases["b"], ctx.aliases["c"],
+		// ctx.aliases["b"], ctx.aliases["c"],
 	}
 	amt := lnwire.NewMSatFromSatoshis(100)
 
@@ -3090,7 +3100,7 @@ func TestBuildRoute(t *testing.T) {
 	// Test a route that contains incompatible channel htlc constraints.
 	// There is no amount that can pass through both channel 5 and 4.
 	hops = []route.Vertex{
-		ctx.aliases["e"], ctx.aliases["c"],
+		ctx.aliases["a"], ctx.aliases["e"], ctx.aliases["c"],
 	}
 	_, err = ctx.router.BuildRoute(
 		nil, hops, nil, 40, nil,
@@ -3100,12 +3110,33 @@ func TestBuildRoute(t *testing.T) {
 		t.Fatalf("expected incompatible policies error, but got %v",
 			err)
 	}
-	if errNoChannel.position != 0 {
-		t.Fatalf("unexpected no channel error position")
+
+	// NOTE: Is this useful? What does it mean?
+	// It means that
+	// ErrNoChannel is returned when a route cannot be built because there are no
+	// channels that satisfy all requirements.
+	if errNoChannel.position != 1 {
+		t.Fatalf("unexpected no channel error position. wanted: %d, got: %d", 1, errNoChannel.position)
 	}
 	if errNoChannel.fromNode != ctx.aliases["a"] {
 		t.Fatalf("unexpected no channel error node")
 	}
+
+	// Try building a route which does not include the channel
+	// graph source node as the route source.
+	hops = []route.Vertex{
+		ctx.aliases["b"], ctx.aliases["c"],
+	}
+	amt = lnwire.NewMSatFromSatoshis(100)
+
+	// Build the route for the given amount.
+	rt, err = ctx.router.BuildRoute(
+		&amt, hops, nil, 40, &payAddr,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkHops(rt, []uint64{7}, payAddr)
 }
 
 // edgeCreationModifier is an enum-like type used to modify steps that are
@@ -4052,6 +4083,11 @@ func TestSendMPPaymentFailedWithShardsInFlight(t *testing.T) {
 	session.AssertExpectations(t)
 	missionControl.AssertExpectations(t)
 }
+
+// TestSendPaymentToBlindedRoute verifies that
+// NOTE: Where is the proper place to test route blinding?
+// Would this be better off as an itest?
+func TestSendPaymentBlindedRoute(t *testing.T) {}
 
 // TestBlockDifferenceFix tests if when the router is behind on blocks, the
 // router catches up to the best block head.

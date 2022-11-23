@@ -450,6 +450,11 @@ func WriteElements(buf *bytes.Buffer, elements ...interface{}) error {
 
 // ReadElement is a one-stop utility function to deserialize any datastructure
 // encoded using the serialization format of lnwire.
+//
+// NOTE: This function accepts a pointer to some Go type.
+// The function then reads from a byte stream (io.Reader)
+// according to the type of the pointer (ex: *uint8)
+// for a variety of common types we need to read.
 func ReadElement(r io.Reader, element interface{}) error {
 	var err error
 	switch e := element.(type) {
@@ -874,6 +879,9 @@ func ReadElement(r io.Reader, element interface{}) error {
 // ReadElements deserializes a variable number of elements into the passed
 // io.Reader, with each element being deserialized according to the ReadElement
 // function.
+//
+// NOTE: This function accepts a list of pointers and populates their values
+// by calling a set of predefined decoding/deserialization functions.
 func ReadElements(r io.Reader, elements ...interface{}) error {
 	for _, element := range elements {
 		err := ReadElement(r, element)

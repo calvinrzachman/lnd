@@ -191,6 +191,9 @@ func TestDecodeEncode(t *testing.T) {
 			valid:          false,
 		},
 		{
+			// simple invoice with blinded route
+		},
+		{
 			// no payment hash set
 			encodedInvoice: "lnbc20m1pvjluezhp58yjmdan79s6qqdhdzgynm4zwqd5d7xmw5fk98klysy043l2ahrqsjv38luh6p6s2xrv3mzvlmzaya43376h0twal5ax0k6p47498hp3hnaymzhsn424rxqjs0q7apn26yrhaxltq3vzwpqj9nc2r3kzwccsplnq470",
 			valid:          false,
@@ -780,6 +783,20 @@ func TestNewInvoice(t *testing.T) {
 		encodedInvoice string
 		valid          bool
 	}{
+		{
+			// Simple invoice with blinded route
+			newInvoice: func() (*Invoice, error) {
+				return NewInvoice(
+					&chaincfg.MainNetParams,
+					testPaymentHash,
+					time.Unix(1496314658, 0),
+					Description(testCupOfCoffee),
+					BlindedRoute([]*btcec.PublicKey{}, &btcec.PublicKey{}, [][]byte{}),
+				)
+			},
+			valid:          true,
+			encodedInvoice: "lnbc1blindedroute",
+		},
 		{
 			// Both Description and DescriptionHash set.
 			newInvoice: func() (*Invoice, error) {

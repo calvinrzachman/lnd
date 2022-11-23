@@ -953,6 +953,7 @@ func (p *Brontide) addLink(chanPoint *wire.OutPoint,
 	}
 
 	linkCfg := htlcswitch.ChannelLinkConfig{
+		Switch:                 p.cfg.Switch.(*htlcswitch.Switch),
 		Peer:                   p,
 		DecodeHopIterators:     p.cfg.Sphinx.DecodeHopIterators,
 		ExtractErrorEncrypter:  p.cfg.Sphinx.ExtractErrorEncrypter,

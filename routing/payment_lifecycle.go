@@ -250,6 +250,7 @@ lifecycle:
 		}
 
 		// Create a new payment attempt from the given payment session.
+		// Route Blinding??
 		rt, err := p.paySession.RequestRoute(
 			currentState.remainingAmt, currentState.remainingFees,
 			uint32(currentState.numShardsInFlight),
@@ -663,7 +664,7 @@ func (p *shardHandler) createNewPaymentAttempt(rt *route.Route, lastShard bool) 
 	*channeldb.HTLCAttemptInfo, error) {
 
 	// Generate a new key to be used for this attempt.
-	sessionKey, err := generateNewSessionKey()
+	sessionKey, err := GenerateNewSessionKey()
 	if err != nil {
 		return lnwire.ShortChannelID{}, nil, nil, err
 	}

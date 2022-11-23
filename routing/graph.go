@@ -25,8 +25,10 @@ type routingGraph interface {
 // CachedGraph is a routingGraph implementation that retrieves from the
 // database.
 type CachedGraph struct {
-	graph  *channeldb.ChannelGraph
-	tx     kvdb.RTx
+	graph *channeldb.ChannelGraph
+	tx    kvdb.RTx
+	// QUESTION(7/23/22): Does this source need to be updateable?
+	// What bearing does the source have?
 	source route.Vertex
 }
 

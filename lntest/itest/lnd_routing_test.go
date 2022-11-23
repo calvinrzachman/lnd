@@ -428,6 +428,11 @@ func testSingleHopSendToRouteCase(net *lntest.NetworkHarness, t *harnessTest,
 	closeChannelAndAssert(t, net, carol, chanPointCarol, false)
 }
 
+// // Route Blinding
+// func testMultiHopSendToBlindedRoute(net *lntest.NetworkHarness, t *testing.T) {
+
+// }
+
 // testMultiHopSendToRoute tests that payments are properly processed
 // through a provided route. We'll create the following network topology:
 //
@@ -741,6 +746,8 @@ func testSendToRouteErrorPropagation(net *lntest.NetworkHarness, t *harnessTest)
 	closeChannelAndAssert(t, net, carol, chanPointCarol, false)
 }
 
+// NOTE: Route Blinding - this "network harness" looks useful
+// for setting up a custom network during an integration test.
 // testPrivateChannels tests that a private channel can be used for
 // routing by the two endpoints of the channel, but is not known by
 // the rest of the nodes in the graph.

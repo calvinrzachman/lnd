@@ -393,6 +393,14 @@ func (s *Server) SendToRouteV2(ctx context.Context,
 		return nil, fmt.Errorf("unable to send, no routes provided")
 	}
 
+	// NOTE: Here we convert from the lnrpc.Route to an internal route.Route.
+	// We may want to diagnose each location where UnmarshallRoute is called
+	// in order to understand all of the ways we are expected to be able to handle
+	// routes.
+	//
+	// QUESTION: Can we proceed from here with either a normal or blinded route?
+	// That might be kind of nice if we can implement route blinding without
+	// needing to touch this code.
 	route, err := s.cfg.RouterBackend.UnmarshallRoute(req.Route)
 	if err != nil {
 		return nil, err

@@ -197,7 +197,7 @@ func (s *Stream) decode(r io.Reader, parsedTypes TypeMap, p2p bool) (TypeMap,
 
 		// Assert that this type is greater than any previously read.
 		// If we've already overflowed and we parsed another type, the
-		// stream is not canonical. This check prevents us from accepts
+		// stream is not canonical. This check prevents us from accepting
 		// encodings that have duplicate records or from accepting an
 		// unsorted series.
 		if overflow || typ < min {

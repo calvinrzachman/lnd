@@ -79,6 +79,16 @@ var defaultSetDesc = setDesc{
 		SetInit:    {}, // I
 		SetNodeAnn: {}, // N
 	},
+	// NOTE(8/28/22): We may not get to include this in the
+	// default list of supported features. Instead it may need to
+	// be added later if specified in lnd.conf.
+	lnwire.RouteBlindingOptional: {
+		SetInit:    {}, // I
+		SetNodeAnn: {}, // N
+		SetInvoice: {}, // 9
+		// Does route blinding work with AMP?
+		SetInvoiceAmp: {}, // 9A
+	},
 	lnwire.ShutdownAnySegwitOptional: {
 		SetInit:    {}, // I
 		SetNodeAnn: {}, // N

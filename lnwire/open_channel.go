@@ -293,6 +293,9 @@ func (o *OpenChannel) Decode(r io.Reader, pver uint32) error {
 		chanType    ChannelType
 		leaseExpiry LeaseExpiry
 	)
+
+	// This function must be where some of the magic happens.
+	// It takes pointers to Go objects/types and populates their values!
 	typeMap, err := tlvRecords.ExtractRecords(
 		&o.UpfrontShutdownScript, &chanType, &leaseExpiry,
 	)

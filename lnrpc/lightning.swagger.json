@@ -1406,6 +1406,8 @@
                 "ANCHORS_OPT",
                 "ANCHORS_ZERO_FEE_HTLC_REQ",
                 "ANCHORS_ZERO_FEE_HTLC_OPT",
+                "ROUTE_BLINDING_REQ",
+                "ROUTE_BLINDING_OPT",
                 "AMP_REQ",
                 "AMP_OPT"
               ]
@@ -1419,6 +1421,53 @@
             "required": false,
             "type": "number",
             "format": "double"
+          },
+          {
+            "name": "hop_features",
+            "description": "HopFeatures is a feature vector describing the features\neach hop is required to support. An example use is every hop\nin a blinded route must support route blinding feature.",
+            "in": "query",
+            "required": false,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "DATALOSS_PROTECT_REQ",
+                "DATALOSS_PROTECT_OPT",
+                "INITIAL_ROUING_SYNC",
+                "UPFRONT_SHUTDOWN_SCRIPT_REQ",
+                "UPFRONT_SHUTDOWN_SCRIPT_OPT",
+                "GOSSIP_QUERIES_REQ",
+                "GOSSIP_QUERIES_OPT",
+                "TLV_ONION_REQ",
+                "TLV_ONION_OPT",
+                "EXT_GOSSIP_QUERIES_REQ",
+                "EXT_GOSSIP_QUERIES_OPT",
+                "STATIC_REMOTE_KEY_REQ",
+                "STATIC_REMOTE_KEY_OPT",
+                "PAYMENT_ADDR_REQ",
+                "PAYMENT_ADDR_OPT",
+                "MPP_REQ",
+                "MPP_OPT",
+                "WUMBO_CHANNELS_REQ",
+                "WUMBO_CHANNELS_OPT",
+                "ANCHORS_REQ",
+                "ANCHORS_OPT",
+                "ANCHORS_ZERO_FEE_HTLC_REQ",
+                "ANCHORS_ZERO_FEE_HTLC_OPT",
+                "ROUTE_BLINDING_REQ",
+                "ROUTE_BLINDING_OPT",
+                "AMP_REQ",
+                "AMP_OPT"
+              ]
+            },
+            "collectionFormat": "multi"
+          },
+          {
+            "name": "route_blinding",
+            "description": "Indicate that the route we are searching for is to be a blinded route\nand, as such, that each hop must support route blinding.\nLikely table this approach in favor of the more general method of\nrequiring arbitrary feature support for intermediate hops outlined above.",
+            "in": "query",
+            "required": false,
+            "type": "boolean"
           }
         ],
         "tags": [
@@ -1551,6 +1600,17 @@
                   "type": "number",
                   "format": "double",
                   "description": "The time preference for this payment. Set to -1 to optimize for fees\nonly, to 1 to optimize for reliability only or a value inbetween for a mix."
+                },
+                "hop_features": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/lnrpcFeatureBit"
+                  },
+                  "description": "HopFeatures is a feature vector describing the features\neach hop is required to support. An example use is every hop\nin a blinded route must support route blinding feature."
+                },
+                "route_blinding": {
+                  "type": "boolean",
+                  "description": "Indicate that the route we are searching for is to be a blinded route\nand, as such, that each hop must support route blinding.\nLikely table this approach in favor of the more general method of\nrequiring arbitrary feature support for intermediate hops outlined above."
                 }
               }
             }
@@ -2746,6 +2806,7 @@
         "EXPIRY_TOO_FAR",
         "MPP_TIMEOUT",
         "INVALID_ONION_PAYLOAD",
+        "INVALID_ONION_BLINDING",
         "INTERNAL_FAILURE",
         "UNKNOWN_FAILURE",
         "UNREADABLE_FAILURE"
@@ -4335,6 +4396,8 @@
         "ANCHORS_OPT",
         "ANCHORS_ZERO_FEE_HTLC_REQ",
         "ANCHORS_ZERO_FEE_HTLC_OPT",
+        "ROUTE_BLINDING_REQ",
+        "ROUTE_BLINDING_OPT",
         "AMP_REQ",
         "AMP_OPT"
       ],
@@ -4854,6 +4917,10 @@
           "type": "string",
           "format": "byte",
           "description": "The payment metadata to send along with the payment to the payee."
+        },
+        "route_blinding_record": {
+          "$ref": "#/definitions/lnrpcRouteBlindingRecord",
+          "description": "An optional TLV record that signals the use of the route blinding protocol.\nIf present, ...\n\nWe could either:\n- Put both fields in a single route blinding \"box\" (message/struct)\n- Individually include both route blinding fields"
         }
       }
     },
@@ -6375,7 +6442,7 @@
           "items": {
             "$ref": "#/definitions/lnrpcHop"
           },
-          "description": "Contains details concerning the specific forwarding details at each hop."
+          "description": "Contains details concerning the specific forwarding details at each hop.\nNOTE: The source node of a route is NOT included in the list of hops.\nUsually the source node for a route is assumed to be ourselves."
         },
         "total_fees_msat": {
           "type": "string",
@@ -6386,9 +6453,25 @@
           "type": "string",
           "format": "int64",
           "description": "The total amount in millisatoshis."
+        },
+        "source_pub_key": {
+          "type": "string",
+          "description": "The source node for the route. If empty, self is assumed."
         }
       },
       "description": "A path through the channel graph which runs over one or more channels in\nsuccession. This struct carries all the information required to craft the\nSphinx onion packet, and send the payment along the first hop in the path. A\nroute is only selected as valid if all the channels have sufficient capacity to\ncarry the initial payment amount after fees are accounted for."
+    },
+    "lnrpcRouteBlindingRecord": {
+      "type": "object",
+      "properties": {
+        "blinding_point": {
+          "type": "string"
+        },
+        "encrypted_payload": {
+          "type": "string",
+          "format": "byte"
+        }
+      }
     },
     "lnrpcRouteHint": {
       "type": "object",
@@ -6645,7 +6728,8 @@
           "format": "byte",
           "description": "The payment address of the generated invoice."
         }
-      }
+      },
+      "title": "TODO: Update this for route blinding?"
     },
     "lnrpcSendResponse": {
       "type": "object",

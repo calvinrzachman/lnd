@@ -219,6 +219,9 @@ func (i *interpretedResult) processPaymentOutcomeFinal(
 		// destination correctly. Continue the payment process.
 		i.successPairRange(route, 0, n-1)
 
+	// TODO(8/14/22): Figure out what "result interpretation" is all about.
+	// case *lnwire.InvalidOnionBlinding:
+
 	default:
 		// All other errors are considered terminal if coming from the
 		// final hop. They indicate that something is wrong at the

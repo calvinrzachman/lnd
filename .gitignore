@@ -39,6 +39,11 @@ lntest/itest/lnd-itest
 lntest/itest/btcd-itest
 lntest/itest/.logs-*
 
+docker-entrypoint-float.sh
+lnd-20210714-01/
+lnd-v0.13.0-beta/
+lndinit-debug
+
 cmd/cmd
 *.key
 *.hex

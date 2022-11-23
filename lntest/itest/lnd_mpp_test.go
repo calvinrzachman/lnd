@@ -383,3 +383,34 @@ func (c *mppTestContext) buildRoute(ctxb context.Context, amt btcutil.Amount,
 
 	return routeResp.Route, nil
 }
+
+func (c *mppTestContext) buildRouteWithBlindedOffset(ctxb context.Context,
+	amt btcutil.Amount, blindedTimelock int32,
+	sender *lntest.HarnessNode, hops []*lntest.HarnessNode) (*lnrpc.Route,
+	error) {
+
+	rpcHops := make([][]byte, 0, len(hops))
+	for _, hop := range hops {
+		k := hop.PubKeyStr
+		pubkey, err := route.NewVertexFromStr(k)
+		if err != nil {
+			return nil, fmt.Errorf("error parsing %v: %v",
+				k, err)
+		}
+		rpcHops = append(rpcHops, pubkey[:])
+	}
+
+	req := &routerrpc.BuildRouteRequest{
+		AmtMsat:        int64(amt * 1000),
+		FinalCltvDelta: chainreg.DefaultBitcoinTimeLockDelta + blindedTimelock,
+		HopPubkeys:     rpcHops,
+	}
+
+	ctxt, _ := context.WithTimeout(ctxb, defaultTimeout)
+	routeResp, err := sender.RouterClient.BuildRoute(ctxt, req)
+	if err != nil {
+		return nil, err
+	}
+
+	return routeResp.Route, nil
+}

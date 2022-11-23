@@ -255,6 +255,18 @@ func (r *RouterBackend) QueryRoutes(ctx context.Context,
 		return nil, err
 	}
 
+	// Some use cases (eg: route blinding) require that all
+	// nodes in the route signal support for a feature so
+	// we'll parse intermediate hop feature bits as well.
+	hopFeatures, err := UnmarshalFeatures(in.HopFeatures)
+	if err != nil {
+		return nil, err
+	}
+
+	if hopFeatures != nil {
+		fmt.Printf("[Router Backend - QueryRoutes()]: required hop features: %+v\n", hopFeatures.Features())
+	}
+
 	restrictions := &routing.RestrictParams{
 		FeeLimit: feeLimit,
 		ProbabilitySource: func(fromNode, toNode route.Vertex,
@@ -283,6 +295,9 @@ func (r *RouterBackend) QueryRoutes(ctx context.Context,
 		DestCustomRecords: record.CustomSet(in.DestCustomRecords),
 		CltvLimit:         cltvLimit,
 		DestFeatures:      features,
+		HopFeatures:       hopFeatures,
+		// HopFeatures:       lnwire.NewFeatureVector(lnwire.NewRawFeatureVector(lnwire.RouteBlindingOptional), nil),
+		// RouteBlinding: true,
 	}
 
 	// Pass along an outgoing channel restriction if specified.
@@ -395,8 +410,12 @@ func (r *RouterBackend) rpcEdgeToPair(e *lnrpc.EdgeLocator) (
 }
 
 // MarshallRoute marshalls an internal route to an rpc route struct.
+//
+// NOTE: Either this will need updating or we will need a separate
+// set of methods for handling blinded routes.
 func (r *RouterBackend) MarshallRoute(route *route.Route) (*lnrpc.Route, error) {
 	resp := &lnrpc.Route{
+		SourcePubKey:  r.SelfNode.String(),
 		TotalTimeLock: route.TotalTimeLock,
 		TotalFees:     int64(route.TotalFees().ToSatoshis()),
 		TotalFeesMsat: int64(route.TotalFees()),
@@ -404,6 +423,13 @@ func (r *RouterBackend) MarshallRoute(route *route.Route) (*lnrpc.Route, error) 
 		TotalAmtMsat:  int64(route.TotalAmount),
 		Hops:          make([]*lnrpc.Hop, len(route.Hops)),
 	}
+
+	// Support routes from arbitrary source nodes.
+	// if !bytes.Equal(route.SourcePubKey[:], bytes.Repeat([]byte{0}, 33)) {
+	if route.SourcePubKey.String() != "" {
+		resp.SourcePubKey = route.SourcePubKey.String()
+	}
+
 	incomingAmt := route.TotalAmount
 	for i, hop := range route.Hops {
 		fee := route.HopFee(i)
@@ -411,6 +437,9 @@ func (r *RouterBackend) MarshallRoute(route *route.Route) (*lnrpc.Route, error) 
 		// Channel capacity is not a defining property of a route. For
 		// backwards RPC compatibility, we retrieve it here from the
 		// graph.
+		//
+		// NOTE: This assumes each hop has this field set. Will this
+		// be true for hops in a blinded route?
 		chanCapacity, err := r.FetchChannelCapacity(hop.ChannelID)
 		if err != nil {
 			// If capacity cannot be retrieved, this may be a
@@ -430,6 +459,21 @@ func (r *RouterBackend) MarshallRoute(route *route.Route) (*lnrpc.Route, error) 
 			}
 		}
 
+		var routeBlinding *lnrpc.RouteBlindingRecord = &lnrpc.RouteBlindingRecord{
+			EncryptedPayload: hop.RouteBlindingEncryptedData,
+		}
+		// var routeBlinding *lnrpc.RouteBlindingRecord
+		// routeBlinding.EncryptedPayload = hop.RouteBlindingEncryptedData
+
+		// NOTE: This will only be set for the first node in a blinded route.
+		// Subsequent routing nodes will receive a per hop blinding point
+		// in a TLV extension to the UpdateAddHTLC message.
+		if hop.BlindingPoint != nil {
+			routeBlinding.BlindingPoint = hex.EncodeToString(
+				hop.BlindingPoint.SerializeCompressed(),
+			)
+		}
+
 		resp.Hops[i] = &lnrpc.Hop{
 			ChanId:           hop.ChannelID,
 			ChanCapacity:     int64(chanCapacity),
@@ -441,6 +485,10 @@ func (r *RouterBackend) MarshallRoute(route *route.Route) (*lnrpc.Route, error) 
 			PubKey: hex.EncodeToString(
 				hop.PubKeyBytes[:],
 			),
+			// Wrap both parameters into a single field or keep separate?
+			RouteBlindingRecord: routeBlinding,
+			// BlindingPoint:        hop.BlindingPoint,
+			// RouteBlindingPayload: hop.RecipientEncryptedData,
 			CustomRecords: hop.CustomRecords,
 			TlvPayload:    !hop.LegacyPayload,
 			MppRecord:     mpp,
@@ -472,6 +520,29 @@ func UnmarshallHopWithPubkey(rpcHop *lnrpc.Hop, pubkey route.Vertex) (*route.Hop
 		return nil, err
 	}
 
+	// NOTE: Use this if we decide to keep the route blinding information
+	// combined into one parameter in lnrpc.Route{}
+	// routeblinding, err := UnmarshalRouteBlinding(rpcHop.RouteBlindingRecord)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	var bp *btcec.PublicKey
+	var routeBlindingPayload []byte
+	if rpcHop.RouteBlindingRecord != nil {
+		if rpcHop.RouteBlindingRecord.BlindingPoint != "" {
+			bpBytes, err := hex.DecodeString(rpcHop.RouteBlindingRecord.BlindingPoint)
+			if err != nil {
+				return nil, fmt.Errorf("unable to translate hex string to bytes: %v", err)
+			}
+			bp, err = btcec.ParsePubKey(bpBytes)
+			if err != nil {
+				return nil, fmt.Errorf("unable to translate hex string to bytes: %v", err)
+			}
+		}
+
+		routeBlindingPayload = rpcHop.RouteBlindingRecord.EncryptedPayload
+	}
+
 	return &route.Hop{
 		OutgoingTimeLock: rpcHop.Expiry,
 		AmtToForward:     lnwire.MilliSatoshi(rpcHop.AmtToForwardMsat),
@@ -481,6 +552,12 @@ func UnmarshallHopWithPubkey(rpcHop *lnrpc.Hop, pubkey route.Vertex) (*route.Hop
 		LegacyPayload:    false,
 		MPP:              mpp,
 		AMP:              amp,
+		// Take care not to lose route blinding information
+		// when converting from lnrpc.Route{} to route.Route{}.
+		// RecipientEncryptedData: nil,
+		// BlindingPoint:          nil,
+		RouteBlindingEncryptedData: routeBlindingPayload,
+		BlindingPoint:              bp,
 	}, nil
 }
 
@@ -526,7 +603,18 @@ func (r *RouterBackend) UnmarshallHop(rpcHop *lnrpc.Hop,
 func (r *RouterBackend) UnmarshallRoute(rpcroute *lnrpc.Route) (
 	*route.Route, error) {
 
-	prevNodePubKey := r.SelfNode
+	// Support routes from arbitrary source nodes.
+	var err error
+	sourceNode := r.SelfNode
+	if rpcroute.SourcePubKey != "" {
+		sourceNode, err = route.NewVertexFromStr(rpcroute.SourcePubKey)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// prevNodePubKey := r.SelfNode
+	prevNodePubKey := sourceNode
 
 	hops := make([]*route.Hop, len(rpcroute.Hops))
 	for i, hop := range rpcroute.Hops {
@@ -543,7 +631,8 @@ func (r *RouterBackend) UnmarshallRoute(rpcroute *lnrpc.Route) (
 	route, err := route.NewRouteFromHops(
 		lnwire.MilliSatoshi(rpcroute.TotalAmtMsat),
 		rpcroute.TotalTimeLock,
-		r.SelfNode,
+		// r.SelfNode,
+		sourceNode,
 		hops,
 	)
 	if err != nil {
@@ -661,6 +750,10 @@ func (r *RouterBackend) extractIntentFromSendRequest(
 	// If the payment request field isn't blank, then the details of the
 	// invoice are encoded entirely within the encoded payReq.  So we'll
 	// attempt to decode it, populating the payment accordingly.
+	//
+	// TODO(4/29/22): Figure out how to pull the blinded route details from
+	// a BOLT-11 invoice. What needs to be done so that this method can support
+	// paying to blinded routes?
 	if rpcPayReq.PaymentRequest != "" {
 		switch {
 
@@ -755,6 +848,17 @@ func (r *RouterBackend) extractIntentFromSendRequest(
 			if err != nil {
 				return nil, err
 			}
+		}
+
+		// Route Blinding?
+		if payReq.Features.HasFeature(lnwire.RouteBlindingOptional) {
+			log.Info("attempting to pay to a blinded route!")
+			// payIntent.Target = payReq.Destination
+			// payIntent.Target = payReq.IntroductionNode
+			// payIntent.RouteHints = payIntent.RouteHints
+			payIntent.IntroductionNode = &btcec.PublicKey{}
+			payIntent.EphemeralBlindingPoint = &btcec.PublicKey{}
+			payIntent.EncryptedRouteBlindingPayloads = [][]byte{}
 		}
 
 		destKey := payReq.Destination.SerializeCompressed()
@@ -1285,6 +1389,9 @@ func marshallWireError(msg lnwire.FailureMessage,
 
 	case *lnwire.InvalidOnionPayload:
 		response.Code = lnrpc.Failure_INVALID_ONION_PAYLOAD
+
+	case *lnwire.InvalidOnionBlinding:
+	// 	response.Code = lnrpc.Failure_INVALID_ONION_BLINDING
 
 	case nil:
 		response.Code = lnrpc.Failure_UNKNOWN_FAILURE

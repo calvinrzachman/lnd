@@ -88,4 +88,19 @@ func TestUnifiedPolicies(t *testing.T) {
 		policy, p2.FeeBaseMSat, p2.FeeProportionalMillionths,
 		p1.TimeLockDelta,
 	)
+
+	// NOTE: The comments above seem to take the perspective that
+	// WE are the forwarding node and are selecting the most profitable
+	// channel during non-strict forwarding.
+	// What if we have nothing to do with the forwarding node?
+	// This is the only perspective we need to consider.
+	// When the onion arrives at a processing node, that node can decide
+	// to forward it over whatever channel it can? I don't think it can pick
+	// a more expensive channel as wouldn't that mess up the forwarded
+	// amounts on the route? This is the same as saying the forwarding
+	// node can not claim arbitrarily high fees for itself, rather it must
+	// forward exactly what the onion tells it to. It can only refuse to
+	// forward anything with a fee it deems to low. If this refusal rate is
+	// not inline with the publicly advertised rates then the routing node
+	// will not be succesfull forwarding payments.
 }

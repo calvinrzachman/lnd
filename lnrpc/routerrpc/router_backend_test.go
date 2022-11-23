@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/lightningnetwork/lnd/channeldb"
@@ -34,6 +36,10 @@ var (
 
 // TestQueryRoutes asserts that query routes rpc parameters are properly parsed
 // and passed onto path finding.
+//
+// TODO(7/24/22): Add tests for querying routes with non-self source node.
+// Also this tests makes minimal checks to ensure correctness of QueryRoutes.
+// We lose the information on who is source in Marshal/Unmarshal, lnrpc.Route{} does not contain that information.
 func TestQueryRoutes(t *testing.T) {
 	t.Run("no mission control", func(t *testing.T) {
 		testQueryRoutes(t, false, false, true)
@@ -47,6 +53,276 @@ func TestQueryRoutes(t *testing.T) {
 	t.Run("no mission control bad cltv limit", func(t *testing.T) {
 		testQueryRoutes(t, false, false, false)
 	})
+}
+
+func TestUnmarshalRoute(t *testing.T) {
+	/*
+		Setup a simple test network for querying arbitrary routes
+		NOTE: The heavy lifting here might be done by findRoute()
+
+				scid: 0					  scid: 1
+		self <-----------> destination <-----------> arbitrarySource
+
+	*/
+
+	// NOTE: We should not be assuming that the router's
+	// "self node" is the source of all routes we create.
+	// While this generally will be true (is a sane default),
+	// it will not hold when using blinded routes, where we may
+	// be building/handling a route from an arbitrary source node
+	// (introduction node) to ourselves.
+	self := route.Vertex{1, 2, 3}
+	destination := route.Vertex{4, 5, 6}
+	arbitrarySource := route.Vertex{7, 8, 9}
+
+	backend := &RouterBackend{
+		SelfNode: self,
+		// We consult the channel graph if the hop structs we
+		// are (un)marshalling do not contain a public key.
+		FetchChannelEndpoints: func(chanID uint64) (route.Vertex,
+			route.Vertex, error) {
+
+			switch chanID {
+			case 0:
+				// Channel between self <--> destination
+				return self, destination, nil
+			case 1:
+				// Channel between arbitrarySource <--> destination
+				return arbitrarySource, destination, nil
+			default:
+				return route.Vertex{}, route.Vertex{}, fmt.Errorf("channel with ID %d does not exist", chanID)
+			}
+
+		},
+	}
+
+	testCases := []struct {
+		name        string
+		source      string
+		hops        []*lnrpc.Hop
+		expectedErr bool
+	}{
+		{
+			name:   "1",
+			source: self.String(),
+			hops: []*lnrpc.Hop{
+				{
+					ChanId: 0, // Channel between self <--> destination
+				},
+			},
+			expectedErr: false,
+		},
+		{
+			name:   "2",
+			source: arbitrarySource.String(),
+			hops: []*lnrpc.Hop{
+				{
+					ChanId: 1, // Channel between arbitrarySource <--> destination
+				},
+			},
+			expectedErr: false,
+		},
+		{
+			name:   "3",
+			source: self.String(),
+			hops: []*lnrpc.Hop{
+				{
+					ChanId: 1, // Channel between arbitrarySource <--> destination
+				},
+			},
+			expectedErr: true,
+		},
+		{
+			name:   "4",
+			source: arbitrarySource.String(),
+			hops: []*lnrpc.Hop{
+				{
+					ChanId: 0, // Channel between self <--> destination
+				},
+			},
+			expectedErr: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		route, err := backend.UnmarshallRoute(&lnrpc.Route{
+			SourcePubKey: tc.source,
+			Hops:         tc.hops,
+		})
+
+		if tc.expectedErr && err == nil {
+			t.Fatalf("unexpected success when unmarshalling route")
+		}
+
+		if !tc.expectedErr && err != nil {
+			t.Fatalf("unable to unmarshal route: %v", err)
+		}
+
+		if err == nil && !tc.expectedErr {
+			// The route.Route{} will only be successfully unmarshalled
+			// if we encounter no error.
+			if route.SourcePubKey.String() != tc.source {
+				t.Fatalf("unexected route source. want: %s, got: %s", tc.source, route.SourcePubKey)
+			}
+		}
+
+	}
+
+	// Should default to setting the source node to ourselves.
+	route, err := backend.UnmarshallRoute(&lnrpc.Route{
+		Hops: []*lnrpc.Hop{
+			{
+				ChanId: 0, // Channel between self <--> destination
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unable to unmarshal route: %v", err)
+	}
+	if route.SourcePubKey != self {
+		t.Fatalf("unexected route source. want: %s, got: %s", self, route.SourcePubKey)
+	}
+
+	// Now verify that we can unmarshall a route using any
+	// arbitrary node as the route's source.
+	route, err = backend.UnmarshallRoute(&lnrpc.Route{
+		SourcePubKey: arbitrarySource.String(),
+		Hops: []*lnrpc.Hop{
+			{
+				ChanId: 1, // Channel between arbitrarySource <--> destination
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unable to unmarshal route: %v", err)
+	}
+	if route.SourcePubKey != arbitrarySource {
+		t.Fatalf("unexected route source. want: %s, got: %s", arbitrarySource.String(), route.SourcePubKey)
+	}
+
+	// Attempting to unmarshall a route for which we are the source,
+	// but whose first hop uses a channel which is not ours should fail.
+	route, err = backend.UnmarshallRoute(&lnrpc.Route{
+		// SourcePubKey: self // implicit
+		Hops: []*lnrpc.Hop{
+			{
+				ChanId: 1, // Channel between arbitrarySource <--> destination
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("should not be able to unmarshall route")
+	}
+
+	// Attempting to unmarshall a route with an arbitrary source,
+	// but using our channel as the first hop should fail.
+	route, err = backend.UnmarshallRoute(&lnrpc.Route{
+		SourcePubKey: arbitrarySource.String(),
+		Hops: []*lnrpc.Hop{
+			{
+				ChanId: 0, // Channel between self <--> destination
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("should not be able to unmarshall route")
+	}
+}
+func TestMarshalRoute(t *testing.T) {
+
+	// NOTE: We should not be assuming that the router's
+	// "self node" is the source of all routes we create.
+	// While this generally will be true (is a sane default),
+	// it will not hold when using blinded routes, where we may
+	// be building/handling a route from an arbitrary source node
+	// (introduction node) to ourselves.
+	self := route.Vertex{1, 2, 3}
+	backend := &RouterBackend{
+		SelfNode: self,
+	}
+
+	// Should default to setting the source node to ourselves.
+	rpcRoute, err := backend.MarshallRoute(&route.Route{
+		Hops: []*route.Hop{},
+	})
+	if err != nil {
+		t.Fatal("unable to marshal route")
+	}
+	if rpcRoute.SourcePubKey != self.String() {
+		t.Fatalf("unexected route source. want: %s, got: %s", self.String(), rpcRoute.SourcePubKey)
+	}
+
+	// Now verify that we can marshal a route using any
+	// arbitrary node as the route's source.
+	arbitrarySource := route.Vertex{4, 5, 6}
+	rpcRoute, err = backend.MarshallRoute(&route.Route{
+		SourcePubKey: arbitrarySource,
+		Hops:         []*route.Hop{},
+	})
+	if err != nil {
+		t.Fatal("unable to marshal route")
+	}
+	if rpcRoute.SourcePubKey != arbitrarySource.String() {
+		t.Fatalf("unexected route source. want: %s, got: %s", arbitrarySource.String(), rpcRoute.SourcePubKey)
+	}
+}
+
+// TestQueryRouteWithArbitrarySource asserts that we can query routes
+// beginning at an arbitrary source node rather than assuming that the
+// source of a route is always ourselves.
+func TestQueryRouteWithArbitrarySource(t *testing.T) {
+	/*
+		Setup a simple test network for querying arbitrary routes
+		NOTE: The heavy lifting here might be done by findRoute()
+
+				scid: 0					  scid: 1
+		self <-----------> destination <-----------> arbitrarySource
+
+	*/
+
+	expectedRouteSource := node1.String()
+	request := &lnrpc.QueryRoutesRequest{
+		PubKey:            destKey,
+		FinalCltvDelta:    100,
+		UseMissionControl: false,
+		// NOTE: The point of this test to verify that the requested
+		// route source is respected by the ChannelRouter.
+		SourcePubKey: expectedRouteSource,
+	}
+
+	findRoute := func(source, target route.Vertex,
+		amt lnwire.MilliSatoshi, timePref float64,
+		restrictions *routing.RestrictParams,
+		destCustomRecords record.CustomSet,
+		routeHints map[route.Vertex][]*channeldb.CachedEdgePolicy,
+		finalExpiry uint16) (*route.Route, error) {
+
+		hops := []*route.Hop{{}}
+		return route.NewRouteFromHops(amt, 144, source, hops)
+	}
+
+	backend := &RouterBackend{
+		FindRoute: findRoute,
+		SelfNode:  sourceKey,
+		FetchChannelCapacity: func(chanID uint64) (
+			btcutil.Amount, error) {
+
+			return 1, nil
+		},
+		MissionControl: &mockMissionControl{},
+	}
+
+	ctxt, _ := context.WithTimeout(context.Background(), 20*time.Second)
+	resp, err := backend.QueryRoutes(ctxt, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Check that the route has the proper source node.
+	r := resp.Routes[0]
+	if r.SourcePubKey != expectedRouteSource {
+		t.Fatalf("unexpected route source. want: %s , got: %s", expectedRouteSource, r.SourcePubKey)
+	}
 }
 
 func testQueryRoutes(t *testing.T, useMissionControl bool, useMsat bool,
@@ -192,7 +468,7 @@ func testQueryRoutes(t *testing.T, useMissionControl bool, useMsat bool,
 
 	backend := &RouterBackend{
 		FindRoute: findRoute,
-		SelfNode:  route.Vertex{1, 2, 3},
+		SelfNode:  sourceKey,
 		FetchChannelCapacity: func(chanID uint64) (
 			btcutil.Amount, error) {
 

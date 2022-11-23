@@ -49,6 +49,55 @@ func createTestRoute(amt lnwire.MilliSatoshi,
 	)
 }
 
+// createBlindedTestRoute builds a blinded route a->b->c->d->e-> paying the given amt to f.
+func createBlindedTestRoute(amt lnwire.MilliSatoshi,
+	aliasMap map[string]route.Vertex) (*route.Route, error) {
+
+	// createTestRoute(amt lnwire.MilliSatoshi, aliasMap map[string]route.Vertex)
+
+	hopFee := lnwire.NewMSatFromSatoshis(3)
+	blindedHop1 := aliasMap["e"]
+	blindedHop2 := aliasMap["f"]
+	hops := []*route.Hop{
+		{
+			ChannelID:     1,
+			PubKeyBytes:   blindedHop1,
+			LegacyPayload: false,
+			AmtToForward:  amt + hopFee,
+		},
+		{
+			ChannelID:     2,
+			PubKeyBytes:   blindedHop2,
+			LegacyPayload: false,
+			AmtToForward:  amt,
+		},
+	}
+
+	// We create a simple route that we will supply every time the router
+	// requests one.
+	return route.NewRouteFromHops(
+		amt+2*hopFee, 100, aliasMap["d"], hops,
+	)
+}
+
+func completeBlindedRoute(amt lnwire.MilliSatoshi,
+	aliasMap map[string]route.Vertex) (*route.Route, error) {
+
+	unblindedRoute, err := createTestRoute(2*amt, aliasMap)
+	if err != nil {
+		return nil, err
+	}
+
+	blindedRoute, err := createBlindedTestRoute(amt, aliasMap)
+	if err != nil {
+		return nil, err
+	}
+
+	completeRoute := route.CombineRoutes(unblindedRoute, blindedRoute)
+
+	return completeRoute, nil
+}
+
 // paymentLifecycleTestCase contains the steps that we expect for a payment
 // lifecycle test, and the routes that pathfinding should deliver.
 type paymentLifecycleTestCase struct {

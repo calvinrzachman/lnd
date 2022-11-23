@@ -745,6 +745,7 @@ message FeeLimit {
     }
 }
 
+// TODO: Update this for route blinding?
 message SendRequest {
     /*
     The identity pubkey of the payment recipient. When using REST, this field
@@ -2841,6 +2842,21 @@ message QueryRoutesRequest {
     only, to 1 to optimize for reliability only or a value inbetween for a mix.
     */
     double time_pref = 18;
+
+    /*
+    HopFeatures is a feature vector describing the features
+        each hop is required to support. An example use is every hop
+        in a blinded route must support route blinding feature.
+    */
+    repeated lnrpc.FeatureBit hop_features = 19;
+
+    /*
+    Indicate that the route we are searching for is to be a blinded route
+    and, as such, that each hop must support route blinding.
+    Likely table this approach in favor of the more general method of
+    requiring arbitrary feature support for intermediate hops outlined above.
+    */
+    bool route_blinding = 20;
 }
 
 message NodePair {
@@ -2938,6 +2954,24 @@ message Hop {
 
     // The payment metadata to send along with the payment to the payee.
     bytes metadata = 13;
+
+    /*
+    An optional TLV record that signals the use of the route blinding protocol.
+    If present, ...
+
+    We could either:
+    - Put both fields in a single route blinding "box" (message/struct)
+    - Individually include both route blinding fields
+
+    */
+    RouteBlindingRecord route_blinding_record = 14;
+    // string blinding_point = 14;
+    // bytes encrypted_payload = 15;
+}
+
+message RouteBlindingRecord {
+    string blinding_point = 1;
+    bytes encrypted_payload = 2;
 }
 
 message MPPRecord {
@@ -3000,6 +3034,8 @@ message Route {
 
     /*
     Contains details concerning the specific forwarding details at each hop.
+    NOTE: The source node of a route is NOT included in the list of hops.
+    Usually the source node for a route is assumed to be ourselves.
     */
     repeated Hop hops = 4;
 
@@ -3012,6 +3048,11 @@ message Route {
     The total amount in millisatoshis.
     */
     int64 total_amt_msat = 6;
+
+    /*
+    The source node for the route. If empty, self is assumed.
+    */
+    string source_pub_key = 7;
 }
 
 message NodeInfoRequest {
@@ -3926,6 +3967,8 @@ enum FeatureBit {
     ANCHORS_OPT = 21;
     ANCHORS_ZERO_FEE_HTLC_REQ = 22;
     ANCHORS_ZERO_FEE_HTLC_OPT = 23;
+    ROUTE_BLINDING_REQ = 24;
+    ROUTE_BLINDING_OPT = 25;
     AMP_REQ = 30;
     AMP_OPT = 31;
 }
@@ -4272,6 +4315,7 @@ message Failure {
         EXPIRY_TOO_FAR = 22;
         MPP_TIMEOUT = 23;
         INVALID_ONION_PAYLOAD = 24;
+        INVALID_ONION_BLINDING = 25;
 
         /*
         An internal error occurred.

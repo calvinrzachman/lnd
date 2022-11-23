@@ -158,6 +158,9 @@ func TestLightningNetworkDaemon(t *testing.T) {
 
 	// Now we can set up our test harness (LND instance), with the chain
 	// backend we just created.
+	//
+	// NOTE: It looks like itest actually starts a new process running lnd
+	// for each network node. Which binary does it use?
 	ht := newHarnessTest(t, nil)
 	binary := ht.getLndBinary()
 	lndHarness, err = lntest.NewNetworkHarness(

@@ -6,6 +6,19 @@ import (
 	"github.com/lightningnetwork/lnd/tlv"
 )
 
+/*
+	NOTE: Unlike AMP and MPP, here we have a single onion type/TLV value
+	So this is not the deciding factor on how we define our TLV record
+
+	However, like AMP and MPP we make a "dynamic record".
+	AMP & MPP are represented as Go structs (not basic TLV type).
+	ChannelType is represented as a RawFeatureVector (also not a basic TLV type).
+
+	A RawFeatureVector can apparently vary in size, which is why we
+	reach for tlv.MakeDynamicRecord() to define a dynamically sized record.
+
+*/
+
 const (
 	// ChannelTypeRecordType is the type of the experimental record used
 	// to denote which channel type is being negotiated.
@@ -24,6 +37,10 @@ func (c ChannelType) featureBitLen() uint64 {
 
 // Record returns a TLV record that can be used to encode/decode the channel
 // type from a given TLV stream.
+//
+// ***IMPORTANT NOTE: When we make the record we give it a POINTER to
+// a user defined Go type. It is this pointer which will point to a value
+// after deserialization. This completes the map from raw bytes —> Go type (Decode).
 func (c *ChannelType) Record() tlv.Record {
 	return tlv.MakeDynamicRecord(
 		ChannelTypeRecordType, c, c.featureBitLen, channelTypeEncoder,

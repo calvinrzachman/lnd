@@ -7,6 +7,11 @@ import (
 	"github.com/lightningnetwork/lnd/routing/route"
 )
 
+// NOTE(7/23/22): According to commit notes from Git Lens this
+// is a consolidation of all policies between source and target node
+// for nodes which have multiple channels. Each channel may have its own
+// policy, but this represents a unification of all of those.
+// To be used for non-strict forwarding?
 // unifiedPolicies holds all unified policies for connections towards a node.
 type unifiedPolicies struct {
 	// policies contains a unified policy for every from node.
@@ -42,6 +47,7 @@ func newUnifiedPolicies(sourceNode, toNode route.Vertex,
 func (u *unifiedPolicies) addPolicy(fromNode route.Vertex,
 	edge *channeldb.CachedEdgePolicy, capacity btcutil.Amount) {
 
+	// NOTE: This assumes...
 	localChan := fromNode == u.sourceNode
 
 	// Skip channels if there is an outgoing channel restriction.
@@ -135,6 +141,7 @@ type unifiedPolicy struct {
 func (u *unifiedPolicy) getPolicy(amt lnwire.MilliSatoshi,
 	bandwidthHints bandwidthHints) *channeldb.CachedEdgePolicy {
 
+	// fmt.Printf("[inside getPolicy()]: unified policy %+v\n", u)
 	if u.localChan {
 		return u.getPolicyLocal(amt, bandwidthHints)
 	}

@@ -153,6 +153,10 @@ type ChannelGraphSource interface {
 	// public key. channeldb.ErrGraphNodeNotFound is returned if the node
 	// doesn't exist within the graph.
 	FetchLightningNode(route.Vertex) (*channeldb.LightningNode, error)
+	// TODO(8/28/22): Future unit test which verifies that blind hops
+	// are not in the channel graph.
+	// _, err := FetchLightningNode(blindHopPubKey)
+	// require.Error(err)
 
 	// ForEachNode is used to iterate over every node in the known graph.
 	ForEachNode(func(node *channeldb.LightningNode) error) error
@@ -1738,9 +1742,382 @@ type routingMsg struct {
 	err chan error
 }
 
+// Given a candidate blinded route, computes the cumulative fee and timelock
+// necessary to maximally preserve privacy.
+//
+// NOTE(8/28/22): This approach opts for the privacy end of the trade-off
+// spectrum, selecting the cumulative fee and timelock for the blinded route
+// such that no information is leaked beyond that already given/implied by the length
+// of the blinded path.
+var noLeakHopPadding = func(rt *route.Route, g routingGraph) (lnwire.MilliSatoshi, uint32, error) {
+
+	// Define our neighborhood.
+	introductionNode := rt.SourcePubKey
+	routeLength := len(rt.Hops)
+	fmt.Printf("[SelectBlindRouteParameters]: graph source: %s, intro hop: %+v, len: %d\n",
+		g.sourceNode().String(), introductionNode.String(), routeLength)
+
+	// We will need to incrementally construct the sub-graph which
+	// represents our anonymity set. Take care not to duplicate graph data in memory.
+	// NOTE(8/28/22): Depending on how large the user wants their
+	// anonymity set, this could be quite large.
+	// SEE: channeldb.GraphCache contains minimal edge info needed for
+	// pathfinding.
+	// graph, err := channeldb.NewChannelGraph()
+	// ModifiedBFS does NOT serach for a target. Instead it returns all nodes
+	// within a specified distance from a source node.
+	// func ModifiedBFS()
+	var neighborhood []route.Vertex
+	// neighborhood = ModifiedBFS(g, introductionNode, routeLength)
+
+	// Add all nodes in the neighborhood to new in memory? sub-graph.
+	var subGraph routingGraph
+	// subGraph := computeSubgraph(g, neighborhood)
+
+	// Next, we'll compute the shortest path from introduction node to
+	// every node in the anonymity set. This is exactly the move an
+	// attacker might use in an attempt to degrade our privacy.
+	//
+	// single source all destinations shortest path
+	// We'll select the longest of these shortest paths and
+	// compute the fees and timelock it requires (not quite right.
+	// need to consider fees and timelock independently so neither
+	// can be used to shrink the anonymity set).
+
+	// Restrict pathfinding to only edges which support route blinding.
+	routeBlindingFeatures := lnwire.NewFeatureVector(
+		lnwire.NewRawFeatureVector(
+			lnwire.RouteBlindingOptional,
+		), lnwire.Features,
+	)
+
+	// NOTE(8/28/22): A modified version of pathfinding which runs once and
+	// builds us a shortest path tree might be more efficient (see our graph
+	// package or refer to Algorithms textbook). This might be a huge
+	// undertaking, especially for a feature (route parameter selection)
+	// which I can't even prove will do anything to protect us, and whose
+	// cost might prove unsatisfactory for users.
+	var shortestPathTo map[route.Vertex][]*channeldb.CachedEdgePolicy
+	var currentHeight uint32 = 0
+	var routeFees, hardenedRouteFees lnwire.MilliSatoshi
+	var routeTimelock, hardenedRouteTimelock uint32
+	for _, node := range neighborhood {
+		path, err := findPath(&graphParams{
+			graph: subGraph, // NOTE: We pathfind in the anonymity set.
+		}, &RestrictParams{
+			HopFeatures:   routeBlindingFeatures,
+			RouteBlinding: true,
+		}, nil, introductionNode, node, rt.TotalAmount, 0, 0)
+		if err != nil {
+			return 0, 0, err
+		}
+
+		shortestPathTo[node] = path
+
+		// Compute the fee and timelock required to reach this node.
+		tempRoute, _ := newRoute(introductionNode, path, currentHeight, finalHopParams{})
+		routeFees = tempRoute.TotalFees()
+		routeTimelock = tempRoute.TotalTimeLock
+
+		// Keep track of maximum fee and timelock necessary to reach
+		// a node in our anonymity set. Do we need to know which node?
+		if routeFees >= hardenedRouteFees {
+			hardenedRouteFees = routeFees
+		}
+
+		if routeTimelock >= hardenedRouteTimelock {
+			hardenedRouteTimelock = routeTimelock
+		}
+
+	}
+
+	// From here we'll select the longest of these shortest paths and
+	// compute the fees and timelock it requires.
+
+	// We'll compute the node farthest away in cost and use its fees as
+	// our fees. We'll compute the node farthest away in timelock terms
+	// and use its timelock as our timelock.
+	// We'll then subsitute this cumulative fee and timelock for the
+	// one used by our current blinded route. Why? Hopefully this is
+	// clear by now. If we select parameters this way then the parameters
+	// reveal no additional information. Will this be too costly in practice?
+	// You will have to pay for anonymity set.
+	// hardenedRoute := ...
+
+	// Compute
+
+	// From the sender/attacker’s perspective, the
+	// the (amounts forwarded/fees taken/cltv delta expected) by each hop
+	// in the blinded portion of the route are opaque.
+	// The sender/attacker only gets amount/fees & time-lock information
+	// which has been aggregated across the entire blinded portion of
+	// the route, so it would not be trivial for them to look at the
+	// channel graph and remove individual channels from consideration.
+	// They would instead need to look at all nodes in the neighborhood and
+	// throw out those which are not reachable/"affordable" (both amount
+	// and time-lock wise) given the aggregate amount and time lock.
+
+	// In principle, you can always select the aggregate route parameters
+	// such that Q = N, but these parameters reflect a real cost on honest
+	// senders. One could consider it a price paid for privacy, however it
+	// is a price paid by the sender, not the recipient. In the case where
+	// the recipient is a merchant, it may need to offer discounts to take
+	// back this cost from customers. I doubt customers will favor funding
+	// merchant privacy.
+
+	return hardenedRouteFees, hardenedRouteTimelock, nil
+}
+
+// SelectBlindRouteParameters...
+//
+// NOTE(8/28/22): This is a key spot for experimentation. Is there anything
+// we could do to facilitate people trying out their own algorithms?
+// IDEA: What if we shipped a route out to an external service via RPC.
+// What if we accepted a blinded route from an external service? This could
+// allows us to outsource some heavy graph analytics. One could have an external
+// program that crunches numbers on the LN graph and helps us build blinded
+// routes that preserve our privacy.
+func (r *ChannelRouter) SelectBlindRouteParameters(rt *route.Route,
+	pathEdges []*channeldb.CachedEdgePolicy) *route.Route {
+
+	// blindRouteParams := selectBlindRouteParams(p)
+	// baselineRouteTimelock := rt.TotalTimeLock
+	// baselineRouteFees := rt.TotalFees()
+	// pathLength := rt.Hops
+	// baselineRouteFees := rt.TotalAmount - rt.FinalHop().AmtToForward // NOTE: this bakes in base & proportional fee.
+	// route.HopFee(i)
+
+	// We select values for (base, rate, min_htlc, & cltv_delta)
+	// such that we have a strong anonymity set.
+	// blindPaymentParams := selectBlindRouteParams(pathEdges)
+	// blindPaymentParams.RouteCltvExpiry = blindedRouteExpiry
+
+	// From the length of the blinded path an attacker learns N.
+	// noLeakRouteFee, noLeakRouteTimelock, _ := noLeakHopPadding(rt, r.cachedGraph)
+
+	/*
+		Decide how to translate minimum aggregate fee and timelock
+		into fee/timelock for each hop. One method would be to
+		give each hop the same padding, ie: compute:
+
+		feeRemainder = (no_leak_aggregate_fee - route_fee)
+		hopFeePadding = feeRemainder/len(hops)
+
+		For each hop:
+			hop.Fee += hopFeePadding
+
+	*/
+	// feeRemainder := noLeakRouteFee - baselineRouteFees
+	// hopFeePadding := uint64(feeRemainder) / uint64(len(pathLength))
+
+	// timelockRemainder := noLeakRouteTimelock - baselineRouteTimelock
+	// hopTimelockPadding := uint64(timelockRemainder) / uint64(len(pathLength))
+
+	// NOTE(8/28/22): We cannot simply update the per hop parameters of a
+	// route.Route{}. Do we need to recompute from path --> route?
+	// for _, hop := range rt.Hops {
+	// 	hop.
+	// }
+
+	// return the same route we were given.
+	// TODO: actually modify the route.
+	return rt
+
+	// noLeakHopPadding := func(r *route.Route, g routingGraph) *route.Route {
+	// 	return nil
+	// }
+	// noLeakHopPadding(rt, r.cachedGraph)
+}
+
+type Path []*channeldb.ChannelEdgePolicy
+
+func (r *ChannelRouter) FindBlindRouteMin(source, target route.Vertex,
+	amt lnwire.MilliSatoshi,
+	routeExpiry uint32) (*BlindPayment, *sphinx.BlindedPath, error) {
+
+	currentHeight, _ := r.CurrentBlockHeight()
+	var finalExpiry uint16 = 0
+	var destCustomRecords record.CustomSet
+
+	// We must choose for how long we want this blinded route to be usable (accept as function argument)
+	// Find a path between introduction node and target (usually our node).
+	path, err := findPath(
+		&graphParams{
+			graph: r.cachedGraph,
+		},
+		nil, nil, source, target, amt, 0, 0,
+	)
+
+	// Build a route from the candidate path. This route will be post
+	// processed to ensure we leak minimal information to attackers.
+	// We go from path —> route (need amount/fee & time lock information).
+	// "With the next candidate path found, we'll attempt to turn
+	// this into a route by applying the time-lock and fee
+	// requirements." ~Joost
+	rt, err := newRoute(
+		source, path, uint32(currentHeight),
+		finalHopParams{
+			amt:       amt,
+			totalAmt:  amt,
+			cltvDelta: finalExpiry,
+			records:   destCustomRecords,
+		},
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Upon creation a route contains the minimum fee/time-lock needed to
+	// traverse each hop, as this is specified by the channel edge
+	// forwarding policy. We may, in general, re-write any route to use
+	// higher fees/time-locks than required for forwarding, and in fact
+	// we likely should do so to protect against an attacker who can
+	// leverage both the blinded route structure (construct initial
+	// anonymity set) & channel graph dynamics (ex: fee increases) in order
+	// to degrade the privacy offered by the blinded route over time.
+
+	// We select values for (base, rate, min_htlc, & cltv_delta)
+	// such that we have a strong anonymity set.
+	// We compute aggregate route parameters using amount/fee, time lock
+	// and minimum HTLC size information.
+	// NOTE(8/28/22): We can access amount/fee & timelock from route.Route{}
+	// but cannot access min_htlc. `min_htlc` is found in path ([]ChannelEdgePolicy)
+	// We either must take in the path as well, or put the min_htlc information
+	// inside the route.Hop{}
+
+	hardenedRoute := r.SelectBlindRouteParameters(rt, path)
+	// paddedRoute := noLeakHopPadding(rt, r.cachedGraph)
+
+	blindPayment, err := newBlindRoute(
+		source, path, uint32(currentHeight),
+		finalHopParams{
+			amt:      amt,
+			totalAmt: amt,
+		},
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// We go from route.Route{} —> sphinx blind hops (keys and route blinding TLV payload)
+	// Compute the route blinding TLV payloads for each hop in this route.
+	// routeBlindingPayloads, err := route.Blind()
+	// hopsToBeBlinded, aggregateRouteParams, err := blindPayment.BlindRoute.ToSphinxBlindPath()
+	// hopsToBeBlinded, _ := blindPayment.BlindRoute.ToSphinxBlindPath()
+	hopsToBeBlinded, _ := hardenedRoute.ToSphinxBlindPath()
+
+	// We go from sphinx blind hops —> sphinx blind path (blind node ID keys and encrypt the route blinding payloads)
+	// Actually build the blinded route (ie: blind the node ID public keys and encrypt the route blinding payloads).
+	sessionKey, _ := GenerateNewSessionKey()
+	blindRoute, _ := sphinx.BuildBlindedPath(sessionKey, hopsToBeBlinded)
+
+	// We go from sphinx blind path —> route.Route{} (can be marshaled to lnrpc.Route and sent to payer along with aggregate route parameters, encoded into invoice)
+	// Either convert from sphinx.BlindPath ==> route.Route (route.Marshall/FromSphinx)
+	// or return sphinx.BlindPath along with aggregate route parameters.
+
+	// Compute aggregate route parameters. These will need to be
+	// communicated to senders so that they know by how much
+	// their route to the introduction node needs to be offset
+	// such that the payment can successfully transit the blinded
+	// portion of the route.
+	// computeAggregateRouteParams := func(r *route.Route, b BlindRoutePaymentParams) *AggregateRouteParams {
+
+	// 	routeFeeBase := b.BaseFee * uint32(len(r.Hops))     // slightly incorrect
+	// 	routeFeeRate := b.FeeRate * uint32(len(r.Hops))     // a bit more incorrect
+	// 	routeCltvDelta := b.CltvDelta * uint16(len(r.Hops)) // correct
+	// 	return &AggregateRouteParams{
+	// 		AggregateBaseFee:  uint64(routeFeeBase),
+	// 		AggregateFeeRate:  uint64(routeFeeRate),
+	// 		AggregateTimeLock: uint32(routeCltvDelta),
+	// 	}
+	// }
+
+	// aggregateRouteParams := computeAggregateRouteParams(rt, blindPaymentParams)
+
+	return blindPayment, blindRoute, nil
+}
+
+// FindBlindRoute attempts to query the ChannelRouter for the optimum path to a
+// particular target destination to which it is able to send `amt` after
+// factoring in channel capacities and cumulative fees along the route.
+//
+// NOTE: This may be needed for Route Blinding implementation.
+func (r *ChannelRouter) FindBlindRoute(source, target route.Vertex,
+	amt lnwire.MilliSatoshi, timePref float64,
+	restrictions *RestrictParams,
+	destCustomRecords record.CustomSet,
+	routeHints map[route.Vertex][]*channeldb.CachedEdgePolicy,
+	finalExpiry uint16) (*BlindPayment, error) {
+
+	log.Debugf("Searching for path to %v, sending %v", target, amt)
+
+	// We'll attempt to obtain a set of bandwidth hints that can help us
+	// eliminate certain routes early on in the path finding process.
+	bandwidthHints, err := newBandwidthManager(
+		r.cachedGraph, r.selfNode.PubKeyBytes, r.cfg.GetLink,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// We'll fetch the current block height so we can properly calculate the
+	// required HTLC time locks within the route.
+	_, currentHeight, err := r.cfg.Chain.GetBestBlock()
+	if err != nil {
+		return nil, err
+	}
+
+	// Now that we know the destination is reachable within the graph, we'll
+	// execute our path finding algorithm.
+	finalHtlcExpiry := currentHeight + int32(finalExpiry)
+
+	// Validate time preference.
+	if timePref < -1 || timePref > 1 {
+		return nil, errors.New("time preference out of range")
+	}
+
+	path, err := findPath(
+		&graphParams{
+			additionalEdges: routeHints,
+			bandwidthHints:  bandwidthHints,
+			graph:           r.cachedGraph,
+		},
+		restrictions,
+		&r.cfg.PathFindingConfig,
+		source, target, amt, timePref, finalHtlcExpiry,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create the route with absolute time lock values.
+	route, err := newBlindRoute(
+		source, path, uint32(currentHeight),
+		finalHopParams{
+			amt:       amt,
+			totalAmt:  amt,
+			cltvDelta: finalExpiry,
+			records:   destCustomRecords,
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	go log.Tracef("Obtained path to send %v to %x: %v",
+		amt, target, newLogClosure(func() string {
+			return spew.Sdump(route)
+		}),
+	)
+
+	return route, nil
+}
+
 // FindRoute attempts to query the ChannelRouter for the optimum path to a
 // particular target destination to which it is able to send `amt` after
 // factoring in channel capacities and cumulative fees along the route.
+//
+// NOTE: This may be needed for Route Blinding implementation.
 func (r *ChannelRouter) FindRoute(source, target route.Vertex,
 	amt lnwire.MilliSatoshi, timePref float64,
 	restrictions *RestrictParams,
@@ -1812,9 +2189,9 @@ func (r *ChannelRouter) FindRoute(source, target route.Vertex,
 	return route, nil
 }
 
-// generateNewSessionKey generates a new ephemeral private key to be used for a
+// GenerateNewSessionKey generates a new ephemeral private key to be used for a
 // payment attempt.
-func generateNewSessionKey() (*btcec.PrivateKey, error) {
+func GenerateNewSessionKey() (*btcec.PrivateKey, error) {
 	// Generate a new random session key to ensure that we don't trigger
 	// any replay.
 	//
@@ -1826,6 +2203,8 @@ func generateNewSessionKey() (*btcec.PrivateKey, error) {
 // the onion route specified by the passed layer 3 route. The blob returned
 // from this function can immediately be included within an HTLC add packet to
 // be sent to the first hop within the route.
+//
+// QUESTION: Can we get this to work as is with normal routes and blinded routes?
 func generateSphinxPacket(rt *route.Route, paymentHash []byte,
 	sessionKey *btcec.PrivateKey) ([]byte, *sphinx.Circuit, error) {
 
@@ -1886,6 +2265,8 @@ func generateSphinxPacket(rt *route.Route, paymentHash []byte,
 
 // LightningPayment describes a payment to be sent through the network to the
 // final destination.
+//
+// TODO: Will this need to be updated for Route Blinding?
 type LightningPayment struct {
 	// Target is the node in which the payment should be routed towards.
 	Target route.Vertex
@@ -1933,6 +2314,18 @@ type LightningPayment struct {
 	// together and sorted in forward order in order to reach the
 	// destination successfully.
 	RouteHints [][]zpay32.HopHint
+
+	// Route Blinding Parameters
+	IntroductionNode       *btcec.PublicKey
+	EphemeralBlindingPoint *btcec.PublicKey
+	// NOTE: In order to protect against senders deanonymizing
+	// blinded route recipients via the blinded route length
+	// this list may include dummy blinded hop payloads so that
+	// senders do not learn a recipients true distance from the
+	// introduction node.
+	// Does this protect against intersection attacks when senders
+	// learn multiple blinded routes to the same recipient?
+	EncryptedRouteBlindingPayloads [][]byte
 
 	// OutgoingChannelIDs is the list of channels that are allowed for the
 	// first hop. If nil, any channel may be used.
@@ -2695,6 +3088,8 @@ func (e ErrNoChannel) Error() string {
 // BuildRoute returns a fully specified route based on a list of pubkeys. If
 // amount is nil, the minimum routable amount is used. To force a specific
 // outgoing channel, use the outgoingChan parameter.
+//
+// QUESTION: Does this need to be updated for Route Blinding?
 func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 	hops []route.Vertex, outgoingChan *uint64,
 	finalCltvDelta int32, payAddr *[32]byte) (*route.Route, error) {
@@ -2715,8 +3110,21 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 
 	// We'll attempt to obtain a set of bandwidth hints that helps us select
 	// the best outgoing channel to use in case no outgoing channel is set.
+	// NOTE: BuildRoute() assumes that we are the source of any route built.
+	// Should the source of the route not instead be the first hop provided?
+	// IFF we adopt the convention that ALL calls to this function will
+	// include the first node, then we can avoid assuming that we are
+	// a part of the route being built. If we want to avoid assuming
+	// that we are a part of the route being built then we MUST adopt
+	// the convention that ALL nodes involved in a route will be passed to this function.
+	source := hops[0]
+	ImPartOfRoute := source == r.cachedGraph.sourceNode()
+	if ImPartOfRoute {
+		fmt.Println("Channel Graph source node is the source of the route!")
+	}
+	// source := r.selfNode.PubKeyBytes
 	bandwidthHints, err := newBandwidthManager(
-		r.cachedGraph, r.selfNode.PubKeyBytes, r.cfg.GetLink,
+		r.cachedGraph, source, r.cfg.GetLink,
 	)
 	if err != nil {
 		return nil, err
@@ -2731,7 +3139,7 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 
 	// Allocate a list that will contain the unified policies for this
 	// route.
-	edges := make([]*unifiedPolicy, len(hops))
+	edges := make([]*unifiedPolicy, len(hops)-1)
 
 	var runningAmt lnwire.MilliSatoshi
 	if useMinAmt {
@@ -2747,31 +3155,49 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 	}
 
 	// Traverse hops backwards to accumulate fees in the running amounts.
-	source := r.selfNode.PubKeyBytes
-	for i := len(hops) - 1; i >= 0; i-- {
+	// NOTE: BuildRoute() assumes that we are the source of any route built.
+	fmt.Println("Channel Graph Source Node: ", r.cachedGraph.sourceNode().String())
+	fmt.Println("Route Source Node: ", source)
+	fmt.Println("Route Target Node: ", hops[len(hops)-1].String())
+	fmt.Println("# Hops in Route: ", len(hops))
+	// NOTE: Currently the source node is assumed to be us and is NOT included in the
+	// list. If we are not a part of the route being built,
+	for i := len(hops) - 1; i > 0; i-- {
 		toNode := hops[i]
 
 		var fromNode route.Vertex
 		if i == 0 {
 			fromNode = source
+			// CURRENT MEANING: We're out of hops. Set the from node to the implicit source of this route, US!
+			// NOTE: fromNode will NEVER = toNode ==> Correct!
+			// NEW MEANING: We will be checking for a channel between fromNode = toNode ==> WRONG!!!
 		} else {
 			fromNode = hops[i-1]
+			// NEW MEANING: If we are part of the route, then we will explicitly include ourselves as a hop.
+			// Since we do not iterate all the way to 0 this will always be used.
 		}
+		fmt.Printf("Checking for channel from %s to %s\n", fromNode, toNode)
 
-		localChan := i == 0
+		// localChan := i == 0
+		localChan := fromNode == r.cachedGraph.sourceNode()
 
 		// Build unified policies for this hop based on the channels
 		// known in the graph.
-		u := newUnifiedPolicies(source, toNode, outgoingChans)
+		// Why do we need this for all hops, even those we are not directly connected to?
+		u := newUnifiedPolicies(r.selfNode.PubKeyBytes, toNode, outgoingChans)
 
 		err := u.addGraphPolicies(r.cachedGraph)
 		if err != nil {
 			return nil, err
 		}
 
+		log.Infof("BuildRoute called: back traversal - unified policy check")
+		fmt.Println("BuildRoute called: back traversal - unified policy check")
 		// Exit if there are no channels.
 		unifiedPolicy, ok := u.policies[fromNode]
 		if !ok {
+			log.Infof("BuildRoute called: back traversal - no unified policy")
+			fmt.Println("BuildRoute called: back traversal - no unified policy")
 			return nil, ErrNoChannel{
 				fromNode: fromNode,
 				position: i,
@@ -2786,6 +3212,8 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 			}
 		}
 
+		log.Infof("BuildRoute called: back traversal - getting policy")
+		fmt.Println("BuildRoute called: back traversal - getting policy")
 		// Get a forwarding policy for the specific amount that we want
 		// to forward.
 		policy := unifiedPolicy.getPolicy(runningAmt, bandwidthHints)
@@ -2803,9 +3231,11 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 
 		log.Tracef("Select channel %v at position %v", policy.ChannelID, i)
 
-		edges[i] = unifiedPolicy
+		fmt.Println("BuildRoute: back traversal - adding policy to edge list")
+		edges[i-1] = unifiedPolicy
 	}
 
+	fmt.Printf("[BuildRoute]: edge list: %+v\n", edges)
 	// Now that we arrived at the start of the route and found out the route
 	// total amount, we make a forward pass. Because the amount may have
 	// been increased in the backward pass, fees need to be recalculated and
@@ -2813,6 +3243,8 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 	var pathEdges []*channeldb.CachedEdgePolicy
 	receiverAmt := runningAmt
 	for i, edge := range edges {
+		log.Infof("BuildRoute called: making forward pass through route")
+		fmt.Println("BuildRoute called: making forward pass through route")
 		policy := edge.getPolicy(receiverAmt, bandwidthHints)
 		if policy == nil {
 			return nil, ErrNoChannel{

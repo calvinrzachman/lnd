@@ -183,6 +183,12 @@ type Invoice struct {
 	// NOTE: This is optional.
 	RouteHints [][]HopHint
 
+	// Route Blinding Paramters
+	BlindedHops                    []*btcec.PublicKey
+	IntroductionNode               *btcec.PublicKey
+	EphemeralBlindingPoint         *btcec.PublicKey
+	EncryptedRouteBlindingPayloads [][]byte
+
 	// Features represents an optional field used to signal optional or
 	// required support for features by the receiver.
 	Features *lnwire.FeatureVector
@@ -285,6 +291,17 @@ func PaymentAddr(addr [32]byte) func(*Invoice) {
 func Metadata(metadata []byte) func(*Invoice) {
 	return func(i *Invoice) {
 		i.Metadata = metadata
+
+	}
+}
+
+// BlindedRoute is a functional option that lalows callers of NewInvoice
+// to include a blinded route which senders MUST use to pay the invoice.
+func BlindedRoute(blindedHops []*btcec.PublicKey, introBlindingPoint *btcec.PublicKey, payloads [][]byte) func(*Invoice) {
+	return func(i *Invoice) {
+		i.BlindedHops = blindedHops
+		i.EphemeralBlindingPoint = introBlindingPoint
+		i.EncryptedRouteBlindingPayloads = payloads
 	}
 }
 

@@ -366,6 +366,7 @@ var resultTestCases = []resultTestCase{
 			policyFailure: getPolicyFailure(1, 2),
 		},
 	},
+	// TODO(8/14/22): Add test for route blinding/InvalidOnionBlinding here.
 }
 
 // TestResultInterpretation executes a list of test cases that test the result
