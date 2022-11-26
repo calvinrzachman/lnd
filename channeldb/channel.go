@@ -2594,6 +2594,9 @@ func (c *OpenChannel) InsertNextRevocation(revKey *btcec.PublicKey) error {
 // commitment to the current remote commitment. The updates parameter is the
 // set of local updates that the peer still needs to send us a signature for.
 // We store this set of updates in case we go down.
+//
+// NOTE(11/27/22): Recall in principle we have local updates which our peer
+// either has not heard of (has not included in a RevokeAndAck)
 func (c *OpenChannel) AdvanceCommitChainTail(fwdPkg *FwdPkg,
 	updates []LogUpdate, ourOutputIndex, theirOutputIndex uint32) error {
 

@@ -663,6 +663,9 @@ func loadFwdPkg(fwdPkgBkt kvdb.RBucket, source lnwire.ShortChannelID,
 	// Check to see if we have written the set exported filter adds to
 	// disk. If we haven't, processing of this package was never started, or
 	// failed during the last attempt.
+	//
+	// NOTE(11/25/22): We write the forward filter right before we send
+	// a batch of Adds to the Switch.
 	fwdFilterBytes := heightBkt.Get(fwdFilterKey)
 	if fwdFilterBytes == nil {
 		nAdds := uint16(len(adds))
