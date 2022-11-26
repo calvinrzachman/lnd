@@ -5399,6 +5399,11 @@ func (lc *LightningChannel) AddHTLC(htlc *lnwire.UpdateAddHTLC,
 		return 0, err
 	}
 
+	// NOTE(11/23/22): We just recieved this HTLC (add) update from our
+	// switch so we'll add it to the local update log. Recall, that HTLCs
+	// are batched and process asynchronously. We won't proces this HTLC
+	// straight away, but rather add it to our log of updates which will
+	// soon be sent to our peer
 	lc.localUpdateLog.appendHtlc(pd)
 
 	return pd.HtlcIndex, nil
@@ -5637,6 +5642,8 @@ func (lc *LightningChannel) ReceiveHTLC(htlc *lnwire.UpdateAddHTLC) (uint64, err
 		return 0, err
 	}
 
+	// NOTE(11/23/22): We just recieved this HTLC (add) update from our
+	// peer so we'll add it to the log we keep of updates from them.
 	lc.remoteUpdateLog.appendHtlc(pd)
 
 	return pd.HtlcIndex, nil
@@ -5700,6 +5707,11 @@ func (lc *LightningChannel) SettleHTLC(preimage [32]byte,
 		ClosedCircuitKey: closeKey,
 	}
 
+	// NOTE(11/23/22): We just recieved this HTLC (settle) update from our
+	// switch so we'll add it to the local update log. Recall, that HTLCs
+	// are batched and process asynchronously. We won't proces this HTLC
+	// straight away, but rather add it to our log of updates which will
+	// soon be sent to our peer
 	lc.localUpdateLog.appendUpdate(pd)
 
 	// With the settle added to our local log, we'll now mark the HTLC as
@@ -5718,6 +5730,8 @@ func (lc *LightningChannel) ReceiveHTLCSettle(preimage [32]byte, htlcIndex uint6
 	lc.Lock()
 	defer lc.Unlock()
 
+	// NOTE(11/23/22): This HTLC (settle) update must be repsonding
+	// to a previous (add) we sent to the peer.
 	htlc := lc.localUpdateLog.lookupHtlc(htlcIndex)
 	if htlc == nil {
 		return ErrUnknownHtlcIndex{lc.ShortChanID(), htlcIndex}
@@ -5743,6 +5757,8 @@ func (lc *LightningChannel) ReceiveHTLCSettle(preimage [32]byte, htlcIndex uint6
 		EntryType:   Settle,
 	}
 
+	// NOTE(11/23/22): We just recieved this HTLC (settle) update from our
+	// peer so we'll add it to the log we keep of updates from them.
 	lc.remoteUpdateLog.appendUpdate(pd)
 
 	// With the settle added to the remote log, we'll now mark the HTLC as
@@ -5755,7 +5771,7 @@ func (lc *LightningChannel) ReceiveHTLCSettle(preimage [32]byte, htlcIndex uint6
 
 // FailHTLC attempts to fail a targeted HTLC by its payment hash, inserting an
 // entry which will remove the target log entry within the next commitment
-// update. This method is intended to be called in order to cancel in
+// update. This method is intended to be called in order to cancel an
 // _incoming_ HTLC.
 //
 // The additional arguments correspond to:
@@ -5784,6 +5800,9 @@ func (lc *LightningChannel) FailHTLC(htlcIndex uint64, reason []byte,
 	lc.Lock()
 	defer lc.Unlock()
 
+	// NOTE(11/21/22): Any HTLC failure we're about to send
+	// to our peer MUST correspond to an ADD they've previously
+	// told us about, thus it'll be in our remote update log.
 	htlc := lc.remoteUpdateLog.lookupHtlc(htlcIndex)
 	if htlc == nil {
 		return ErrUnknownHtlcIndex{lc.ShortChanID(), htlcIndex}
@@ -5805,8 +5824,23 @@ func (lc *LightningChannel) FailHTLC(htlcIndex uint64, reason []byte,
 		SourceRef:        sourceRef,
 		DestRef:          destRef,
 		ClosedCircuitKey: closeKey,
+		// IMPORTANT NOTE(11/17/22):
+		// The LN state machine stores the blinding point
+		// associated with an Add if the ADD was associated
+		// with a blinded route. If that Add is now being
+		// failed, we'll want a reference to its ephemeral
+		// blinding point so we can use it to determine which
+		// error will be forwarded back towards the sender.
+		// NOTE(11/17/22): Not sure whether this should be set
+		// here or somewhere similar like ReceiveFailHTLC().
+		// BlindingPoint: htlc.BlindingPoint,
 	}
 
+	// NOTE(11/23/22): We just recieved this HTLC (fail) update from our
+	// switch so we'll add it to the local update log. Recall, that HTLCs
+	// are batched and processed asynchronously. We won't proces this HTLC
+	// straight away, but rather add it to our log of updates which will
+	// soon be sent to our peer
 	lc.localUpdateLog.appendUpdate(pd)
 
 	// With the fail added to the remote log, we'll now mark the HTLC as
@@ -5834,6 +5868,9 @@ func (lc *LightningChannel) MalformedFailHTLC(htlcIndex uint64,
 	lc.Lock()
 	defer lc.Unlock()
 
+	// NOTE(11/21/22): Any HTLC failure we're about to send
+	// to our peer MUST correspond to an ADD they've previously
+	// told us about, thus it'll be in our remote update log.
 	htlc := lc.remoteUpdateLog.lookupHtlc(htlcIndex)
 	if htlc == nil {
 		return ErrUnknownHtlcIndex{lc.ShortChanID(), htlcIndex}
@@ -5856,6 +5893,11 @@ func (lc *LightningChannel) MalformedFailHTLC(htlcIndex uint64,
 		SourceRef:    sourceRef,
 	}
 
+	// NOTE(11/23/22): We just recieved this HTLC (fail) update from our
+	// switch so we'll add it to the local update log. Recall, that HTLCs
+	// are batched and processed asynchronously. We won't proces this HTLC
+	// straight away, but rather add it to our log of updates which will
+	// soon be sent to our peer
 	lc.localUpdateLog.appendUpdate(pd)
 
 	// With the fail added to the remote log, we'll now mark the HTLC as
@@ -5876,6 +5918,8 @@ func (lc *LightningChannel) ReceiveFailHTLC(htlcIndex uint64, reason []byte,
 	lc.Lock()
 	defer lc.Unlock()
 
+	// NOTE(11/21/22): Any HTLC failure MUST correspond to an ADD
+	// we previously put in our local update log.
 	htlc := lc.localUpdateLog.lookupHtlc(htlcIndex)
 	if htlc == nil {
 		return ErrUnknownHtlcIndex{lc.ShortChanID(), htlcIndex}
@@ -5908,6 +5952,8 @@ func (lc *LightningChannel) ReceiveFailHTLC(htlcIndex uint64, reason []byte,
 		// BlindingPoint: htlc.BlindingPoint,
 	}
 
+	// NOTE(11/23/22): We just recieved this HTLC (fail) update from our
+	// peer so we'll add it to the log we keep of updates from them.
 	lc.remoteUpdateLog.appendUpdate(pd)
 
 	// With the fail added to the remote log, we'll now mark the HTLC as
