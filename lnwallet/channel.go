@@ -422,6 +422,12 @@ func PayDescsFromRemoteLogUpdates(chanID lnwire.ShortChannelID, height uint64,
 					Height: height,
 					Index:  uint16(i),
 				},
+				// NOTE(11/23/22): When the incoming link is reforwarding
+				// the ADD through the switch it will need to set the blinding
+				// point. This will be the incoming blinding point and will
+				// only be available here if we take care to set it on the
+				// LogUpdate which is persisted to disk!
+				BlindingPoint: wireMsg.BlindingPoint,
 			}
 			pd.OnionBlob = make([]byte, len(wireMsg.OnionBlob))
 			copy(pd.OnionBlob[:], wireMsg.OnionBlob[:])
@@ -5000,6 +5006,14 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 				Amount:      pd.Amount,
 				Expiry:      pd.Timeout,
 				PaymentHash: pd.RHash,
+				// NOTE(11/27/22): Here we add the (incoming) blinding point
+				// to the UpdateAddHTLC message so it is written to disk
+				// when we persist this LogUpdate. This is the LogUpdate that
+				// gets put in our ForwardingPackage, so it will be preserved
+				// once the ForwardingPackage is written to disk below.
+				// The blinding point will be available to our the incoming
+				// link after we restore our in-memory state after a restart!
+				BlindingPoint: pd.BlindingPoint,
 			}
 			copy(htlc.OnionBlob[:], pd.OnionBlob)
 			logUpdate.UpdateMsg = htlc
@@ -5066,6 +5080,12 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 	// sync now to ensure the revocation producer state is consistent with
 	// the current commitment height and also to advance the on-disk
 	// commitment chain.
+	//
+	// NOTE(11/25/22): We write the forwarding package to disk inside this
+	// function. After serialization, a restarting link will recover the
+	// blinding points from any HTLC updates contained in the forwarding package.
+	// There are other pathways we need to consider as it seems like the
+	// payment descriptors are not always restored from the forwarding package.
 	err = lc.channelState.AdvanceCommitChainTail(
 		fwdPkg, localPeerUpdates,
 		ourOutputIndex, theirOutputIndex,
