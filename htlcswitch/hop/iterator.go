@@ -390,6 +390,9 @@ func (p *OnionProcessor) DecodeHopIterators(id []byte,
 		if replays.Contains(uint16(i)) {
 			log.Errorf("unable to process onion packet: %v",
 				sphinx.ErrReplayedPacket)
+			fmt.Printf("unable to process onion packet: %v\n",
+				sphinx.ErrReplayedPacket)
+
 			resp.FailCode = lnwire.CodeTemporaryChannelFailure
 			continue
 		}
