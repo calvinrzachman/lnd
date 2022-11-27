@@ -4021,6 +4021,7 @@ func (lc *LightningChannel) SignNextCommitment() (lnwire.Sig, []lnwire.Sig,
 //
 //   - CommitSig+Updates: if we have a pending remote commit which they claim to
 //     have not received
+//     NOTE(11/27/22): Message order surely matters in the retransmission!
 //   - RevokeAndAck: if we sent a revocation message that they claim to have
 //     not received
 //
@@ -4030,6 +4031,9 @@ func (lc *LightningChannel) SignNextCommitment() (lnwire.Sig, []lnwire.Sig,
 // previous commitment txn. This allows the link to clear its mailbox of those
 // circuits in case they are still in memory, and ensure the switch's circuit
 // map has been updated by deleting the closed circuits.
+//
+// NOTE(11/27/22): This is involved in an outgoing link's determination on
+// whether we have any local HTLC updates which need to be retrasnmitted!!
 func (lc *LightningChannel) ProcessChanSyncMsg(
 	msg *lnwire.ChannelReestablish) ([]lnwire.Message, []models.CircuitKey,
 	[]models.CircuitKey, error) {
@@ -4164,6 +4168,9 @@ func (lc *LightningChannel) ProcessChanSyncMsg(
 		// revocation, but also initiate a state transition to re-sync
 		// them.
 		if lc.OweCommitment() {
+			// NOTE(11/27/22): We also use SignNextCommitment to help us
+			// recover from a restart/reconnection to our peer.
+			// TODO: Consider how, if at all, this usage differs from the other.
 			commitSig, htlcSigs, _, err := lc.SignNextCommitment()
 			switch {
 
@@ -4240,6 +4247,10 @@ func (lc *LightningChannel) ProcessChanSyncMsg(
 		// Grab the current remote chain tip from the database.  This
 		// commit diff contains all the information required to re-sync
 		// our states.
+		//
+		// NOTE(11/27/22): Making good on Conner's claim that:
+		// “Once an HTLC is included into a channeldb.CommitDiff,
+		// channel resync will ensure it is delivered to the remote party.”
 		commitDiff, err := lc.channelState.RemoteCommitChainTip()
 		if err != nil {
 			return nil, nil, nil, err
@@ -4249,6 +4260,10 @@ func (lc *LightningChannel) ProcessChanSyncMsg(
 
 		// Next, we'll need to send over any updates we sent as part of
 		// this new proposed commitment state.
+		//
+		// NOTE(11/27/22): As these updates are restored from a
+		// channeldb.CommitDiff, they will not (yet) have any blinding
+		// points set. These will be outgoing HTLCs, thus next blinding points?
 		for _, logUpdate := range commitDiff.LogUpdates {
 			commitUpdates = append(commitUpdates, logUpdate.UpdateMsg)
 		}

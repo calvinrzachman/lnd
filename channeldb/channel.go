@@ -1375,6 +1375,10 @@ func (c *OpenChannel) SecondCommitmentPoint() (*btcec.PublicKey, error) {
 // If this is a restored channel, having status ChanStatusRestored, then we'll
 // modify our typical chan sync message to ensure they force close even if
 // we're on the very first state.
+//
+// NOTE(11/27/22): This is involved in an outgoing link's determination on
+// whether we have any local HTLC updates which need to be retrasnmitted!!
+// I think we may expect a similar message from them upon reconnect.
 func (c *OpenChannel) ChanSyncMsg() (*lnwire.ChannelReestablish, error) {
 	c.Lock()
 	defer c.Unlock()
@@ -2177,6 +2181,19 @@ type CommitDiff struct {
 	// transition in question. Upon reconnection, if we detect that they
 	// don't have the commitment, then we re-send this along with the
 	// proper signature.
+	//
+	// NOTE(11/27/22): This contains the set of pending local HTLC updates over
+	// which we are signing. Recall that when sending a commitment
+	// (ie: extending our peer’s commitment chain) and creating a new remote
+	// view, we include _all_ of our changes (pending or committed) but only
+	// the remote node's changes up to the last change we've acknowledged.
+	// We can assume (as long as we guarantee in order message delivery) that
+	// the remote node will have heard about all HTLC updates we sent prior to
+	// receiving this commitment signature, but only if we take care to resend
+	// the updates in the case we are retransmitting after a restart!
+	// We can make sure these local/outgoing log updates which have yet to be
+	// committed with our downstream peer contain the blinding point our peer
+	// will need to process their onion!
 	LogUpdates []LogUpdate
 
 	// CommitSig is the exact CommitSig message that should be sent after

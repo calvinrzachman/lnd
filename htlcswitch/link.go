@@ -777,6 +777,10 @@ func (l *channelLink) syncChanStates() error {
 		// We've just received a ChanSync message from the remote
 		// party, so we'll process the message  in order to determine
 		// if we need to re-transmit any messages to the remote party.
+		//
+		// NOTE(11/27/22): Here is where the outgoing link determines
+		// whether we have any local HTLC updates which need to be
+		// retrasnmitted!!
 		msgsToReSend, openedCircuits, closedCircuits, err =
 			l.channel.ProcessChanSyncMsg(remoteChanSyncMsg)
 		if err != nil {
