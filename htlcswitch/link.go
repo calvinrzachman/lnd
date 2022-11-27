@@ -903,6 +903,13 @@ func (l *channelLink) resolveFwdPkg(fwdPkg *channeldb.FwdPkg) error {
 				err)
 			return err
 		}
+
+		// NOTE(11/25/22): We are going to reprocess ADDs after a restart.
+		// Check that the correct blinding point is available for this
+		// reprocessing!
+		// UPDATE(11/27/22): If we persist the blinding point as part of
+		// the LogUpdate inside our forwarding pacakges, then it will be!
+		// This is done inside ReceiveRevocation().
 		l.processRemoteAdds(fwdPkg, adds)
 
 		// If the link failed during processing the adds, we must
@@ -2937,6 +2944,14 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 	decodeReqs := make(
 		[]hop.DecodeHopIteratorRequest, 0, len(lockedInHtlcs),
 	)
+
+	// NOTE(11/25/22): When reprocessing a forwarding package, say
+	// after a restart, we redecrypt the onion packet for EVERY
+	// ADD, even those which we have decrypted before.
+	// Maybe our batch onion decoding is smart enough to not do the
+	// work twice? Or maybe we just decrypt all onion packets in the
+	// forwarding package again and let the switch prevent duplicate
+	// forwards.
 	for _, pd := range lockedInHtlcs {
 		switch pd.EntryType {
 
