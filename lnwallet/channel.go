@@ -3383,6 +3383,13 @@ func (lc *LightningChannel) createCommitDiff(
 				Amount:      pd.Amount,
 				Expiry:      pd.Timeout,
 				PaymentHash: pd.RHash,
+				// TODO: do we need blinding point here?
+				// NOTE(11/27/22): This would be the outgoing
+				// blinding point as this HTLC update is from
+				// our local update log, thus is an outgoing ADD.
+				// UPDATE(11/27/22): This is needed if we want to bring
+				// the next (route) blinding point back from disk.
+				BlindingPoint: lnwire.NewBlindingPoint(pd.BlindingPoint),
 			}
 			copy(htlc.OnionBlob[:], pd.OnionBlob)
 			logUpdate.UpdateMsg = htlc
@@ -5356,15 +5363,30 @@ func (lc *LightningChannel) htlcAddDescriptor(htlc *lnwire.UpdateAddHTLC,
 	openKey *models.CircuitKey) *PaymentDescriptor {
 
 	return &PaymentDescriptor{
-		EntryType:      Add,
-		RHash:          PaymentHash(htlc.PaymentHash),
-		Timeout:        htlc.Expiry,
-		Amount:         htlc.Amount,
-		LogIndex:       lc.localUpdateLog.logIndex,
-		HtlcIndex:      lc.localUpdateLog.htlcCounter,
-		OnionBlob:      htlc.OnionBlob[:],
+		EntryType: Add,
+		RHash:     PaymentHash(htlc.PaymentHash),
+		Timeout:   htlc.Expiry,
+		Amount:    htlc.Amount,
+		LogIndex:  lc.localUpdateLog.logIndex,
+		HtlcIndex: lc.localUpdateLog.htlcCounter,
+		OnionBlob: htlc.OnionBlob[:],
+		// NOTE(11/23/22): AddHTLC is called by the outgoing link.
+		// If the (add) came to us via the switch, then  we will
+		// have an open circuit key. The circuit will later be
+		// opened once we...
 		OpenCircuitKey: openKey,
-		BlindingPoint:  htlc.BlindingPoint.PublicKey,
+		// IMPORTANT NOTE(11/18/22):
+		// If an HTLC contains an ephemeral (route) blinding
+		// point, then we must store a reference to it inside
+		// the update log. Later, if the Add is failed, we
+		// may be able to use it to determine how to forward the
+		// error back towards the sender.
+		// NOTE(11/27/22): This would be the outgoing
+		// blinding point as this HTLC update is from
+		// our local update log, thus is an outgoing ADD.
+		// UPDATE(11/27/22): This is needed if we want to bring
+		// the next (route) blinding point back from disk.
+		BlindingPoint: htlc.BlindingPoint.PublicKey,
 	}
 }
 

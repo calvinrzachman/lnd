@@ -41,6 +41,23 @@ func createPubkey(t *testing.T) *btcec.PublicKey {
 	return pk
 }
 
+var (
+	// testEphemeralKey is the ephemeral key that will be extracted to
+	// create onion obfuscators.
+	testEphemeralKey *btcec.PublicKey
+)
+
+func init() {
+
+	// And another, whose public key will serve as the test ephemeral key.
+	testEphemeralPriv, err := btcec.NewPrivateKey()
+	if err != nil {
+		panic(err)
+	}
+	testEphemeralKey = testEphemeralPriv.PubKey()
+
+}
+
 // createHTLC is a utility function for generating an HTLC with a given
 // preimage and a given amount.
 func createHTLC(id int, amount lnwire.MilliSatoshi) (*lnwire.UpdateAddHTLC, [32]byte) {
@@ -3056,13 +3073,22 @@ func TestChanSyncOweCommitment(t *testing.T) {
 	copy(alicePreimage[:], bytes.Repeat([]byte{0xaa}, 32))
 	rHash := sha256.Sum256(alicePreimage[:])
 	aliceHtlc := &lnwire.UpdateAddHTLC{
-		ChanID:      chanID,
-		PaymentHash: rHash,
-		Amount:      htlcAmt,
-		Expiry:      uint32(10),
-		OnionBlob:   fakeOnionBlob,
-		ExtraData:   make([]byte, 0),
+		ChanID:        chanID,
+		PaymentHash:   rHash,
+		Amount:        htlcAmt,
+		Expiry:        uint32(10),
+		OnionBlob:     fakeOnionBlob,
+		BlindingPoint: lnwire.NewBlindingPoint(testEphemeralKey),
+		ExtraData:     make([]byte, 0),
 	}
+
+	// Write the the ephemeral (route) blinding point as a
+	// TLV extension so our test will pass.
+	// point := new(lnwire.BlindingPoint)
+	point := lnwire.NewBlindingPoint(testEphemeralKey)
+	err = lnwire.EncodeMessageExtraData(&aliceHtlc.ExtraData, &point)
+	require.NoError(t, err, "unable to encode blinding point TLV extension")
+
 	aliceHtlcIndex, err := aliceChannel.AddHTLC(aliceHtlc, nil)
 	require.NoError(t, err, "unable to add alice's htlc")
 	bobHtlcIndex, err := bobChannel.ReceiveHTLC(aliceHtlc)
@@ -3097,6 +3123,10 @@ func TestChanSyncOweCommitment(t *testing.T) {
 				"will send %v: %v", 5, len(aliceMsgsToSend),
 				spew.Sdump(aliceMsgsToSend))
 		}
+
+		// NOTE(11/27/22): We would like ensure that the pending local
+		// updates we restore from disk following a restart contain any
+		// (route) blinding points they were configured with.
 
 		// Each of the settle messages that Alice sent should match her
 		// original intent.
