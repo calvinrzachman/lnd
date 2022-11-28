@@ -9,23 +9,28 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btclog"
 	"github.com/davecgh/go-spew/spew"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/go-errors/errors"
+
 	"github.com/lightningnetwork/lnd/build"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/contractcourt"
 	"github.com/lightningnetwork/lnd/htlcswitch/hodl"
 	"github.com/lightningnetwork/lnd/htlcswitch/hop"
 	"github.com/lightningnetwork/lnd/invoices"
+	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/lightningnetwork/lnd/lnpeer"
 	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/queue"
+	"github.com/lightningnetwork/lnd/record"
 	"github.com/lightningnetwork/lnd/ticker"
 )
 
@@ -150,6 +155,14 @@ type ChannelLinkConfig struct {
 	// are always presented for the same identifier.
 	DecodeHopIterators func([]byte, []hop.DecodeHopIteratorRequest) (
 		[]hop.DecodeHopIteratorResponse, error)
+
+	// BlindHopProcessor provides the functionality necessary for
+	// the channel link to process hops as part of a blinded route.
+	BlindHopProcessor
+
+	// RouteBlindingEnabled indicates whether the link should process blind hops.
+	// NOTE(10/1/22): Use this instead of function.
+	RouteBlindingEnabled bool
 
 	// ExtractErrorEncrypter function is responsible for decoding HTLC
 	// Sphinx onion blob, and creating onion failure obfuscator.
@@ -294,6 +307,10 @@ type ChannelLinkConfig struct {
 	// HtlcNotifier is an instance of a htlcNotifier which we will pipe htlc
 	// events through.
 	HtlcNotifier htlcNotifier
+
+	// NodeKeyECDH provides access to our persistent node ID private key
+	// which is needed to process onions for hops in a blinded route.
+	NodeKeyECDH keychain.SingleKeyECDH
 
 	// FailAliasUpdate is a function used to fail an HTLC for an
 	// option_scid_alias channel.
@@ -814,12 +831,18 @@ func (l *channelLink) syncChanStates() error {
 // if necessary. After a restart, this will also delete any previously
 // completed packages.
 func (l *channelLink) resolveFwdPkgs() error {
+	fmt.Printf("[link(%s).resolveFwdPackages]: loading packages from disk and reprocessing! "+
+		"switch link count=%d\n",
+		l.ShortChanID(), len(l.cfg.Switch.linkIndex))
+
 	fwdPkgs, err := l.channel.LoadFwdPkgs()
 	if err != nil {
 		return err
 	}
 
-	l.log.Debugf("loaded %d fwd pks", len(fwdPkgs))
+	l.log.Debugf("loaded %d fwd pkgs", len(fwdPkgs))
+	fmt.Printf("[link(%s).resolveFwdPackages]: loaded %d fwd pkgs. switch link count=%d\n",
+		l.ShortChanID(), len(fwdPkgs), len(l.cfg.Switch.linkIndex))
 
 	for _, fwdPkg := range fwdPkgs {
 		if err := l.resolveFwdPkg(fwdPkg); err != nil {
@@ -844,6 +867,9 @@ func (l *channelLink) resolveFwdPkg(fwdPkg *channeldb.FwdPkg) error {
 	if fwdPkg.State == channeldb.FwdStateCompleted {
 		l.log.Debugf("removing completed fwd pkg for height=%d",
 			fwdPkg.Height)
+		fmt.Printf("[link(%s).resolveFwdPackage]: removing completed fwd pkg for height=%d. "+
+			"switch link count=%d\n",
+			l.ShortChanID(), fwdPkg.Height, len(l.cfg.Switch.linkIndex))
 
 		err := l.channel.RemoveFwdPkgs(fwdPkg.Height)
 		if err != nil {
@@ -870,6 +896,8 @@ func (l *channelLink) resolveFwdPkg(fwdPkg *channeldb.FwdPkg) error {
 				err)
 			return err
 		}
+		fmt.Printf("[link(%s).resolveFwdPackage]: rebuilt Settle/Fail descriptors from FwdPkg "+
+			"LogUpdate. Reprocessing! switch link count=%d\n", l.ShortChanID(), len(l.cfg.Switch.linkIndex))
 		l.processRemoteSettleFails(fwdPkg, settleFails)
 	}
 
@@ -886,6 +914,15 @@ func (l *channelLink) resolveFwdPkg(fwdPkg *channeldb.FwdPkg) error {
 				err)
 			return err
 		}
+		fmt.Printf("[link(%s).resolveFwdPackage]: rebuilt ADD descriptors from FwdPkg LogUpdate. "+
+			"Reprocessing! switch link count=%d\n", l.ShortChanID(), len(l.cfg.Switch.linkIndex))
+
+		// NOTE(11/25/22): We are going to reprocess ADDs after a restart.
+		// Check that the correct blinding point is available for this
+		// reprocessing!
+		// UPDATE(11/27/22): If we persist the blinding point as part of
+		// the LogUpdate inside our forwarding pacakges, then it will be!
+		// This is done inside ReceiveRevocation().
 		l.processRemoteAdds(fwdPkg, adds)
 
 		// If the link failed during processing the adds, we must
@@ -1234,6 +1271,11 @@ func (l *channelLink) htlcManager() {
 		// A message from the switch was just received. This indicates
 		// that the link is an intermediate hop in a multi-hop HTLC
 		// circuit.
+		//
+		// NOTE(11/25/22): This does not necessarily mean that the HTLC
+		// update packet came from another link. The packet could have
+		// came from the Switch in the scenario where it fails back
+		// our attempt at a duplicate forward??
 		case pkt := <-l.downstream:
 			l.handleDownstreamPkt(pkt)
 
@@ -1415,12 +1457,17 @@ func (l *channelLink) handleDownstreamUpdateAdd(pkt *htlcPacket) error {
 	if !ok {
 		return errors.New("not an UpdateAddHTLC packet")
 	}
+	fmt.Println("[link.handleDownstreamUpdateAdd]: processing pkt in outgoing link!")
+
+	fmt.Printf("[link.handleDownstreamAdd(%s)]: received ADD from switch\n",
+		l.ShortChanID())
 
 	// If hodl.AddOutgoing mode is active, we exit early to simulate
 	// arbitrary delays between the switch adding an ADD to the
 	// mailbox, and the HTLC being added to the commitment state.
 	if l.cfg.HodlMask.Active(hodl.AddOutgoing) {
 		l.log.Warnf(hodl.AddOutgoing.Warning())
+		fmt.Println(fmt.Sprintf("%s\n", hodl.AddOutgoing.Warning()))
 		l.mailBox.AckPacket(pkt.inKey())
 		return nil
 	}
@@ -1502,6 +1549,7 @@ func (l *channelLink) handleDownstreamPkt(pkt *htlcPacket) {
 		_ = l.handleDownstreamUpdateAdd(pkt)
 
 	case *lnwire.UpdateFulfillHTLC:
+		fmt.Println("[link.handleDowntreamUpdateSettle]: processing pkt in (persp: add) incoming link!")
 		// If hodl.SettleOutgoing mode is active, we exit early to
 		// simulate arbitrary delays between the switch adding the
 		// SETTLE to the mailbox, and the HTLC being added to the
@@ -1569,6 +1617,7 @@ func (l *channelLink) handleDownstreamPkt(pkt *htlcPacket) {
 		l.updateCommitTxOrFail()
 
 	case *lnwire.UpdateFailHTLC:
+		fmt.Printf("[link.handleDownstreamUpdateFail]: processing pkt in link(%s)!\n", l.ShortChanID())
 		// If hodl.FailOutgoing mode is active, we exit early to
 		// simulate arbitrary delays between the switch adding a FAIL to
 		// the mailbox, and the HTLC being added to the commitment
@@ -1620,6 +1669,30 @@ func (l *channelLink) handleDownstreamPkt(pkt *htlcPacket) {
 		// within the switch.
 		htlc.ChanID = l.ChanID()
 		htlc.ID = pkt.incomingHTLCID
+
+		//  According to the spec, when failing an incoming HTLC:
+		//   - If `current_blinding_point` is set in the onion payload:
+		//     - MUST send an `update_fail_htlc` error using the
+		//       `invalid_onion_blinding` failure code with the `sha256_of_onion`
+		//       of the onion it received, for any local or downstream errors.
+		//     - SHOULD add a random delay before sending `update_fail_htlc`.
+
+		//   - If `blinding_point` is set in the incoming `update_add_htlc`:
+		//     - MUST send an `update_fail_malformed_htlc` error using the
+		//       `invalid_onion_blinding` failure code with the `sha256_of_onion`
+		//       of the onion it received, for any local or downstream errors.
+		//
+		// NOTE(11/20/22): All downstream and local errors which do not occur
+		// in the incoming link (ie: switch/outgoing link) must flow through
+		// this path of execution by the incoming link in order to be sent
+		// back towards the sender. This might prove a natural catch-all point
+		// to convert any error to InvalidOnionBlinding or add delay if we're
+		// the introduction node, however we do not have access to the
+		// information we would need to make such a decision at the moment.
+		// Also, the incoming link routinely responds directly (ie: not via
+		// this code path) to peers for local errors. Will we need a way to
+		// intercept and convert these?
+		// pkt.SomethingWhichIndicatesIntroductionNode
 
 		// We send the HTLC message to the peer which initially created
 		// the HTLC.
@@ -1729,6 +1802,7 @@ func (l *channelLink) handleUpstreamMsg(msg lnwire.Message) {
 	switch msg := msg.(type) {
 
 	case *lnwire.UpdateAddHTLC:
+		fmt.Println("[link.handleUpstreamUpdateAdd]: processing pkt in incoming link!")
 		// We just received an add request from an upstream peer, so we
 		// add it to our state machine, then add the HTLC to our
 		// "settle" list in the event that we know the preimage.
@@ -1743,6 +1817,7 @@ func (l *channelLink) handleUpstreamMsg(msg lnwire.Message) {
 			"assigning index: %v", msg.PaymentHash[:], index)
 
 	case *lnwire.UpdateFulfillHTLC:
+		fmt.Println("[link.handleUpstreamUpdateSettle]: processing pkt in (persp: add) outgoing link!")
 		pre := msg.PaymentPreimage
 		idx := msg.ID
 
@@ -1796,6 +1871,12 @@ func (l *channelLink) handleUpstreamMsg(msg lnwire.Message) {
 		go l.forwardBatch(false, settlePacket)
 
 	case *lnwire.UpdateFailMalformedHTLC:
+		fmt.Println("[link.handleUpstreamUpdateFail]: processing pkt in (persp: add) outgoing link!")
+		fmt.Printf("[link.handleUpstreamMsg]: Received UpdateFailMalformedHTLC! switch link count=%d\n", len(l.cfg.Switch.linkIndex))
+		// NOTE(11/16/22): Here is an example of converting errors
+		// received from peers into a more opaque (non-privacy-leaking)
+		// error. See if this helps us figure out how to do this for
+		// errors encountered on a blinded route!!
 		// Convert the failure type encoded within the HTLC fail
 		// message to the proper generic lnwire error code.
 		var failure lnwire.FailureMessage
@@ -1813,6 +1894,10 @@ func (l *channelLink) handleUpstreamMsg(msg lnwire.Message) {
 			failure = &lnwire.FailInvalidOnionKey{
 				OnionSHA256: msg.ShaOnionBlob,
 			}
+
+		case lnwire.CodeInvalidOnionBlinding:
+			failure = lnwire.NewInvalidOnionBlinding(msg.ShaOnionBlob[:])
+
 		default:
 			l.log.Warnf("unexpected failure code received in "+
 				"UpdateFailMailformedHTLC: %v", msg.FailureCode)
@@ -1850,6 +1935,14 @@ func (l *channelLink) handleUpstreamMsg(msg lnwire.Message) {
 		}
 
 	case *lnwire.UpdateFailHTLC:
+		fmt.Println("[link.handleUpstreamUpdateFail]: processing pkt in (persp: add) outgoing link!")
+		// NOTE(11/18/22): We just received a FAIL from our peer.
+		// The FAIL could be for an HTLC ADD which is part of a blinded
+		// route, but we have no way of knowing whether this is the case here!
+		// If the FAIL does correspond to an ADD which is part of a blinded
+		// route, then there is a chance that the failure reason risks
+		// leaking information about which node failed. We will need to
+		// protect against this somewhere.
 		idx := msg.ID
 		err := l.channel.ReceiveFailHTLC(idx, msg.Reason[:])
 		if err != nil {
@@ -1859,6 +1952,7 @@ func (l *channelLink) handleUpstreamMsg(msg lnwire.Message) {
 		}
 
 	case *lnwire.CommitSig:
+		fmt.Printf("[link.handleUpstreamMsg]: Received CommitmentSigned! switch link count=%d\n", len(l.cfg.Switch.linkIndex))
 		// Since we may have learned new preimages for the first time,
 		// we'll add them to our preimage cache. By doing this, we
 		// ensure any contested contracts watched by any on-chain
@@ -2218,6 +2312,7 @@ func (l *channelLink) updateCommitTx() error {
 	// circuits that have been opened, but unsuccessfully committed.
 	if l.cfg.HodlMask.Active(hodl.Commit) {
 		l.log.Warnf(hodl.Commit.Warning())
+		fmt.Printf(fmt.Sprintf("%s\n", hodl.Commit.Warning()))
 		return nil
 	}
 
@@ -2774,6 +2869,8 @@ func (l *channelLink) processRemoteSettleFails(fwdPkg *channeldb.FwdPkg,
 	}
 
 	l.log.Debugf("settle-fail-filter %v", fwdPkg.SettleFailFilter)
+	fmt.Printf("[processRemoteSettleFails(%s)]: processing settle/fails!\n", l.ShortChanID())
+	fmt.Printf("[processRemoteSettleFails(%s)]: settle-fail-filter %+v\n", l.ShortChanID(), fwdPkg.SettleFailFilter)
 
 	var switchPackets []*htlcPacket
 	for i, pd := range settleFails {
@@ -2882,9 +2979,21 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 	l.log.Tracef("processing %d remote adds for height %d",
 		len(lockedInHtlcs), fwdPkg.Height)
 
+	fmt.Printf("[processRemoteAdds(%s)]: processing adds! switch link count=%d\n",
+		l.ShortChanID(), len(l.cfg.Switch.linkIndex))
+	fmt.Printf("[processRemoteAdds(%s)]: forward-filter: %+v, ack-filter: %+v. switch link count=%d\n",
+		l.ShortChanID(), fwdPkg.FwdFilter, fwdPkg.AckFilter, len(l.cfg.Switch.linkIndex))
+
 	decodeReqs := make(
 		[]hop.DecodeHopIteratorRequest, 0, len(lockedInHtlcs),
 	)
+	// NOTE(11/25/22): When reprocessing a forwarding package, say
+	// after a restart, we redecrypt the onion packet for EVERY
+	// ADD, even those which we have decrypted before.
+	// Maybe our batch onion decoding is smart enough to not do the
+	// work twice? Or maybe we just decrypt all onion packets in the
+	// forwarding package again and let the switch prevent duplicate
+	// forwards.
 	for _, pd := range lockedInHtlcs {
 		switch pd.EntryType {
 
@@ -2900,6 +3009,12 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 				OnionReader:  onionReader,
 				RHash:        pd.RHash[:],
 				IncomingCltv: pd.Timeout,
+				// If this HTLC has an ephemeral blinding point,
+				// it will be needed to decrypt the onion as the
+				// onion encryptor is expected to have encrypted
+				// the onion to a blinded form of our node ID,
+				// rather than to our persistent node ID.
+				BlindingPoint: pd.BlindingPoint,
 			}
 
 			decodeReqs = append(decodeReqs, req)
@@ -2932,6 +3047,9 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 			// been committed by one of our commitment txns. ADDs
 			// in this state are waiting for the rest of the fwding
 			// package to get acked before being garbage collected.
+			fmt.Printf("[processRemoteAdds(%s)]: ADD comes from a previously seen forwarding package, "+
+				"and we have already internally acknowledged that we have received its (settle/fail) response!\n",
+				l.ShortChanID())
 			continue
 		}
 
@@ -2940,6 +3058,7 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 		// HTLC itself to decide if: we should forward it, cancel it,
 		// or are able to settle it (and it adheres to our fee related
 		// constraints).
+		fmt.Printf("[processRemoteAdds(%s)]: We can't say much about this ADD yet.\n", l.ShortChanID())
 
 		// Fetch the onion blob that was included within this processed
 		// payment descriptor.
@@ -2954,6 +3073,8 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 			// If we're unable to process the onion blob than we
 			// should send the malformed htlc error to payment
 			// sender.
+			// NOTE(11/18/22): If this is a blind hop, then this
+			// error might need to be converted to InvalidOnionBlinding.
 			l.sendMalformedHTLCError(pd.HtlcIndex, failureCode,
 				onionBlob[:], pd.SourceRef)
 
@@ -2964,6 +3085,8 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 
 		// Retrieve onion obfuscator from onion blob in order to
 		// produce initial obfuscation of the onion failureCode.
+		//
+		//
 		obfuscator, failureCode := chanIterator.ExtractErrorEncrypter(
 			l.cfg.ExtractErrorEncrypter,
 		)
@@ -2971,6 +3094,8 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 			// If we're unable to process the onion blob than we
 			// should send the malformed htlc error to payment
 			// sender.
+			// NOTE(11/18/22): If this is a blind hop, then this
+			// error might need to be converted to InvalidOnionBlinding.
 			l.sendMalformedHTLCError(
 				pd.HtlcIndex, failureCode, onionBlob[:], pd.SourceRef,
 			)
@@ -2999,6 +3124,8 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 			// for TLV payloads that also supports injecting invalid
 			// payloads. Deferring this non-trival effort till a
 			// later date
+			// NOTE(11/18/22): If this is a blind hop, then this
+			// error might need to be converted to InvalidOnionBlinding.
 			failure := lnwire.NewInvalidOnionPayload(failedType, 0)
 			l.sendHTLCError(
 				pd, NewLinkError(failure), obfuscator, false,
@@ -3011,8 +3138,67 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 
 		fwdInfo := pld.ForwardingInfo()
 
-		switch fwdInfo.NextHop {
-		case hop.Exit:
+		// NOTE(11/22/20): This is payment processing hot path.
+		// Avoid the allocation unless strictly necessary.
+		var nextBlindingPoint *btcec.PublicKey
+		var blindPayload *hop.BlindHopPayload
+
+		// Process the route blinding payload if present.
+		isBlindedHop := pld.RouteBlindingEncryptedData != nil
+		if isBlindedHop {
+			l.log.Debugf("received htlc(%x) for blinded route with "+
+				"route_blinding_data=%v",
+				pd.RHash, pld.RouteBlindingEncryptedData)
+
+			fmt.Printf("[processRemoteAdds(%s)]: received htlc(%x) for blinded route with "+
+				"route_blinding_data=%v\n",
+				l.ShortChanID(), pd.RHash, pld.RouteBlindingEncryptedData)
+
+			// Extract forwarding information for the blind hop and
+			// compute a blinding point for the next node in the route.
+			blindPayload, nextBlindingPoint, err =
+				l.processBlindHop(pd, pld, chanIterator.IsFinalHop())
+			if err != nil {
+				// Do we need to fail the link?
+				failure := lnwire.NewInvalidOnionBlinding(
+					pd.ShaOnionBlob[:],
+				)
+
+				// TODO(8/14/22):
+				// - Delay sending error if we are the
+				//   introduction node.
+				// - Go over error handling with a microscope as
+				//   apparently it is fraught with danger.
+				// - Should whether we currently support
+				//   processing blind hops affect the error we
+				//   return to senders?
+				l.sendMalformedHTLCError(pd.HtlcIndex, failure.Code(),
+					onionBlob[:], pd.SourceRef)
+
+				l.log.Errorf("unable to process blind hop: %v", err)
+				fmt.Printf("[processRemoteAdds(%s)]: unable to process blind hop: %v\n", l.ShortChanID(), err)
+
+				continue
+			}
+
+			// Overwrite the forwarding info from the top level
+			// onion payload with the information found in the
+			// route blinding payload.
+			// NOTE(11/15/22): This is compact but does incur
+			// the computation for the final hop even when it
+			// will not be required.
+			fwdInfo = blindPayload.ForwardingInfo(pd.Amount, pd.Timeout)
+
+		}
+
+		// NOTE(9/15/22): We return to our roots and consider a 32 0x00
+		// byte onion HMAC as the signal that we are the final hop.
+		// We cannot rely on the presence of short_channel_id in the top
+		// level onion TLV payload, as it will not be set for hops in a
+		// blinded route. We will need this knowledge for BOLT-04
+		// validation.
+		switch chanIterator.IsFinalHop() {
+		case true:
 			err := l.processExitHop(
 				pd, obfuscator, fwdInfo, heightNow, pld,
 			)
@@ -3044,15 +3230,21 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 				// expiring timelocks, but we expect that an
 				// error will be reproduced.
 				if !fwdPkg.FwdFilter.Contains(idx) {
+					fmt.Printf("[processRemoteAdds(%s)]: ADD comes from a previously seen forwarding package, "+
+						"and the ADD has NOT been forwarded to the Switch.\n", l.ShortChanID())
 					break
 				}
+
+				fmt.Printf("[processRemoteAdds(%s)]: ADD comes from a previously seen forwarding package, "+
+					"and the ADD has ALREADY been forwarded to the Switch once.\n", l.ShortChanID())
 
 				// Otherwise, it was already processed, we can
 				// can collect it and continue.
 				addMsg := &lnwire.UpdateAddHTLC{
-					Expiry:      fwdInfo.OutgoingCTLV,
-					Amount:      fwdInfo.AmountToForward,
-					PaymentHash: pd.RHash,
+					Expiry:        fwdInfo.OutgoingCTLV,
+					Amount:        fwdInfo.AmountToForward,
+					PaymentHash:   pd.RHash,
+					BlindingPoint: nextBlindingPoint,
 				}
 
 				// Finally, we'll encode the onion packet for
@@ -3078,6 +3270,7 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 					outgoingTimeout: fwdInfo.OutgoingCTLV,
 					customRecords:   pld.CustomRecords(),
 				}
+
 				switchPackets = append(
 					switchPackets, updatePacket,
 				)
@@ -3088,6 +3281,8 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 			// TODO(roasbeef): ensure don't accept outrageous
 			// timeout for htlc
 
+			fmt.Println("[processRemoteAdds]: ADD has NOT been forwarded to the Switch!")
+
 			// With all our forwarding constraints met, we'll
 			// create the outgoing HTLC using the parameters as
 			// specified in the forwarding info.
@@ -3095,6 +3290,18 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 				Expiry:      fwdInfo.OutgoingCTLV,
 				Amount:      fwdInfo.AmountToForward,
 				PaymentHash: pd.RHash,
+				// NOTE(11/18/22): Whether our node is the introduction
+				// node or an intermediate node in the blinded route,
+				// we set a (route) blinding point on the UpdateAddHTLC
+				// for the next hop in the incoming link. This means,
+				// as is, the outgoing link will not be able to determine
+				// whether we were the introduction node or intermediate
+				// node when processing errors from downstream in a blinded
+				// route. This doesn't matter if we don't handle errors there.
+				// According to spec, introduction vs. intermediate nodes
+				// are supposed to handle errors a bit differently. Do we
+				// need to persist whether we are intro/intermediate?
+				BlindingPoint: nextBlindingPoint,
 			}
 
 			// Finally, we'll encode the onion packet for the
@@ -3114,6 +3321,8 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 					true, hop.Source, cb,
 				)
 
+				// NOTE(11/18/22): If this is a blind hop, then this
+				// error might need to be converted to InvalidOnionBlinding.
 				l.sendHTLCError(
 					pd, NewLinkError(failure), obfuscator, false,
 				)
@@ -3143,6 +3352,8 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 					customRecords:   pld.CustomRecords(),
 				}
 
+				fmt.Printf("[processRemoteAdds(%s)]: ADD comes from a NEW forwarding package, "+
+					"and has NOT been forwarded to the Switch. Marking in memory that we will try forwarding\n", l.ShortChanID())
 				fwdPkg.FwdFilter.Set(idx)
 				switchPackets = append(switchPackets,
 					updatePacket)
@@ -3159,9 +3370,15 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 				"unable to set fwd filter: %v", err)
 			return
 		}
+		fmt.Printf("[processRemoteAdds(%s)]: Wrote our intent to forward this ADD to disk!\n", l.ShortChanID())
 	}
 
+	fmt.Printf("[processRemoteAdds(%s)]: after processing, forward-filter: %+v, ack-filter: %+v. switch link count=%d\n",
+		l.ShortChanID(), fwdPkg.FwdFilter, fwdPkg.AckFilter, len(l.cfg.Switch.linkIndex))
+
 	if len(switchPackets) == 0 {
+		fmt.Printf("[processRemoteAdds(%s)]: nothing to forward, replay: %t. switch link count=%d\n",
+			l.ShortChanID(), fwdPkg.State != channeldb.FwdStateLockedIn, len(l.cfg.Switch.linkIndex))
 		return
 	}
 
@@ -3169,6 +3386,9 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 
 	l.log.Debugf("forwarding %d packets to switch: replay=%v",
 		len(switchPackets), replay)
+
+	fmt.Printf("[processRemoteAdds(%s)]: forwarding %d packets to switch: replay=%v. switch link count=%d\n",
+		l.ShortChanID(), len(switchPackets), replay, len(l.cfg.Switch.linkIndex))
 
 	// NOTE: This call is made synchronous so that we ensure all circuits
 	// are committed in the exact order that they are processed in the link.
@@ -3205,6 +3425,10 @@ func (l *channelLink) processExitHop(pd *lnwallet.PaymentDescriptor,
 		failure := NewLinkError(
 			lnwire.NewFinalIncorrectHtlcAmount(pd.Amount),
 		)
+		// NOTE(11/18/22): If this is a blind hop, then this
+		// error might need to be converted to InvalidOnionBlinding.
+		// Unless we received the (route) blinding point in the
+		// onion payload, in which case we can send errors like normal!
 		l.sendHTLCError(pd, failure, obfuscator, true)
 
 		return nil
@@ -3220,6 +3444,10 @@ func (l *channelLink) processExitHop(pd *lnwallet.PaymentDescriptor,
 		failure := NewLinkError(
 			lnwire.NewFinalIncorrectCltvExpiry(pd.Timeout),
 		)
+		// NOTE(11/18/22): If this is a blind hop, then this
+		// error might need to be converted to InvalidOnionBlinding.
+		// Unless we received the (route) blinding point in the
+		// onion payload, in which case we can send errors like normal!
 		l.sendHTLCError(pd, failure, obfuscator, true)
 
 		return nil
@@ -3258,6 +3486,391 @@ func (l *channelLink) processExitHop(pd *lnwallet.PaymentDescriptor,
 
 	// Process the received resolution.
 	return l.processHtlcResolution(event, htlc)
+}
+
+// ValidateTopLevelPayloadAndAddMsg verifies that the top level onion TLV
+// payload and UpdateAddHTLC message are properly formed for blind hops
+// as described in BOLT-04.
+//
+// TODO(10/5/22): Decide whether to go with human readable error or
+// TLV type error (hop.ErrInvalidPayload) for validation errors.
+// Would we benefit from a human readable string? Who is consuming the error?
+// Is it weird to use another package's error type?
+func ValidateTopLevelPayloadAndAddMsg(p *hop.Payload, pd *lnwallet.PaymentDescriptor) error {
+
+	// Blind hops must contain an encrypted route blinding payload.
+	if p.RouteBlindingEncryptedData == nil {
+		return hop.ErrInvalidPayload{
+			Type:      record.RouteBlindingEncryptedDataOnionType,
+			Violation: hop.OmittedViolation,
+		}
+	}
+
+	// Do not accept HTLCs for which a blinding point has been set
+	// in both the onion TLV payload and the UpdateAddHTLC message.
+	if p.BlindingPoint != nil && pd.BlindingPoint != nil {
+		return hop.ErrInvalidPayload{
+			Type:      record.BlindingPointOnionType,
+			Violation: hop.OverloadedViolation,
+		}
+	}
+
+	// Do not accept HTLCs for which we have no blinding point in
+	// either the onion TLV payload or the UpdateAddHTLC message.
+	// The sender is trying to use route blinding, but we didn't receive
+	// the blinding point used to derive the key needed to decrypt the
+	// onion. The sender or the previous peer is buggy or malicious. (eclair)
+	if p.BlindingPoint == nil && pd.BlindingPoint == nil {
+		return hop.ErrInvalidPayload{
+			Type:      record.BlindingPointOnionType,
+			Violation: hop.OmittedViolation,
+		}
+	}
+
+	return nil
+}
+
+// ValidateTopLevelPayloadRouteBlinding, with knowledge of the contents
+// of the route blinding payload, validates that the top level onion TLV
+// payload is properly formed for blind hops as described in BOLT-04.
+//
+// NOTE: We now have validation to do across two levels of TLV payloads.
+// What is present in one payload effects our expectation of what is present
+// in the other payload. As a result, this stage of validation must wait
+// until after the route blinding payload is decrypted.
+func ValidateTopLevelPayloadRouteBlinding(pld *hop.Payload, isFinalHop bool) error {
+
+	// Validation for intermediate hops.
+	if !isFinalHop {
+		// We MUST not use ANY TLVs other than encrypted_recipient_data
+		// & current_blinding_point.
+		if pld.FwdInfo.AmountToForward != 0 {
+			return hop.ErrInvalidPayload{
+				Type:      record.AmtOnionType,
+				Violation: hop.IncludedViolation,
+			}
+		}
+		if pld.FwdInfo.OutgoingCTLV != 0 {
+			return hop.ErrInvalidPayload{
+				Type:      record.LockTimeOnionType,
+				Violation: hop.IncludedViolation,
+			}
+		}
+		// The top level onion payload should not list the next hop
+		// we should forward to. This will be found in the encrypted
+		// route blinding TLV payload.
+		if pld.FwdInfo.NextHop != hop.Exit {
+			return hop.ErrInvalidPayload{
+				Type:      record.NextHopOnionType,
+				Violation: hop.IncludedViolation,
+			}
+		}
+
+		if pld.TotalAmountMsat != 0 {
+			return hop.ErrInvalidPayload{
+				Type:      record.TotalAmountMsatOnionType,
+				Violation: hop.IncludedViolation,
+			}
+		}
+	}
+
+	// Validation for final hops.
+	if isFinalHop {
+		// We MUST use amt_to_forward & outgoing_cltv_value.
+		if pld.FwdInfo.AmountToForward == 0 {
+			return hop.ErrInvalidPayload{
+				Type:      record.AmtOnionType,
+				Violation: hop.OmittedViolation,
+				FinalHop:  true,
+			}
+		}
+		if pld.FwdInfo.OutgoingCTLV == 0 {
+			return hop.ErrInvalidPayload{
+				Type:      record.LockTimeOnionType,
+				Violation: hop.OmittedViolation,
+				FinalHop:  true,
+			}
+		}
+
+		// We MUST NOT use ANY TLVs other than encrypted_recipient_data,
+		// current_blinding_point, amt_to_forward, outgoing_cltv_value,
+		// & total_amount_msat.
+		if pld.FwdInfo.NextHop != hop.Exit {
+			return hop.ErrInvalidPayload{
+				Type:      record.NextHopOnionType,
+				Violation: hop.IncludedViolation,
+				FinalHop:  true,
+			}
+		}
+		// TODO(11/15/22): We MUST use total_amount_msat.
+		// if pld.TotalAmountMsat == 0 {
+		// 	return hop.ErrInvalidPayload{
+		// 		Type:      record.TotalAmountMsatOnionType,
+		// 		Violation: hop.OmittedViolation,
+		// 		FinalHop:  true,
+		// 	}
+		// }
+	}
+
+	// Validation common to both intermediate and final hops.
+	// Are we double dipping with validation testing done at
+	// payload parse time here?
+	if pld.MPP != nil { // checked at parse time!
+		return hop.ErrInvalidPayload{
+			Type:      record.MPPOnionType,
+			Violation: hop.IncludedViolation,
+		}
+	}
+	if pld.AMP != nil { // checked at parse time!
+		return hop.ErrInvalidPayload{
+			Type:      record.AMPOnionType,
+			Violation: hop.IncludedViolation,
+		}
+	}
+	if pld.Metadata() != nil {
+		return hop.ErrInvalidPayload{
+			Type:      record.MetadataOnionType,
+			Violation: hop.IncludedViolation,
+		}
+	}
+
+	return nil
+}
+
+// ValidateRouteBlindingPaymentConstraints verifies the incoming payment
+// satisfies the set of payment constraints specified by the creator of
+// the blinded route. The constraints are chosen by the route blinder in
+// order to limit an adversary's ability to unblind nodes within the route.
+//
+// NOTE: These are additional constraints on forwarded payments
+// above and beyond our usual forwarding policy.
+func ValidateRouteBlindingPaymentConstraints(p *hop.BlindHopPayload,
+	pd *lnwallet.PaymentDescriptor) error {
+
+	// Only validate payment constraints if included by the route blinder.
+	if p.PaymentConstraints == nil {
+		return nil
+	}
+
+	maxCltvExpiry := p.PaymentConstraints.MaxCltvExpiryDelta
+	minimumHtlcMsat := p.PaymentConstraints.HtlcMinimumMsat
+	// allowedFeatures := p.PaymentConstraints.AllowedFeatures
+
+	// If the builder of the blinded route included payment
+	// constraints then we should validate that our forwarding
+	// information satisfies them here.
+	// - MUST return an error if the expiry is greater than
+	// `encrypted_recipient_data.payment_constraints.max_cltv_expiry`.'
+	if pd.Timeout > maxCltvExpiry {
+		// TODO(10/5/22): Figure out if this error type
+		// works here. Would it not be better to provide info
+		// on how the value is insufficient?
+		return hop.ErrInvalidPayload{
+			Type:      record.LockTimeOnionType,
+			Violation: hop.InsufficientViolation,
+		}
+
+	}
+
+	// - MUST return an error if the amount is below
+	// `encrypted_recipient_data.payment_constraints.htlc_minimum_msat`.
+	if uint64(pd.Amount) < minimumHtlcMsat {
+		return hop.ErrInvalidPayload{
+			Type:      record.AmtOnionType,
+			Violation: hop.InsufficientViolation,
+		}
+	}
+
+	// TODO(8/14/22): at some point we may need to check
+	// that payments do not attempt to use features which
+	// have not been explicitly permitted.
+	// - MUST return an error if `encrypted_recipient_data.allowed_features.features` contains an unknown feature bit (even if it is odd)
+	// - MUST return an error if the payment uses a feature not included in `encrypted_recipient_data.payment_constraints.allowed_features`.
+	// UPDATE(8/24/22): This is being moved to its own TLV record.
+	// UPDATE(9/2/22): We need to make sure our node knows
+	// about ALL features, even the it's okay to be ODD ones.
+	// if allowedFeatures == nil {
+	// 	return fmt.Errorf("blind hop made use of " +
+	// 		"disallowed feature")
+	// }
+
+	return nil
+}
+
+// processBlindHop handles an htlc for which the link is a blinded hop.
+// As a processing node in the blinded portion of a route, we first decrypt
+// and parse the route blinding payload, then validate that the information
+// contained across the onion payload, route blinding payload,
+// and UpdateAddHTLC adheres to specification outlined in BOLT-04.
+// Finally, we provide the blinding point which the next routing node will need
+// in order to decrypt the onion. The blinding point is to be communicated with
+// the next hop in the route via TLV extension to the UpdateAddHtlc message.
+func (l *channelLink) processBlindHop(pd *lnwallet.PaymentDescriptor,
+	payload *hop.Payload,
+	isFinalHop bool) (*hop.BlindHopPayload, *btcec.PublicKey, error) {
+
+	// NOTE(9/30/22): Do not assume other network participant's will
+	// respect our feature vector. Enforce that it be respected.
+	// Only process blinded hops if we support doing so. Right now
+	// the link will reference a nil pointer if not supported.
+	// Ensure that our node has signaled support for route blinding
+	// before going any further. If not, return some generic/specific error?
+	// if l.cfg.BlindHopProcessor == nil {
+	if !l.cfg.RouteBlindingEnabled {
+		l.log.Debug("unable to process blind hop, we have not " +
+			"signaled support for route blinding")
+
+		return nil, nil, fmt.Errorf("link does not support blind hop processing")
+	}
+
+	// Validate that top level onion TLV payload adheres to the
+	// route blinding specification.
+	err := ValidateTopLevelPayloadAndAddMsg(payload, pd)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Grab the ephemeral blinding point as it's needed to
+	// decrypt the route blinding TLV payload.
+	var ephemeralBlindingPoint *btcec.PublicKey
+
+	// Processing nodes in the blinded route receive their
+	// ephemeral blinding point in the TLV extension of UpdateAddHTLC!
+	if pd.BlindingPoint != nil {
+		fmt.Println("[INTERMEDIATE NODE]:")
+		ephemeralBlindingPoint = pd.BlindingPoint
+	}
+
+	// The introduction node gets its ephemeral blinding
+	// point from the TLV onion payload!!
+	if payload.BlindingPoint != nil {
+		fmt.Println("[INTRODUCTION NODE]:")
+		ephemeralBlindingPoint = payload.BlindingPoint
+	}
+
+	// Decrypt the route blinding payload left for us
+	// by the builder of the blinded route.
+	// NOTE(8/8/22): Shared secret between routing node and blinded route
+	// builder is computed twice by sphinx package. Once for generating the
+	// routing node's blinded ID key pair needed to decrypt the onion packet
+	// and again for decrypting the inner route blinding payload.
+	// Would it be better to compute the shared secret once and pass as
+	// dependency to both functions?
+	blindedPayload := payload.RouteBlindingEncryptedData
+	routeBlindingPayload, err := l.cfg.DecryptBlindedPayload(
+		l.cfg.NodeKeyECDH, ephemeralBlindingPoint, blindedPayload,
+	)
+	if err != nil {
+		// There are two possibilities in this case:
+		//  - the blinding point is invalid: the sender or the previous node
+		//    is buggy or malicious. NOTE(9/22/22): This is true for intro nodes.
+		//    If the blinding point were invalid, we could not have decrypted
+		//    the onion payload (for non-intro hops).
+		//  - the encrypted data is invalid: the recipient is buggy or malicious
+		//    or the sender is including bogus route blinding data.
+		return nil, nil, err
+	}
+
+	// Parse routing information from route blinding TLV payload.
+	blindHopPayload, err := hop.NewBlindHopPayloadFromReader(
+		bytes.NewReader(routeBlindingPayload), isFinalHop,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Given the route blinding payload, validate that the top level
+	// onion payload adheres to BOLT-O4 specification.
+	err = ValidateTopLevelPayloadRouteBlinding(payload, isFinalHop)
+	if err != nil {
+		return blindHopPayload, nil, err
+	}
+
+	// Apply payment constraints as requested by the creator of the blinded
+	// route. These are additional constraints on forwarded payments above
+	// and beyond our usual forwarding policy.
+	err = ValidateRouteBlindingPaymentConstraints(blindHopPayload, pd)
+	if err != nil {
+		return blindHopPayload, nil, err
+	}
+
+	// TODO(11/22/20): If we encounter an unexpected path_id,
+	// drop the HTLC on the floor.
+	if err := ValidatePathID(blindHopPayload.PathID, pd.RHash); err != nil {
+		return blindHopPayload, nil, err
+	}
+
+	// If this is the last hop, we'll bail before computing the
+	// next route blinding point.
+	if isFinalHop {
+		l.log.Debug("final hop in blinded route, skipping computation of" +
+			"next ephemeral blinding point, amount and timelock")
+
+		return blindHopPayload, nil, nil
+	}
+
+	// Compute the ephemeral route blinding point for next node in route.
+	var nextBlindingPoint *secp256k1.PublicKey
+
+	// If the route blinder provided a blinding point override,
+	// we will send it to the downstream peer.
+	if blindHopPayload.BlindingPointOverride != nil {
+		nextBlindingPoint = blindHopPayload.BlindingPointOverride
+		return blindHopPayload, nextBlindingPoint, nil
+	}
+
+	// Otherwise, we'll compute the next blinding point ourselves.
+	nextBlindingPoint, err = l.cfg.NextBlindingPoint(
+		l.cfg.NodeKeyECDH, ephemeralBlindingPoint,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return blindHopPayload, nextBlindingPoint, nil
+}
+
+// ValidatePathID checks that the path_id is properly constructed.
+// We assume, for now, that any blinded routes we (LND) create will store
+// the preimage in the path_id field of the route blinding payload for
+// the final hop. In the future we might expand the information stored
+// in the path_id so that we can properly handle dummy hops.
+//
+// TODO(11/5/22): In order to support processing dummy hops in a blinded
+// route (for more privacy!), the HTLCSwitch/ChannelLink needs to support
+// processing the onion packet for a given HTLC multiple times!
+//
+// We MUST NOT accept payment to a blinded route in which we do not process
+// all dummy hops. Otherwise, probing senders, under the expectation that
+// we padded our blinded route with dummy hops, could experiment with
+// chopping off hops at the end of the route. If we accept the payment
+// anyways, then they decrease our anonymity set as they know know a closer
+// bound on the distance between recipient and introduction node.
+func ValidatePathID(pathID []byte, paymentHash lnwallet.PaymentHash) error {
+
+	// Only validate pathID if it's included by this hop.
+	if pathID == nil {
+		return nil
+	}
+
+	// We'll verify that the path ID data matches what we expect.
+	pathIDHash := sha256.Sum256(pathID)
+
+	log.Debugf("sha-256(path_id)=%v, payment hash=%v",
+		pathIDHash, paymentHash)
+
+	// Check that the path_id is the payment preimage.
+	if !bytes.Equal(pathIDHash[:], paymentHash[:]) {
+		log.Errorf("unexpected path_id=%v for payment, expected=%v",
+			pathIDHash, paymentHash,
+		)
+
+		// TODO(11/15/22): Create error types for blind hop processing?
+		var errUnexpectedPathID error = fmt.Errorf("unexpected path_id for payment")
+		return errUnexpectedPathID
+	}
+
+	return nil
 }
 
 // settleHTLC settles the HTLC on the channel.

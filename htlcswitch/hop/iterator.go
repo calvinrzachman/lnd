@@ -33,6 +33,12 @@ type Iterator interface {
 	// along with a failure code to signal if the decoding was successful.
 	ExtractErrorEncrypter(ErrorEncrypterExtracter) (ErrorEncrypter,
 		lnwire.FailCode)
+
+	// IsFinalHop returns a boolean indicating whether we are the final hop.
+	IsFinalHop() bool
+
+	// NOTE(9/23/22): Could also use a NextHop() and keep check for hop.Exit?
+	// NextHop() lnwire.ShortChannelID
 }
 
 // sphinxHopIterator is the Sphinx implementation of hop iterator which uses
@@ -90,15 +96,32 @@ func (r *sphinxHopIterator) HopPayload() (*Payload, error) {
 	// Otherwise, if this is the TLV payload, then we'll make a new stream
 	// to decode only what we need to make routing decisions.
 	case sphinx.PayloadTLV:
-		return NewPayloadFromReader(bytes.NewReader(
-			r.processedPacket.Payload.Payload,
-		))
+		return NewPayloadFromReader(
+			bytes.NewReader(r.processedPacket.Payload.Payload),
+			r.IsFinalHop(),
+		)
 
 	default:
 		return nil, fmt.Errorf("unknown sphinx payload type: %v",
 			r.processedPacket.Payload.Type)
 	}
 }
+
+// IsFinalHop leverages the processed sphinx packet's
+// 'Action' to distinguish whether we are the final hop.
+func (r *sphinxHopIterator) IsFinalHop() bool {
+	return int(r.processedPacket.Action) == 0
+}
+
+// func (r *sphinxHopIterator) NextHop() lnwire.ShortChannelID {
+//     if r.processedPacket.Action == sphinx.ExitNode {
+//             return Exit
+//     }
+
+//     // NOTE: iterator doesn't have access to the next hop.
+//     // in the case we're not the exit hop
+//     return Exit
+// }
 
 // ExtractErrorEncrypter decodes and returns the ErrorEncrypter for this hop,
 // along with a failure code to signal if the decoding was successful. The
@@ -170,7 +193,7 @@ func (p *OnionProcessor) DecodeHopIterator(r io.Reader, rHash []byte,
 	// case of a replay, an attacker is *forced* to use the same payment
 	// hash twice, thereby losing their money entirely.
 	sphinxPacket, err := p.router.ProcessOnionPacket(
-		onionPkt, rHash, incomingCltv,
+		onionPkt, rHash, incomingCltv, nil,
 	)
 	if err != nil {
 		switch err {
@@ -205,7 +228,7 @@ func (p *OnionProcessor) ReconstructHopIterator(r io.Reader, rHash []byte) (
 	// associated data in order to thwart attempts a replay attacks. In the
 	// case of a replay, an attacker is *forced* to use the same payment
 	// hash twice, thereby losing their money entirely.
-	sphinxPacket, err := p.router.ReconstructOnionPacket(onionPkt, rHash)
+	sphinxPacket, err := p.router.ReconstructOnionPacket(onionPkt, rHash, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -220,6 +243,10 @@ type DecodeHopIteratorRequest struct {
 	OnionReader  io.Reader
 	RHash        []byte
 	IncomingCltv uint32
+
+	// An ephemeral public key which is used to decrypt the onion
+	// when forwarding in the blinded portion of a route.
+	BlindingPoint *btcec.PublicKey
 }
 
 // DecodeHopIteratorResponse encapsulates the outcome of a batched sphinx onion
@@ -276,7 +303,7 @@ func (p *OnionProcessor) DecodeHopIterators(id []byte,
 		}
 
 		err = tx.ProcessOnionPacket(
-			seqNum, onionPkt, req.RHash, req.IncomingCltv,
+			seqNum, onionPkt, req.RHash, req.IncomingCltv, req.BlindingPoint,
 		)
 		switch err {
 		case nil:
@@ -363,6 +390,9 @@ func (p *OnionProcessor) DecodeHopIterators(id []byte,
 		if replays.Contains(uint16(i)) {
 			log.Errorf("unable to process onion packet: %v",
 				sphinx.ErrReplayedPacket)
+			fmt.Printf("unable to process onion packet: %v\n",
+				sphinx.ErrReplayedPacket)
+
 			resp.FailCode = lnwire.CodeTemporaryChannelFailure
 			continue
 		}
@@ -383,6 +413,8 @@ func (p *OnionProcessor) DecodeHopIterators(id []byte,
 func (p *OnionProcessor) ExtractErrorEncrypter(ephemeralKey *btcec.PublicKey) (
 	ErrorEncrypter, lnwire.FailCode) {
 
+	// TODO(9/21/22): Figure how this changes when handling
+	// errors for a blinded hop.
 	onionObfuscator, err := sphinx.NewOnionErrorEncrypter(
 		p.router, ephemeralKey,
 	)
