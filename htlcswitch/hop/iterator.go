@@ -51,6 +51,9 @@ type sphinxHopIterator struct {
 
 // makeSphinxHopIterator converts a processed packet returned from a sphinx
 // router and converts it into an hop iterator for usage in the link.
+//
+// NOTE(11/27/22): This "hop iterator" is assembled during onion
+// packet decryption by DecodeHopIterators().
 func makeSphinxHopIterator(ogPacket *sphinx.OnionPacket,
 	packet *sphinx.ProcessedPacket) *sphinxHopIterator {
 
@@ -67,6 +70,9 @@ var _ Iterator = (*sphinxHopIterator)(nil)
 // Encode encodes iterator and writes it to the writer.
 //
 // NOTE: Part of the HopIterator interface.
+//
+// NOTE(11/27/22): This serializes the onion packet we are
+// meant to deliver to the next hop in the route.
 func (r *sphinxHopIterator) EncodeNextHop(w io.Writer) error {
 	return r.processedPacket.NextPacket.Encode(w)
 }
@@ -109,6 +115,10 @@ func (r *sphinxHopIterator) HopPayload() (*Payload, error) {
 func (r *sphinxHopIterator) ExtractErrorEncrypter(
 	extracter ErrorEncrypterExtracter) (ErrorEncrypter, lnwire.FailCode) {
 
+	// NOTE(11/27/22): The sender includes the public key of the
+	// ephemeral key pair they chose to use for encrypting this onion.
+	// It is this key with which we will establish a shared secret
+	// via ECDH with our node ID key pair in order to decrypt the onion.
 	return extracter(r.ogPacket.EphemeralKey)
 }
 
