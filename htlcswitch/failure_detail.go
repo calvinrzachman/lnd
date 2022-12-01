@@ -95,3 +95,6 @@ func (fd OutgoingFailure) FailureString() string {
 		return "unknown failure detail"
 	}
 }
+
+// QUESTION(11/30/22): Why do we only have this for failures
+// in the outgoing link?

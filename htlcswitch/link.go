@@ -1380,10 +1380,13 @@ func (l *channelLink) processHtlcResolution(resolution invoices.HtlcResolution,
 
 		// Get the lnwire failure message based on the resolution
 		// result.
+		//
+		// NOTE(11/30/22): If we are a blind hop then we may
+		// need to override the failure message used here.
 		failure := getResolutionFailure(res, htlc.pd.Amount)
 
 		l.sendHTLCError(
-			htlc.pd, failure, htlc.obfuscator, true,
+			htlc.pd, failure, htlc.obfuscator, true, true,
 		)
 		return nil
 
@@ -2984,6 +2987,41 @@ func (l *channelLink) processRemoteSettleFails(fwdPkg *channeldb.FwdPkg,
 	}
 }
 
+type ErrorManager interface {
+}
+
+// NOTE(11/30/22): What information does the error manager
+// need in order to determine what to do with an error?
+type errorManager struct {
+}
+
+// NOTE(11/30/22): Do we need to track ADDs which have open circuits
+// and thus are awaiting a response? If a Settle/Fail is delivered
+// to a link via the Switch, then we can be sure that is is part of
+// a previously opened payment circuit. Thus, we can assume it is
+// valid and just. Each HTLC has its own obfuscator. Right now this
+// obfuscator is stored in the...? and extracted from the onion blob?
+// Since we already have a method of storing the key used for obfuscation,
+// we should NOT store it again! Instead the error manager should accept
+// the obfuscator as a input/dependency. What else does the error manager
+// need in order to perform the desired fucntions?
+/*
+
+	The error manager shall take care of the following:
+	1. obfuscating/encrypting the error (with what key? The blinding point? The blinded form
+	of our persisten node ID that we used for this particular HTLC?)
+		- which means sendHTLCError() might be updated to just
+		queueing the message for our peer and notifying any subscribers.
+	2. converting the error to InvalidOnionBlinding if necessary.
+	3. priority boolean indicating whether the failure should be given
+	   priority treatement amonst messages we queue to be sent to our peer,
+	   or, if for privacy reasons, we should mark the failure lower priority
+	   for forwarding so as to introduce an arbitrary delay.
+
+	In order to perform items 2 & 3 above, we will need
+
+*/
+
 // processRemoteAdds serially processes each of the Add payment descriptors
 // which have been "locked-in" by receiving a revocation from the remote party.
 // The forwarding package provided instructs how to process this batch,
@@ -3116,9 +3154,17 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 			// for TLV payloads that also supports injecting invalid
 			// payloads. Deferring this non-trival effort till a
 			// later date
+			//
+			// NOTE(11/30/22): If we are a blind hop then we may
+			// need to override the failure message used here.
 			failure := lnwire.NewInvalidOnionPayload(failedType, 0)
+
+			// NOTE(11/30/22): This asynchronously (ie: non-blocking)
+			// sends an UpdateFailHTLC message to our peer.
+			// It already has the obfuscator (key) which will be used
+			// to encrypt the error message.
 			l.sendHTLCError(
-				pd, NewLinkError(failure), obfuscator, false,
+				pd, NewLinkError(failure), obfuscator, false, true,
 			)
 
 			l.log.Errorf("unable to decode forwarding "+
@@ -3247,12 +3293,14 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 					return lnwire.NewTemporaryChannelFailure(upd)
 				}
 
+				// NOTE(11/30/22): If we are a blind hop then we may
+				// need to override the failure message used here.
 				failure := l.createFailureWithUpdate(
 					true, hop.Source, cb,
 				)
 
 				l.sendHTLCError(
-					pd, NewLinkError(failure), obfuscator, false,
+					pd, NewLinkError(failure), obfuscator, false, true,
 				)
 				continue
 			}
@@ -3362,10 +3410,16 @@ func (l *channelLink) processExitHop(pd *lnwallet.PaymentDescriptor,
 			"value: expected %v, got %v", pd.RHash,
 			pd.Amount, fwdInfo.AmountToForward)
 
+		// NOTE(11/30/22): If we are a blind hop then we may
+		// need to override the failure message used here.
 		failure := NewLinkError(
 			lnwire.NewFinalIncorrectHtlcAmount(pd.Amount),
 		)
-		l.sendHTLCError(pd, failure, obfuscator, true)
+
+		// failure, priority := l.generateError(failure, obfuscator)
+		// failureMsg, priority := l.generateError(failure, obfuscator)
+		// l.sendHTLCError(pd, NewLinkError(failureMsg), obfuscator, true)
+		l.sendHTLCError(pd, failure, obfuscator, true, true)
 
 		return nil
 	}
@@ -3377,10 +3431,12 @@ func (l *channelLink) processExitHop(pd *lnwallet.PaymentDescriptor,
 			"time-lock: expected %v, got %v",
 			pd.RHash[:], pd.Timeout, fwdInfo.OutgoingCTLV)
 
+		// NOTE(11/30/22): If we are a blind hop then we may
+		// need to override the failure message used here.
 		failure := NewLinkError(
 			lnwire.NewFinalIncorrectCltvExpiry(pd.Timeout),
 		)
-		l.sendHTLCError(pd, failure, obfuscator, true)
+		l.sendHTLCError(pd, failure, obfuscator, true, true)
 
 		return nil
 	}
@@ -3491,26 +3547,50 @@ func (l *channelLink) forwardBatch(replay bool, packets ...*htlcPacket) {
 
 // sendHTLCError functions cancels HTLC and send cancel message back to the
 // peer from which HTLC was received.
+//
+// QUESTION(11/30/22): Is this only ever called from the incoming link?
+// I think so given that we send a failure message to our peer which
+// would only make sense for the incoming link.
 func (l *channelLink) sendHTLCError(pd *lnwallet.PaymentDescriptor,
-	failure *LinkError, e hop.ErrorEncrypter, isReceive bool) {
+	failure *LinkError, e hop.ErrorEncrypter, isReceive bool, priority bool) {
 
+	// NOTE(11/30/22): Might move error obfuscation into error manager
+	// as the key we're going to need to use depends on whether this
+	// HTLC was blinded or not.
 	reason, err := e.EncryptFirstHop(failure.WireMessage())
 	if err != nil {
 		l.log.Errorf("unable to obfuscate error: %v", err)
 		return
 	}
 
+	// NOTE(11/30/22): This call can stay as it does not depend
+	// on whether the HTLC was blinded or not
 	err = l.channel.FailHTLC(pd.HtlcIndex, reason, pd.SourceRef, nil, nil)
 	if err != nil {
 		l.log.Errorf("unable cancel htlc: %v", err)
 		return
 	}
 
-	l.cfg.Peer.SendMessage(false, &lnwire.UpdateFailHTLC{
+	failMsg := &lnwire.UpdateFailHTLC{
 		ChanID: l.ChanID(),
 		ID:     pd.HtlcIndex,
 		Reason: reason,
-	})
+	}
+
+	// NOTE(11/30/22): Here we asynchronously (ie: non-blocking)
+	// send an UpdateFailHTLC message to our peer.
+	switch {
+	case !priority:
+		// We were instructed to send this failure to our peer,
+		// perhaps because this HTLC was part of a blinded route.
+		// This introduces arbitrary delay (ie: it depends entirely
+		// on what else is in the queue of messages to be sent to our
+		// peer). In the future we may require more control over
+		// the failure is scheduled.
+		l.cfg.Peer.SendMessageLazy(false, failMsg)
+	default:
+		l.cfg.Peer.SendMessage(false, failMsg)
+	}
 
 	// Notify a link failure on our incoming link. Outgoing htlc information
 	// is not available at this point, because we have not decrypted the
