@@ -243,9 +243,10 @@ func (p *OnionProcessor) ReconstructHopIterator(r io.Reader, rHash []byte) (
 // packet, perform sphinx replay detection, and schedule the entry for garbage
 // collection.
 type DecodeHopIteratorRequest struct {
-	OnionReader  io.Reader
-	RHash        []byte
-	IncomingCltv uint32
+	OnionReader    io.Reader
+	RHash          []byte
+	IncomingCltv   uint32
+	IncomingAmount lnwire.MilliSatoshi
 
 	// An ephemeral public key which is used to decrypt the onion
 	// when forwarding in the blinded portion of a route.

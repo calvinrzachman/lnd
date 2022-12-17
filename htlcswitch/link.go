@@ -3006,9 +3006,10 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 			onionReader := bytes.NewReader(pd.OnionBlob)
 
 			req := hop.DecodeHopIteratorRequest{
-				OnionReader:  onionReader,
-				RHash:        pd.RHash[:],
-				IncomingCltv: pd.Timeout,
+				OnionReader:    onionReader,
+				RHash:          pd.RHash[:],
+				IncomingCltv:   pd.Timeout,
+				IncomingAmount: pd.Amount,
 				// If this HTLC has an ephemeral blinding point,
 				// it will be needed to decrypt the onion as the
 				// onion encryptor is expected to have encrypted
