@@ -2291,6 +2291,10 @@ type LightningPayment struct {
 	// the public graph.
 	DestFeatures *lnwire.FeatureVector
 
+	// HopFeatures specifies the set of features we require that all
+	// intermediate routing nodes support during pathfinding.
+	HopFeatures *lnwire.FeatureVector
+
 	// PaymentAddr is the payment address specified by the receiver. This
 	// field should be a random 32-byte nonce presented in the receiver's
 	// invoice to prevent probing of the destination.

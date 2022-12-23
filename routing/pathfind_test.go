@@ -86,6 +86,15 @@ var (
 	unknownRequiredFeatures = lnwire.NewFeatureVector(
 		lnwire.NewRawFeatureVector(100), lnwire.Features,
 	)
+
+	routeBlindingFeatures = lnwire.NewFeatureVector(
+		lnwire.NewRawFeatureVector(
+			lnwire.TLVOnionPayloadRequired,
+			// NOTE(calvin): uncomment once rebase on top of:
+			// https://github.com/lightningnetwork/lnd/pull/8485
+			lnwire.RouteBlindingOptional,
+		), lnwire.Features,
+	)
 )
 
 var (
@@ -779,8 +788,11 @@ func TestPathFinding(t *testing.T) {
 		name: "destination tlv graph fallback",
 		fn:   runDestTLVGraphFallback,
 	}, {
-		name: "missing feature dependency",
-		fn:   runMissingFeatureDep,
+		name: "missing final hop feature dependency",
+		fn:   runMissingFinalHopFeatureDep,
+	}, {
+		name: "missing path feature dependency",
+		fn:   runPathFeatureDep,
 	}, {
 		name: "unknown required features",
 		fn:   runUnknownRequiredFeatures,
@@ -1947,10 +1959,150 @@ func runDestTLVGraphFallback(t *testing.T, useCache bool) {
 	assertExpectedPath(t, ctx.testGraphInstance.aliasMap, path, "luoji")
 }
 
-// runMissingFeatureDep asserts that we fail path finding when the
+// runRouteFeaturesDep asserts that we correctly find only those paths
+// in which each intermediate hop adheres to a vector of required features.
+// The test also asserts that we fail path finding when there is no such
+// path in which all hops support the features we require.
+func runPathFeatureDep(t *testing.T, useCache bool) {
+	// Create a simple graph with a single path to a destination node.
+	// Let this lone path lack support for a critical path wide feature
+	// our payment requires (ex: route blinding).
+	testChannels := []*testChannel{
+		// This path roasbeef --> elle --> calvin does NOT
+		// fully support route blinding.
+		asymmetricTestChannel("roasbeef", "elle", 100000,
+			&testChannelPolicy{
+				Expiry:   144,
+				MinHTLC:  1,
+				MaxHTLC:  100000000,
+				Features: routeBlindingFeatures,
+			},
+			&testChannelPolicy{
+				Expiry:  144,
+				MinHTLC: 1,
+				MaxHTLC: 100000000,
+			}, 0,
+		),
+		asymmetricTestChannel("elle", "calvin", 100000,
+			&testChannelPolicy{
+				Expiry:  144,
+				MinHTLC: 1,
+				MaxHTLC: 100000000,
+			},
+			&testChannelPolicy{
+				Expiry:   144,
+				MinHTLC:  1,
+				MaxHTLC:  100000000,
+				Features: routeBlindingFeatures,
+			}, 0,
+		),
+	}
+
+	// While in principle a path can require any feature, we have conceived
+	// of it with route blinding in mind. As such, calvin is attempting to
+	// find a blinded route to himself. He has selected roasbeef as the
+	// introduction node to the blinded route and is now attempting to find
+	// a route back home.
+	//
+	// Strangely the source node of the graph does not get any features
+	// right now. We should probably change this.
+	ctx := newPathFindingTestContext(t, useCache, testChannels, "calvin")
+
+	// Restrict pathfinding to only use edges which support route blinding.
+	ctx.restrictParams.HopFeatures = routeBlindingFeatures
+	ctx.restrictParams.DestFeatures = routeBlindingFeatures
+
+	roasbeef := ctx.keyFromAlias("roasbeef")
+	elle := ctx.keyFromAlias("elle")
+	calvin := ctx.keyFromAlias("calvin")
+
+	// Strangely, Elle's node does not support route blinding.
+	// Pathfinding should fail with no route to destination.
+	// Verify that our path finding algorithm correctly fails to find a
+	// valid path and returns an error indicating as much.
+	path, err := ctx.findPathFrom(roasbeef, calvin, 100)
+	require.Len(t, path, 0)
+	require.ErrorIs(t, err, errNoPathFound)
+
+	// Create a simple graph with two distinct paths to a destination node.
+	// Let the first path be cheaper but lack support for a critical path
+	// wide feature our payment requires (ex: route blinding).
+	testChannels = append(testChannels, []*testChannel{
+		// This path roasbeef ---> t-bast --> calvin supports
+		// route blinding the whole way.
+		asymmetricTestChannel("roasbeef", "t-bast", 100000,
+			&testChannelPolicy{
+				Expiry:   144,
+				FeeRate:  400,
+				MinHTLC:  1,
+				MaxHTLC:  100000000,
+				Features: routeBlindingFeatures,
+			},
+			&testChannelPolicy{
+				Expiry:   144,
+				FeeRate:  400,
+				MinHTLC:  1,
+				MaxHTLC:  100000000,
+				Features: routeBlindingFeatures,
+			}, 0,
+		),
+		asymmetricTestChannel("t-bast", "calvin", 100000,
+			&testChannelPolicy{
+				Expiry:   144,
+				FeeRate:  400,
+				MinHTLC:  1,
+				MaxHTLC:  100000000,
+				Features: routeBlindingFeatures,
+			},
+			&testChannelPolicy{
+				Expiry:   144,
+				FeeRate:  400,
+				MinHTLC:  1,
+				MaxHTLC:  100000000,
+				Features: routeBlindingFeatures,
+			}, 0,
+		),
+	}...)
+	ctx = newPathFindingTestContext(t, useCache, testChannels, "calvin")
+
+	// Restrict pathfinding to only edges which support route blinding.
+	ctx.restrictParams.HopFeatures = routeBlindingFeatures
+	ctx.restrictParams.DestFeatures = routeBlindingFeatures
+
+	path, err = ctx.findPathFrom(roasbeef, calvin, 100)
+	require.NoError(t, err, "path should have been found")
+
+	// Verify that our path finding algorithm correctly selects the path
+	// which fully supports our required features despite the fact that
+	// it is more expensive. The expected path is to calvin via t-bast:
+	//     roasbeef (source/intro) -> t-bast -> calvin
+	// Elle's node must not be used in the route.
+	assertExpectedPath(t, ctx.testGraphInstance.aliasMap, path,
+		"t-bast", "calvin")
+
+	// Now Elle updates her node to support route blinding.
+	//
+	// NOTE(9/10/22): There is a race here which can cause test flakes, as
+	// path finding may run before we receive Elle's updated feature vector.
+	elleNode, err := ctx.graph.FetchLightningNode(nil, elle)
+	require.NoError(t, err, "unable to find elle")
+	elleNode.Features = routeBlindingFeatures
+	err = ctx.graph.AddLightningNode(elleNode)
+	require.NoError(t, err, "unable to update elle's supported features")
+
+	// The pathfinding algorithm should now return the
+	// path to calvin via elle as it supports route blinding
+	// and is cheaper than the path via t-bast.
+	path, err = ctx.findPathFrom(roasbeef, calvin, 100)
+	require.NoError(t, err, "path should have been found")
+	assertExpectedPath(t, ctx.testGraphInstance.aliasMap,
+		path, "elle", "calvin")
+}
+
+// runMissingFinalHopFeatureDep asserts that we fail path finding when the
 // destination's features are broken, in that the feature vector doesn't signal
 // all transitive dependencies.
-func runMissingFeatureDep(t *testing.T, useCache bool) {
+func runMissingFinalHopFeatureDep(t *testing.T, useCache bool) {
 	testChannels := []*testChannel{
 		asymmetricTestChannel("roasbeef", "conner", 100000,
 			&testChannelPolicy{
@@ -2560,8 +2712,9 @@ func assertExpectedPath(t *testing.T, aliasMap map[string]route.Vertex,
 
 	for i, hop := range path {
 		if hop.policy.ToNodePubKey() != aliasMap[nodeAliases[i]] {
-			t.Fatalf("expected %v to be pos #%v in hop, instead "+
-				"%v was", nodeAliases[i], i,
+			t.Fatalf("expected %v (%v) to be pos #%v in hop, "+
+				"instead %v was", nodeAliases[i],
+				aliasMap[nodeAliases[i]], i,
 				hop.policy.ToNodePubKey())
 		}
 	}
@@ -3345,6 +3498,16 @@ func (c *pathFindingTestContext) findPath(target route.Vertex,
 	return dbFindPath(
 		c.graph, nil, c.bandwidthHints, &c.restrictParams,
 		&c.pathFindingConfig, c.source, target, amt, c.timePref, 0,
+	)
+}
+
+func (c *pathFindingTestContext) findPathFrom(source, target route.Vertex,
+	amt lnwire.MilliSatoshi) ([]*unifiedEdge,
+	error) {
+
+	return dbFindPath(
+		c.graph, nil, c.bandwidthHints, &c.restrictParams,
+		&c.pathFindingConfig, source, target, amt, c.timePref, 0,
 	)
 }
 
