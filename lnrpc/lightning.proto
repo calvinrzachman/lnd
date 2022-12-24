@@ -3093,6 +3093,13 @@ message QueryRoutesRequest {
     only, to 1 to optimize for reliability only or a value inbetween for a mix.
     */
     double time_pref = 18;
+
+    /*
+    HopFeatures is a feature vector describing the features each hop in a
+    route is required to support. An example use is requiring that every hop
+    in a blinded route advertise support for the route blinding feature bit.
+    */
+    repeated lnrpc.FeatureBit hop_features = 20;
 }
 
 message NodePair {
