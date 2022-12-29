@@ -3,6 +3,7 @@ package itest
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"github.com/lightningnetwork/lnd/lnrpc/routerrpc"
 	"github.com/lightningnetwork/lnd/lntemp"
 	"github.com/lightningnetwork/lnd/lntemp/node"
+	"github.com/lightningnetwork/lnd/lntest/wait"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/record"
 	"github.com/lightningnetwork/lnd/routing"
@@ -388,7 +390,7 @@ func (b *blindedForwardTest) setup() *routing.BlindedPayment {
 //
 //nolint:gomnd
 func (b *blindedForwardTest) createRouteToBlinded(paymentAmt int64,
-	route *routing.BlindedPayment) *lnrpc.Route {
+	route *routing.BlindedPayment) (*lnrpc.Route, []byte) {
 
 	intro := route.BlindedPath.IntroductionPoint.SerializeCompressed()
 	blinding := route.BlindedPath.BlindingPoint.SerializeCompressed()
@@ -447,7 +449,44 @@ func (b *blindedForwardTest) createRouteToBlinded(paymentAmt int64,
 	require.Greater(b.ht, len(resp.Routes), 0, "no routes")
 	require.Len(b.ht, resp.Routes[0].Hops, 3, "unexpected route length")
 
-	return resp.Routes[0]
+	// In order for the payment to go through the recipient (Dave) will
+	// need to have created an invoice.
+	// TODO(12/29/22): Do we need this function or would it be clearer
+	// to just create a single invoice by hand?
+
+	// We'll need to provide the payment hash used for the invoice
+	// to callers so that their payment can correctly be associated
+	// with this invoice.
+	preimage := make([]byte, 32)
+	_, err = rand.Read(preimage)
+	require.NoError(b.ht, err, "unable to generate preimage")
+	invoiceReq := &lnrpc.Invoice{
+		Memo:      "testing",
+		RPreimage: preimage,
+		Value:     int64(lnwire.MilliSatoshi(paymentAmt).ToSatoshis()),
+	}
+	invoice := b.dave.RPC.AddInvoice(invoiceReq)
+
+	// Reconstruct the payment address.
+	payAddr := invoice.PaymentAddr
+
+	lnrpcRoute := resp.Routes[0]
+
+	// Construct a closure that will set MPP fields on the route, which
+	// allows us to test MPP payments.
+	setMPPFields := func(r *lnrpc.Route) {
+		lastHop := r.Hops[len(r.Hops)-1]
+		lastHop.TlvPayload = true
+		lastHop.MppRecord = &lnrpc.MPPRecord{
+			PaymentAddr:  payAddr,
+			TotalAmtMsat: paymentAmt,
+		}
+	}
+
+	setMPPFields(lnrpcRoute)
+
+	return lnrpcRoute, invoice.RHash
+
 }
 
 // sendBlindedPayment dispatches a payment to the route provided. The streaming
@@ -727,24 +766,52 @@ func testForwardBlindedRoute(ht *lntemp.HarnessTest) {
 	defer testCase.cancel()
 
 	route := testCase.setup()
-	blindedRoute := testCase.createRouteToBlinded(100_000, route)
+	blindedRoute, paymentHash := testCase.createRouteToBlinded(100_000, route)
 
-	// Receiving via blinded routes is not yet supported, so Dave won't be
-	// able to process the payment.
-	//
-	// We have an interceptor at our disposal that will catch htlcs as they
-	// are forwarded (ie, it won't intercept a HTLC that dave is receiving,
-	// since no forwarding occurs). We initiate this interceptor with
-	// Carol, so that we can catch it and settle on the outgoing link to
-	// Dave. Once we hit the outgoing link, we know that we successfully
-	// parsed the htlc, so this is an acceptable compromise.
-	// Assert that our interceptor has exited without an error.
-	//
-	// TODO(12/28/22): Update this such that Dave can actually handle the
-	// payment. Then make sure that the assertion actually enforces that
-	// the payment was settled by Dave!
-	errChan := testCase.interceptFinalHop()
-	testCase.sendBlindedPayment(blindedRoute)
+	// // Receiving via blinded routes is not yet supported, so Dave won't be
+	// // able to process the payment.
+	// //
+	// // We have an interceptor at our disposal that will catch htlcs as they
+	// // are forwarded (ie, it won't intercept a HTLC that dave is receiving,
+	// // since no forwarding occurs). We initiate this interceptor with
+	// // Carol, so that we can catch it and settle on the outgoing link to
+	// // Dave. Once we hit the outgoing link, we know that we successfully
+	// // parsed the htlc, so this is an acceptable compromise.
+	// // Assert that our interceptor has exited without an error.
+	// errChan := testCase.interceptFinalHop()
+	// testCase.sendBlindedPayment(blindedRoute)
 
-	testCase.assertIntercepted(errChan)
+	// testCase.assertIntercepted(errChan)
+
+	sendReq := &routerrpc.SendToRouteRequest{
+		PaymentHash: paymentHash,
+		Route:       blindedRoute,
+	}
+
+	// Now that we can actually handle payments to a blinded route, we'll
+	// make sure that the assertion actually enforces that the payment
+	// was settled by Dave!
+	sendToRouteAndAssertSuccess(testCase.ht, testCase.ht.Alice, sendReq)
+	// sendClient := ht.Alice.RPC.SendToRouteV2(sendReq)
+}
+
+// sendToRouteAndAssertSuccess sends a payment to the given payment
+// and asserts that the payment completes successfully.
+func sendToRouteAndAssertSuccess(t *lntemp.HarnessTest, node *node.HarnessNode,
+	req *routerrpc.SendToRouteRequest) {
+
+	err := wait.NoError(func() error {
+		htlc := node.RPC.SendToRouteV2(req)
+		if htlc.Failure != nil {
+			t.Fatalf("received payment error: %v", htlc.Failure)
+		}
+
+		if htlc.Status != lnrpc.HTLCAttempt_SUCCEEDED {
+			return fmt.Errorf("payment failed: %v", htlc.Status)
+		}
+
+		return nil
+	}, defaultTimeout)
+	require.NoError(t.T, err)
+
 }

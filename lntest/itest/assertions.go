@@ -1201,6 +1201,35 @@ func sendAndAssertSuccess(t *harnessTest, node *lntest.HarnessNode,
 	return result
 }
 
+// // sendToRouteAndAssertSuccess sends a payment to the given payment
+// // and asserts that the payment completes successfully.
+// func sendToRouteAndAssertSuccess(t *harnessTest, node *lntest.HarnessNode,
+// 	req *routerrpc.SendToRouteRequest) {
+
+// 	ctxb := context.Background()
+// 	ctxt, cancel := context.WithTimeout(ctxb, defaultTimeout)
+// 	defer cancel()
+
+// 	err := wait.NoError(func() error {
+// 		htlc, err := node.RouterClient.SendToRouteV2(ctxt, req)
+// 		if err != nil {
+// 			return fmt.Errorf("unable to send payment: %v", err)
+// 		}
+
+// 		if htlc.Failure != nil {
+// 			t.Fatalf("received payment error: %v", htlc.Failure)
+// 		}
+
+// 		if htlc.Status != lnrpc.HTLCAttempt_SUCCEEDED {
+// 			return fmt.Errorf("payment failed: %v", htlc.Status)
+// 		}
+
+// 		return nil
+// 	}, defaultTimeout)
+// 	require.NoError(t.t, err)
+
+// }
+
 // sendAndAssertFailure sends the given payment requests and asserts that the
 // payment fails with the expected reason.
 func sendAndAssertFailure(t *harnessTest, node *lntest.HarnessNode,
