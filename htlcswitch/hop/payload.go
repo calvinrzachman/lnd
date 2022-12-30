@@ -222,14 +222,14 @@ func computeAmountToForward(incomingAmt lnwire.MilliSatoshi,
 
 	amt := uint64(incomingAmt)
 
-	// NOTE(10/17/22): In normal routing, we are given the amount to
-	// forward directly in the onion payload. We need only verify that
-	// the difference between incoming and outgoing amounts satisfies
-	// our fee requirement.
+	// NOTE(10/17/22): When forwarding a payment, the fee we take is
+	// calculated, not on the incoming amount, but rather on the amount
+	// we forward. We charge fees based on our own liquidity we are
+	// forwarding downstream.
 	//
-	// When forwarding a payment, the fee we take is calculated, not on
-	// the incoming amount, but rather on the amount we forward. We charge
-	// fees based on our own liquidity we are forwarding downstream.
+	// In normal routing, we are given the amount to forward directly in
+	// the onion payload. We need only verify that the difference between
+	// incoming and outgoing amounts satisfies our fee requirement.
 	// With route blinding, we are NOT given the amount to forward.
 	// This unintuitive looking formula comes from the fact that without
 	// the amount to forward, we cannot compute the fees taken directly.
