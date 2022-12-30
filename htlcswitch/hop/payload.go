@@ -33,6 +33,10 @@ const (
 	// InsufficientViolation indicates that the provided type does
 	// not satisfy constraints.
 	InsufficientViolation
+
+	// OverloadedViolation indicates that an expected type was provided
+	// in more than one place. (used only for double blinding point as of now).
+	OverloadedViolation
 )
 
 // String returns a human-readable description of the violation as a verb.
@@ -49,6 +53,9 @@ func (v PayloadViolation) String() string {
 
 	case InsufficientViolation:
 		return "insufficient"
+
+	case OverloadedViolation:
+		return "overloaded"
 
 	default:
 		return "unknown violation"
@@ -373,8 +380,20 @@ func validateBlindedRouteTypes(parsedTypes tlv.TypeMap,
 	case updateAddBlindingSet && onionBlindingSet:
 		return nil, ErrInvalidPayload{
 			Type:      record.BlindingPointOnionType,
-			Violation: IncludedViolation,
-			FinalHop:  false,
+			Violation: OverloadedViolation,
+			FinalHop:  blindingKit.lastHop,
+		}
+
+	// Do not accept HTLCs for which we have no blinding point in
+	// either the onion TLV payload or the UpdateAddHTLC message.
+	// The sender is trying to use route blinding, but we didn't
+	// receive the blinding point needed to decrypt the onion.
+	// The sender or the previous peer is buggy or malicious. (eclair)
+	case !updateAddBlindingSet && !onionBlindingSet:
+		return nil, ErrInvalidPayload{
+			Type:      record.BlindingPointOnionType,
+			Violation: OmittedViolation,
+			FinalHop:  blindingKit.lastHop,
 		}
 
 	case updateAddBlindingSet:
@@ -388,7 +407,7 @@ func validateBlindedRouteTypes(parsedTypes tlv.TypeMap,
 		return nil, ErrInvalidPayload{
 			Type:      record.EncryptedDataOnionType,
 			Violation: RequiredViolation,
-			FinalHop:  false,
+			FinalHop:  blindingKit.lastHop,
 		}
 	}
 
@@ -399,11 +418,18 @@ func validateBlindedRouteTypes(parsedTypes tlv.TypeMap,
 		record.EncryptedDataOnionType: {},
 		record.BlindingPointOnionType: {},
 	}
+	var requiredTLVs []tlv.Type
 
-	// The last hop is allowed some additional TLVs.
+	// The last hop is both allowed and requires some additional TLVs.
 	if blindingKit.lastHop {
 		allowedTLVs[record.AmtOnionType] = struct{}{}
 		allowedTLVs[record.LockTimeOnionType] = struct{}{}
+
+		requiredTLVs = []tlv.Type{
+			record.AmtOnionType,
+			record.LockTimeOnionType,
+			// TODO(1/26/23): add total_amt_msat as a required field for final hops.
+		}
 	}
 
 	for tlvType := range parsedTypes {
@@ -414,7 +440,20 @@ func validateBlindedRouteTypes(parsedTypes tlv.TypeMap,
 		return nil, ErrInvalidPayload{
 			Type:      tlvType,
 			Violation: IncludedViolation,
-			FinalHop:  false,
+			FinalHop:  blindingKit.lastHop,
+		}
+	}
+
+	// TODO(12/28/22): Validate that required fields are set!
+	// Does some of this need to wait until after we decrypt the
+	// route blinding payload?
+	for _, reqType := range requiredTLVs {
+		if _, ok := parsedTypes[reqType]; !ok {
+			return nil, ErrInvalidPayload{
+				Type:      reqType,
+				Violation: OmittedViolation,
+				FinalHop:  blindingKit.lastHop,
+			}
 		}
 	}
 
