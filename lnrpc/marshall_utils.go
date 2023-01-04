@@ -94,6 +94,8 @@ func MarshalUtxos(utxos []*lnwallet.Utxo, activeNetParams *chaincfg.Params) (
 		case lnwallet.NestedWitnessPubKey:
 			addrType = AddressType_NESTED_PUBKEY_HASH
 
+		// So here is where our default send change to taproot address
+		// gets its address type.
 		case lnwallet.TaprootPubkey:
 			addrType = AddressType_TAPROOT_PUBKEY
 
