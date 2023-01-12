@@ -671,6 +671,9 @@ func (s *Switch) ForwardPackets(linkQuit chan struct{},
 		numSent int
 	)
 
+	fmt.Printf("[switch.ForwardPackets(%s)]: Forwarding %d packets! switch link count=%d\n",
+		"this", len(packets), len(s.linkIndex))
+
 	// No packets, nothing to do.
 	if len(packets) == 0 {
 		return nil
@@ -705,6 +708,15 @@ func (s *Switch) ForwardPackets(linkQuit chan struct{},
 	for _, packet := range packets {
 		switch htlc := packet.htlc.(type) {
 		case *lnwire.UpdateAddHTLC:
+			fmt.Printf("[switch.ForwardPackets()]: encountered ADD! switch link count=%d\n",
+				len(s.linkIndex))
+
+			// NOTE(11/25/22): The onion error encryptor is serialized
+			// as part of the payment circuit. The packet will have
+			// its error encryptor set. Perhaps the switch's state,
+			// being more central than either incoming/outgoing link,
+			// is the right place for this and something related to
+			// blind hop error processing.
 			circuit := newPaymentCircuit(&htlc.PaymentHash, packet)
 			packet.circuit = circuit
 			circuits = append(circuits, circuit)
@@ -819,6 +831,8 @@ func (s *Switch) logFwdErrs(num *int, wg *sync.WaitGroup, fwdChan chan error) {
 			if err != nil {
 				log.Errorf("Unhandled error while reforwarding htlc "+
 					"settle/fail over htlcswitch: %v", err)
+				fmt.Printf("Unhandled error while reforwarding htlc "+
+					"settle/fail over htlcswitch: %v\n", err)
 			}
 		case <-s.quit:
 			log.Errorf("unable to forward htlc packet " +
@@ -1274,6 +1288,10 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 			return s.failAddPacket(packet, linkErr)
 		}
 
+		fmt.Printf("[switch.handlePacketForward()]: forwarding incoming HTLC(%x) via "+
+			"outgoing link (id=%v). switch link count=%d\n",
+			htlc.PaymentHash[:10], packet.outgoingChanID, len(s.linkIndex))
+
 		// Send the packet to the destination channel link which
 		// manages the channel.
 		packet.outgoingChanID = destination.ShortChanID()
@@ -1372,6 +1390,9 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 			go s.handleLocalResponse(packet)
 			return nil
 		}
+
+		// outgoingLink, _ := s.getLinkByShortID(packet.outgoingChanID)
+		// incomingLink, _ := s.getLinkByShortID(packet.incomingChanID)
 
 		// Check to see that the source link is online before removing
 		// the circuit.

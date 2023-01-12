@@ -1029,6 +1029,7 @@ func createClusterChannels(t *testing.T, aliceToBob, bobToCarol btcutil.Amount) 
 	}
 
 	restoreFromDb := func() (*clusterChannels, error) {
+		fmt.Println("[test setup utility]: restoring all channels from DB")
 
 		a2b, err := aliceChannel.restore()
 		if err != nil {
@@ -1309,6 +1310,7 @@ func (h *hopNetwork) createChannelLink(server, peer *mockServer,
 			HtlcNotifier:            server.htlcSwitch.cfg.HtlcNotifier,
 			GetAliases:              getAliases,
 			BlindHopProcessor:       &mockBlindHopProcessor{},
+			// NodeKeyECDH:             ,
 		},
 		channel,
 	)

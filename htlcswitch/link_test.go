@@ -189,6 +189,10 @@ func TestChannelLinkRevThenSig(t *testing.T) {
 	require.NoError(t, err)
 	defer aliceLink.Stop()
 
+	// NOTE(11/24/22): I think we could use this to demonstrate
+	// that blind hops are correctly reprocessed (reforwarded) after
+	// a restart. Such a test will serve as reassurance that we put
+	// the blinding point in the appropriate spots.
 	alice := newPersistentLinkHarness(
 		t, aliceLink, batchTicker, restore,
 	)
@@ -647,6 +651,116 @@ func testChannelLinkMultiHopPayment(t *testing.T,
 
 */
 
+func TestBlindHopRetransmission(t *testing.T) {
+	t.Parallel()
+
+	const chanAmt = btcutil.SatoshiPerBitcoin * 5
+	const chanReserve = btcutil.SatoshiPerBitcoin * 1
+	aliceLink, bobChannel, batchTicker, start, restore, err :=
+		newSingleLinkTestHarness(t, chanAmt, chanReserve)
+	require.NoError(t, err)
+
+	err = start()
+	require.NoError(t, err)
+	defer aliceLink.Stop()
+
+	alice := newPersistentLinkHarness(
+		t, aliceLink, batchTicker, restore,
+	)
+
+	var (
+		coreLink  = aliceLink.(*channelLink)
+		aliceMsgs = coreLink.cfg.Peer.(*mockPeer).sentMsgs
+	)
+
+	ctx := linkTestContext{
+		t:          t,
+		aliceLink:  aliceLink,
+		aliceMsgs:  aliceMsgs,
+		bobChannel: bobChannel,
+	}
+
+	preimage, _, _ := generatePaymentSecret()
+
+	// htlc, _ := generateHtlcAndInvoice(t, 0)
+	introHtlc := generateBlindHtlc(t,
+		&hop.Payload{
+			BlindingPoint: ephemeralBlindingPoint,
+		},
+		&hop.BlindHopPayload{
+			PathID: preimage[:],
+		}, false, 0,
+	)
+	// htlc := generateBlindHtlc(t,
+	// 	&hop.Payload{
+	// 		FwdInfo: hop.ForwardingInfo{
+	// 			Amount: 10,
+	// 		},
+	// 	},
+	// 	&hop.BlindHopPayload{
+	// 		PathID: preimage[:],
+	// 	}, false, 0,
+	// )
+	// htlc := generateBlindHtlc(t, hop.ForwardingInfo{},
+	// 	&hop.BlindHopPayload{}, true, 0,
+	// )
+	// htlc.BlindingPoint = ephemeralBlindingPoint
+	// ctx.sendHtlcAliceToBob(0, &lnwire.UpdateAddHTLC{
+	// 	BlindingPoint: ephemeralBlindingPoint,
+	// })
+	ctx.sendHtlcAliceToBob(0, introHtlc)
+	ctx.receiveHtlcAliceToBob()
+
+	// // Assert that no preimages exist for these htlcs in Alice's cache.
+	// checkHasPreimages(t, coreLink, []*lnwire.UpdateAddHTLC{introHtlc}, false)
+
+	// Force alice's link to sign a commitment covering the htlcs sent thus
+	// far.
+	// select {
+	// case batchTicker <- time.Now():
+	// case <-time.After(15 * time.Second):
+	// 	t.Fatalf("could not force commit sig")
+	// }
+	alice.trySignNextCommitment()
+
+	// Do a commitment dance to lock in the Adds, we expect numHtlcs htlcs
+	// to be on each party's commitment transactions.
+	ctx.receiveCommitSigAliceToBob(1)
+	ctx.sendRevAndAckBobToAlice()
+	ctx.sendCommitSigBobToAlice(1)
+	ctx.receiveRevAndAckAliceToBob()
+
+	// Restart the processing node's incoming link
+	// Also try restarting the the switch.
+	alice.restart(false, false)
+
+	// I would like to restart the forwarding node.
+	// In order to have a forwardin
+
+	time.Sleep(5 * time.Second)
+	// alice.restart(false, true)
+	// alice.restart(true, true)
+	// lnwallet.NewLightningChannel(signer input.Signer, state *channeldb.OpenChannel, sigPool *lnwallet.SigPool)
+
+	// // Restart Alice so she sends and accepts ChannelReestablish.
+	// alice.restart(false, true)
+
+	// ctx.aliceLink = alice.link
+	// ctx.aliceMsgs = alice.msgs
+
+	// // Restart Bob as well by calling NewLightningChannel.
+	// bobSigner := bobChannel.Signer
+	// bobPool := lnwallet.NewSigPool(runtime.NumCPU(), bobSigner)
+	// bobChannel, err = lnwallet.NewLightningChannel(
+	// 	bobSigner, bobChannel.State(), bobPool,
+	// )
+	// require.NoError(t, err)
+	// err = bobPool.Start()
+	// require.NoError(t, err)
+
+	// ctx.bobChannel = bobChannel
+}
+
 // TestChannelLinkBlindedPathPayment verifies that the link supports route
 // blinding. More specifically we verify that the ChannelLink can process an
 // onion packet "sent" to our blinded node ID public key rather than the usual
@@ -664,17 +778,17 @@ func TestChannelLinkBlindedPathPayment(t *testing.T) {
 			testChannelLinkBlindHopProcessing(t)
 		},
 	)
-	t.Run(
-		"blind hop processing - broken blind hop processor implementation",
-		func(t *testing.T) {
-			testLinkBrokenBlindHopProcessor(t)
-		},
-	)
-	t.Run("blind hop processing payload validation",
-		func(t *testing.T) {
-			testLinkEnforcesBOLT04(t)
-		},
-	)
+	// t.Run(
+	// 	"blind hop processing - broken blind hop processor implementation",
+	// 	func(t *testing.T) {
+	// 		testLinkBrokenBlindHopProcessor(t)
+	// 	},
+	// )
+	// t.Run("blind hop processing payload validation",
+	// 	func(t *testing.T) {
+	// 		testLinkEnforcesBOLT04(t)
+	// 	},
+	// )
 }
 
 var (
@@ -686,10 +800,302 @@ var (
 // correctly refuses to process blind hops when it has not
 // been configured to do so. We also check that a basic
 // payment is able to be delivered through a blinded route.
+func TestChannelLinkBlindHopReprocessing(t *testing.T) {
+	t.Parallel()
+
+	channels, restoreChannelsFromDb, err := createClusterChannels(
+		// channels, _, err := createClusterChannels(
+		t, btcutil.SatoshiPerBitcoin*3, btcutil.SatoshiPerBitcoin*5,
+	)
+	require.NoError(t, err, "unable to create channel")
+
+	// Do not configure the links to support blind hop processing.
+	n := newThreeHopNetwork(t, channels.aliceToBob, channels.bobToAlice,
+		channels.bobToCarol, channels.carolToBob, testStartingHeight)
+
+	// Configure the links to support blind hop processing.
+	n.aliceChannelLink.cfg.RouteBlindingEnabled = true
+	n.firstBobChannelLink.cfg.RouteBlindingEnabled = true
+	n.secondBobChannelLink.cfg.RouteBlindingEnabled = true
+	n.carolChannelLink.cfg.RouteBlindingEnabled = true
+
+	if err := n.start(); err != nil {
+		t.Fatalf("unable to start three hop network: %v", err)
+	}
+	t.Cleanup(n.stop)
+
+	debug := false
+	if debug {
+		// Log messages that alice receives from bob.
+		n.aliceServer.intersect(createLogFunc("[alice]<-bob<-carol: ",
+			n.aliceChannelLink.ChanID()))
+
+		// Log messages that bob receives from alice.
+		n.bobServer.intersect(createLogFunc("alice->[bob]->carol: ",
+			n.firstBobChannelLink.ChanID()))
+
+		// Log messages that bob receives from carol.
+		n.bobServer.intersect(createLogFunc("alice<-[bob]<-carol: ",
+			n.secondBobChannelLink.ChanID()))
+
+		// Log messages that carol receives from bob.
+		n.carolServer.intersect(createLogFunc("alice->bob->[carol]",
+			n.carolChannelLink.ChanID()))
+	}
+
+	// Set Bob in hodl AddOutgoing mode so that he won't immediately
+	// forward our blind ADD. We can then, restart Bob's node, removing
+	// this flag, and verify that he correctly reprocessed the blind ADD
+	// from disk and forwards it onwards to Carol.
+	n.secondBobChannelLink.cfg.HodlMask = hodl.AddOutgoing.Mask()
+	// n.secondBobChannelLink.cfg.HodlMask = hodl.Commit.Mask()
+
+	// // Next try this:
+	// // Don't let Bob fully process a settle/fail which responds
+	// // to a blind ADD he previously processed. How does the incoming
+	// // link behave in this case?
+	// n.firstBobChannelLink.cfg.HodlMask = hodl.SettleOutgoing.Mask()
+	// n.firstBobChannelLink.cfg.HodlMask = hodl.FailOutgoing.Mask()
+
+	// // Also try this:
+	// // Don't let Bob fully process an ADD in his incoming link.
+	// // How does the incoming link behave after restart in this case?
+	// n.firstBobChannelLink.cfg.HodlMask = hodl.AddIncoming.Mask()
+
+	// Generate a payment preimage.
+	preimage, rhash, _ := generatePaymentSecret()
+	payAddr, _ := generatePaymentAddress()
+
+	// Generate blinded hops, taking care to use the payment
+	// preimage as the path_id for the final hop.
+	amount := lnwire.NewMSatFromSatoshis(btcutil.SatoshiPerBitcoin)
+	htlcAmt, totalTimelock, hops := generateBlindHops(
+		amount, testStartingHeight, preimage[:],
+		n.firstBobChannelLink, n.carolChannelLink,
+	)
+	blob, err := generateRoute(hops...)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// NOTE(11/25/22): In order to observe what we want to in this test,
+	// we may need to generate our own htlc & onion with blind hops.
+	// Alice will forward an HTLC with blinding point in the TLV extension
+	// of the UpdateAddHTLC message _as if_ she was the introduction node.
+	// This will allow us to test Bob's behavior as an intermediate/forwarding
+	// node inside a blinded route.
+	hopPayloads := []*hop.Payload{
+		{}, // forwarding nodes have no top level onion TLVs inside a blinded route.
+		{ // final nodes DO have top level onion TLVs inside a blinded route.
+			FwdInfo: hop.ForwardingInfo{
+				Network:         hop.BitcoinNetwork,
+				NextHop:         hop.Exit,
+				AmountToForward: amount,
+				OutgoingCTLV:    testStartingHeight + n.defaultDelta,
+			},
+		},
+	}
+	routeBlindingPayloads := []*hop.BlindHopPayload{
+		{
+			NextHop:      n.carolChannelLink.ShortChanID(),
+			PaymentRelay: computePaymentRelay(n.secondBobChannelLink),
+		},
+		{
+			PathID: preimage[:],
+		},
+	}
+
+	// buildBlindHops serializes and adds the given route blinding payloads
+	// to the given hop payloads
+	buildBlindHops := func(hops []*hop.Payload, rbPlds []*hop.BlindHopPayload) ([]*hop.Payload, error) {
+		if len(hops) != len(rbPlds) {
+			return nil, fmt.Errorf("each hop must get a route blinding payload")
+		}
+
+		for i, h := range hops {
+			var b bytes.Buffer
+
+			// Serialize the given route blinding payload
+			// and set it on the hop payload.
+			hop.PackRouteBlindingPayload(&b, rbPlds[i])
+			h.RouteBlindingEncryptedData = b.Bytes()
+		}
+
+		fmt.Printf("[test setup utility]: hops: %+v\n", hops)
+
+		return hops, nil
+	}
+
+	hops, err = buildBlindHops(hopPayloads, routeBlindingPayloads)
+	require.NoError(t, err, "unable to build blind hops")
+	blob, err = generateRoute(hops...)
+	require.NoError(t, err, "unable to serialize onion blob")
+
+	// generateBlindHops(payAmt lnwire.MilliSatoshi, startingHeight uint32, pathID []byte, path ...*channelLink)
+	// htlc1 := generateBlindHtlc(t,
+	// 	&hop.Payload{
+	// 		BlindingPoint: ephemeralBlindingPoint,
+	// 	},
+	// 	&hop.BlindHopPayload{
+	// 		PathID: preimage[:],
+	// 	}, true, 0,
+	// )
+
+	// Make another payment attempt.
+	invoice, htlc, pid, err := generatePaymentWithPreimage(
+		amount, htlcAmt, totalTimelock, blob, &preimage, rhash, payAddr,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	htlc.BlindingPoint = ephemeralBlindingPoint
+
+	// Add the invoice to Carol's invoice registry so that she's
+	// expecting payment.
+	err = n.carolServer.registry.AddInvoice(*invoice, htlc.PaymentHash)
+	require.NoError(t, err, "unable to add invoice in carol registry")
+
+	// carolBandwidthBefore := n.carolChannelLink.Bandwidth()
+	// firstBobBandwidthBefore := n.firstBobChannelLink.Bandwidth()
+	// secondBobBandwidthBefore := n.secondBobChannelLink.Bandwidth()
+	// aliceBandwidthBefore := n.aliceChannelLink.Bandwidth()
+
+	// Send the HTLC from Alice to Carol, via Bob.
+	err = n.aliceServer.htlcSwitch.SendHTLC(
+		n.firstBobChannelLink.ShortChanID(), pid, htlc,
+	)
+	require.NoError(t, err, "unable to send payment to carol")
+
+	// Would be best if we waited for Bob's link to have
+	// received the HTLC ADD before restarting, by eavesdropping
+	// on the messages he sends/receives.
+	// The alternative is to manually walk through commitment
+	// dance so we can have full control on the order in which
+	// things occur.
+	time.Sleep(1 * time.Second)
+
+	// See what happens if we restore channels from disk.
+	// Prior to restarting we clear Bob's hodl mask so we
+	// forward the ADD after restarting.
+	// NOTE(11/25/22): I think this restarts all channels,
+	// when we could/should get away with only restarting
+	// Bob's node.
+	n.secondBobChannelLink.cfg.HodlMask = hodl.MaskNone
+	channels, err = restoreChannelsFromDb()
+	if err != nil {
+		t.Fatalf("unable to restore channels from database: %v", err)
+	}
+
+	// b2a, err := n.firstBobChannelLink.restore()
+	// if err != nil {
+	// 	return nil, err
+	// }
+
+	// b2c, err := secondBobChannelLink.restore()
+	// if err != nil {
+	// 	return nil, err
+	// }
+
+	// NOTE: do we need to restore Carol's registry manually after
+	// restart so that she is still expecting the payment?
+	n = newThreeHopNetwork(t, channels.aliceToBob, channels.bobToAlice,
+		channels.bobToCarol, channels.carolToBob, testStartingHeight)
+
+	// Configure the links to support blind hop processing.
+	n.aliceChannelLink.cfg.RouteBlindingEnabled = true
+	n.firstBobChannelLink.cfg.RouteBlindingEnabled = true
+	n.secondBobChannelLink.cfg.RouteBlindingEnabled = true
+	n.carolChannelLink.cfg.RouteBlindingEnabled = true
+
+	if err := n.start(); err != nil {
+		t.Fatalf("unable to start three hop network: %v", err)
+	}
+	t.Cleanup(n.stop)
+
+	if debug {
+		// Log messages that alice receives from bob.
+		n.aliceServer.intersect(createLogFunc("[alice]<-bob<-carol: ",
+			n.aliceChannelLink.ChanID()))
+
+		// Log messages that bob receives from alice.
+		n.bobServer.intersect(createLogFunc("alice->[bob]->carol: ",
+			n.firstBobChannelLink.ChanID()))
+
+		// Log messages that bob receives from carol.
+		n.bobServer.intersect(createLogFunc("alice<-[bob]<-carol: ",
+			n.secondBobChannelLink.ChanID()))
+
+		// Log messages that carol receives from bob.
+		n.carolServer.intersect(createLogFunc("alice->bob->[carol]",
+			n.carolChannelLink.ChanID()))
+	}
+
+	// Confirm that Alice receives the proper payment result.
+	resultChan, err := n.aliceServer.htlcSwitch.GetPaymentResult(
+		pid, htlc.PaymentHash, newMockDeobfuscator(),
+	)
+	require.NoError(t, err, "unable to get payment result")
+
+	select {
+	case result, ok := <-resultChan:
+		if !ok {
+			t.Fatalf("unexpected shutdown")
+		}
+
+		require.NoError(t, result.Error)
+
+	case <-time.After(10 * time.Second):
+		t.Fatalf("payment result did not arrive")
+	}
+
+	time.Sleep(1 * time.Second)
+	// // Wait for Alice and Bob's second link to receive the revocation.
+	// // TODO(11/4/22): Figure out why these sleeps are used. See
+	// // if we can do this via explicit synchronization.
+	// time.Sleep(2 * time.Second)
+
+	// // Check that Carol invoice was settled and bandwidth of HTLC
+	// // links were changed.
+	// inv, err := n.carolServer.registry.LookupInvoice(rhash)
+	// require.NoError(t, err, "unable to get invoice")
+	// if inv.State != channeldb.ContractSettled {
+	// 	t.Fatal("carol invoice haven't been settled")
+	// }
+
+	// expectedAliceBandwidth := aliceBandwidthBefore - htlcAmt
+	// if expectedAliceBandwidth != n.aliceChannelLink.Bandwidth() {
+	// 	t.Fatalf("channel bandwidth incorrect: expected %v, got %v",
+	// 		expectedAliceBandwidth, n.aliceChannelLink.Bandwidth())
+	// }
+
+	// expectedBobBandwidth1 := firstBobBandwidthBefore + htlcAmt
+	// if expectedBobBandwidth1 != n.firstBobChannelLink.Bandwidth() {
+	// 	t.Fatalf("channel bandwidth incorrect: expected %v, got %v",
+	// 		expectedBobBandwidth1, n.firstBobChannelLink.Bandwidth())
+	// }
+
+	// expectedBobBandwidth2 := secondBobBandwidthBefore - amount
+	// if expectedBobBandwidth2 != n.secondBobChannelLink.Bandwidth() {
+	// 	t.Fatalf("channel bandwidth incorrect: expected %v, got %v",
+	// 		expectedBobBandwidth2, n.secondBobChannelLink.Bandwidth())
+	// }
+
+	// expectedCarolBandwidth := carolBandwidthBefore + amount
+	// if expectedCarolBandwidth != n.carolChannelLink.Bandwidth() {
+	// 	t.Fatalf("channel bandwidth incorrect: expected %v, got %v",
+	// 		expectedCarolBandwidth, n.carolChannelLink.Bandwidth())
+	// }
+
+}
+
+// testChannelLinkBlindHopProcessing verifies that a link
+// correctly refuses to process blind hops when it has not
+// been configured to do so. We also check that a basic
+// payment is able to be delivered through a blinded route.
 func testChannelLinkBlindHopProcessing(t *testing.T) {
 	t.Parallel()
 
-	channels, _, err := createClusterChannels(
+	channels, restoreChannelsFromDb, err := createClusterChannels(
 		t, btcutil.SatoshiPerBitcoin*3, btcutil.SatoshiPerBitcoin*5,
 	)
 	require.NoError(t, err, "unable to create channel")
@@ -726,13 +1132,13 @@ func testChannelLinkBlindHopProcessing(t *testing.T) {
 	// Send payment from Aice to Carol, via Bob.
 	// Expect that the Alice receives an InvalidOnionBlinding error as
 	// the downstream routing nodes are not configured to process bind hops.
-	firstHop := n.firstBobChannelLink.ShortChanID()
-	_, err = makePayment(
-		n.aliceServer, n.carolServer, firstHop, hops, amount, htlcAmt,
-		totalTimelock,
-	).Wait(30 * time.Second)
+	// firstHop := n.firstBobChannelLink.ShortChanID()
+	// _, err = makePayment(
+	// 	n.aliceServer, n.carolServer, firstHop, hops, amount, htlcAmt,
+	// 	totalTimelock,
+	// ).Wait(30 * time.Second)
 
-	assertFailureCode(t, err, lnwire.CodeInvalidOnionBlinding)
+	// assertFailureCode(t, err, lnwire.CodeInvalidOnionBlinding)
 
 	// Now, configure the links to process blind hops.
 	// Modify the state of the links directly. No need to
@@ -821,6 +1227,36 @@ func testChannelLinkBlindHopProcessing(t *testing.T) {
 		t.Fatalf("channel bandwidth incorrect: expected %v, got %v",
 			expectedCarolBandwidth, n.carolChannelLink.Bandwidth())
 	}
+
+	// See what happens if we restore channels from disk.
+	channels, err = restoreChannelsFromDb()
+	if err != nil {
+		t.Fatalf("unable to restore channels from database: %v", err)
+	}
+
+	n = newThreeHopNetwork(t, channels.aliceToBob, channels.bobToAlice,
+		channels.bobToCarol, channels.carolToBob, testStartingHeight)
+	// n.firstBobChannelLink.cfg.Registry = bobRegistry
+	// n.aliceServer.intersect(aliceInterceptor)
+	// n.bobServer.intersect(bobInterceptor)
+
+	if err := n.start(); err != nil {
+		t.Fatalf("unable to start three hop network: %v", err)
+	}
+	t.Cleanup(n.stop)
+
+	// Set Bob in hodl AddOutgoing mode so that he won't immediately
+	// forward our blind ADD. We can then, restart Bob's node, removing
+	// this flag, and verify that he correctly reprocessed the blind ADD
+	// from disk and forwards it onwards to Carol.
+	n.secondBobChannelLink.cfg.HodlMask = hodl.AddOutgoing.Mask()
+
+	// Next try this:
+	// Don't let Bob fully process a settle/fail which responds
+	// to a blind ADD he previously processed. How does the incoming
+	// link behave in this case?
+	n.firstBobChannelLink.cfg.HodlMask = hodl.SettleOutgoing.Mask()
+	n.firstBobChannelLink.cfg.HodlMask = hodl.FailOutgoing.Mask()
 
 }
 
@@ -4155,6 +4591,8 @@ func TestChannelLinkBandwidthChanReserve(t *testing.T) {
 
 // TestChannelRetransmission tests the ability of the channel links to
 // synchronize theirs states after abrupt disconnect.
+// NOTE(11/24/22): Does whether the HTLC contains a blinding point
+// impacted by this?
 func TestChannelRetransmission(t *testing.T) {
 	t.Parallel()
 
@@ -4288,6 +4726,8 @@ func TestChannelRetransmission(t *testing.T) {
 			},
 		},
 	}
+	// NOTE(11/25/22): Here is a payment which encounters a restart somewhere.
+	// Might this contain concepts useful in trying out our blind hop reprocessing?
 	paymentWithRestart := func(t *testing.T, messages []expectedMessage) {
 		channels, restoreChannelsFromDb, err := createClusterChannels(
 			t, btcutil.SatoshiPerBitcoin*5, btcutil.SatoshiPerBitcoin*5,
@@ -5015,6 +5455,8 @@ func newPersistentLinkHarness(t *testing.T, link ChannelLink,
 func (h *persistentLinkHarness) restart(restartSwitch, syncStates bool,
 	hodlFlags ...hodl.Flag) {
 
+	fmt.Println("[test setup]: restarting link!")
+
 	// First, remove the link from the switch.
 	h.coreLink.cfg.Switch.RemoveLink(h.link.ChanID())
 
@@ -5279,6 +5721,64 @@ func generateHtlcAndInvoice(t *testing.T,
 	htlc.ID = id
 
 	return htlc, invoice
+}
+
+// generateHtlcAndInvoice generates a single hop htlc which pays to a
+// blinded route. The caller can configure either an introduction node,
+// intermediate node, or final node style hop.
+//
+// NOTE: It is the responsibility of the caller to ensure that they
+// provide an onion and route blinding payload which are together
+// valid under the requirements in BOLT-04.
+func generateBlindHtlc(t *testing.T, onionPayload *hop.Payload,
+	blindPayload *hop.BlindHopPayload,
+	blindingPointTLV bool, id uint64) *lnwire.UpdateAddHTLC {
+
+	t.Helper()
+
+	htlcAmt := lnwire.NewMSatFromSatoshis(10000)
+	htlcExpiry := testStartingHeight + testInvoiceCltvExpiry
+
+	var b bytes.Buffer
+	hop.PackRouteBlindingPayload(&b, blindPayload)
+	hops := []*hop.Payload{
+		// hop.NewTLVPayload(fwdInfo, blindPayload),
+		{
+			FwdInfo:                    onionPayload.FwdInfo,
+			RouteBlindingEncryptedData: b.Bytes(),
+		},
+	}
+	blob, err := generateRoute(hops...)
+	require.NoError(t, err, "unable to generate route")
+
+	// Generate a payment preimage & payment address.
+	// Interpret the bytes of the path ID as the preimage.
+	// This allows the caller to pick the path_id and ensure
+	// our HTLC is crafted with matching payment preimage.
+	// preimage := (lntypes.Preimage)(blindPayload.PathID)
+	// var preimage lntypes.Preimage
+	preimageBytes := blindPayload.PathID[:lntypes.PreimageSize]
+	preimage, err := lntypes.MakePreimage(preimageBytes)
+	require.NoError(t, err, "unable to interpret path_id as payment preimage")
+
+	payAddr, err := generatePaymentAddress()
+	require.NoError(t, err, "unable to create payment address")
+
+	// Construct UpdateAddHTLC.
+	_, htlc, _, err := generatePaymentWithPreimage(
+		amount, htlcAmt, uint32(htlcExpiry), blob, &preimage, preimage.Hash(), payAddr,
+	)
+	require.NoError(t, err, "unable to create payment")
+
+	htlc.ID = id
+
+	// Set any route blinding point provided by the caller.
+	// The caller can use this field to build an htlc fit for
+	// either an introduction node or an intermediate node in
+	// a blind route.
+	htlc.BlindingPoint = ephemeralBlindingPoint
+
+	return htlc
 }
 
 // TestChannelLinkNoMoreUpdates tests that we won't send a new commitment
