@@ -107,6 +107,11 @@ var (
 	// ErrOutputIndexOutOfRange is returned when an output index is greater
 	// than or equal to the length of a given transaction's outputs.
 	ErrOutputIndexOutOfRange = errors.New("output index is out of range")
+
+	// ErrModDescriptorNotFound indicates that a payment descriptor we
+	// aimed to modify was not found.
+	ErrModDescriptorNotFound = errors.New("payment descriptor for " +
+		"modification not found")
 )
 
 // ErrCommitSyncLocalDataLoss is returned in the case that we receive a valid
@@ -1174,6 +1179,23 @@ func (u *updateLog) restoreUpdate(pd *PaymentDescriptor) {
 	u.updateIndex[pd.LogIndex] = u.PushBack(pd)
 }
 
+// restoreExtraData looks up a log update and updates additional data that
+// would not have been recovered from our on-disk commitments. It will fail if
+// the update index provided is not in the log.
+//
+// Note: this is a workaround for channeldb.HTLC not storing additional data
+// passed in update_add_htlc tlvs.
+func (u *updateLog) restoreExtraAddData(i uint64, b *btcec.PublicKey) error {
+	pd := u.lookupHtlc(i)
+	if pd == nil {
+		return fmt.Errorf("%w: index: %v", ErrModDescriptorNotFound, i)
+	}
+
+	pd.BlindingPoint = b
+
+	return nil
+}
+
 // appendHtlc appends a new HTLC offer to the tip of the update log. The entry
 // is also added to the offer index accordingly.
 func (u *updateLog) appendHtlc(pd *PaymentDescriptor) {
@@ -2115,6 +2137,8 @@ func (lc *LightningChannel) restorePendingRemoteUpdates(
 
 	lc.log.Debugf("Restoring %v dangling remote updates",
 		len(unsignedAckedUpdates))
+	fmt.Printf("[restorePendingRemoteUpdates]: restoring %v dangling remote updates\n",
+		len(unsignedAckedUpdates))
 
 	for _, logUpdate := range unsignedAckedUpdates {
 		logUpdate := logUpdate
@@ -2141,6 +2165,21 @@ func (lc *LightningChannel) restorePendingRemoteUpdates(
 		// these Adds was already restored since they're all incoming
 		// htlcs on the local commitment.
 		if payDesc.EntryType == Add {
+
+			if payDesc.BlindingPoint != nil {
+				fmt.Printf("[restorePendingRemoteUpdates]: restoring "+
+					"blinding point=(%x) for ADD update\n", payDesc.BlindingPoint.SerializeCompressed()[:10])
+			} else {
+				fmt.Printf("[restorePendingRemoteUpdates]: restored " +
+					"ADD does not have a blinding point")
+			}
+
+			if err = lc.remoteUpdateLog.restoreExtraAddData(
+				payDesc.HtlcIndex, payDesc.BlindingPoint,
+			); err != nil {
+				return err
+			}
+
 			continue
 		}
 

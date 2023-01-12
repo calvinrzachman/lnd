@@ -4152,10 +4152,65 @@ func TestChannelRestoreBlindHTLC(t *testing.T) {
 	// require.Nil(t, blindingPointFromFwdPkg, "unfortunately we expect payment "+
 	// 	"descriptors restored from LogUpdate in our forwarding packages to "+
 	// 	"nil blinding points after restart!")
-	require.Equal(t, blindingPointBeforeRestart, blindingPointFromFwdPkg, "expect blinding_point to match")
+	require.Equal(t, blindingPointBeforeRestart, blindingPointFromFwdPkg,
+		"expect blinding_point to match")
 
 	// TODO(11/27/22): write a ChannelLink level test which demonstrates ability to recover
 	// blinding point for the downstream peer from the LogUpdates stored on the CommitDiff!
+
+	// Now we'll demonstrate that Bob can recover the incoming blinding
+	// point even if he fails part way through the commitment dance with
+	// Alice.
+
+	// First we create an HTLC that Alice will send to Bob.
+	// We add an ephemeral public key to the UpdateAddHTLC message
+	// to simulate the case that Bob is a forwarding node in the
+	// blinded portion of a route
+	htlc, _ = createHTLC(1, lnwire.MilliSatoshi(500000))
+	htlc.BlindingPoint = ephemeralBlindingPoint
+
+	// -----add----->
+	_, err = aliceChannel.AddHTLC(htlc, nil)
+	require.NoError(t, err)
+	_, err = bobChannel.ReceiveHTLC(htlc)
+	require.NoError(t, err)
+
+	// With the HTLC's applied to both update logs, we'll have Alice
+	// initiate a state transition to lock in this HTLC ADD update
+	// on Bob's commitment. Bob will restart part way through our commitment
+	// dance before he is able to send Alice a signature which covers
+	// this update.
+	// NOTE(1/11/23): We should be able to recover the blinding point
+	// from the remote updates we have acknowledged but not yet signed for
+	// (ie: pending remote updates)
+	// -----sig----->
+	// <----rev------
+	aliceSig, aliceHtlcSigs, _, err := aliceChannel.SignNextCommitment()
+	require.NoError(t, err)
+	err = bobChannel.ReceiveNewCommitment(aliceSig, aliceHtlcSigs)
+	require.NoError(t, err)
+	_, _, _, err = bobChannel.RevokeCurrentCommitment()
+	require.NoError(t, err)
+	// Whether Alice has received Bob's revocation yet is not important.
+	// We just need to show that Bob can recover the blinding point after
+	// revoking his own commitment.
+
+	// Can he do so in this manner after signing the remote party's
+	// commitent? Yes.
+	// _, _, _, err = bobChannel.SignNextCommitment()
+
+	// We'll now force a restart for Bob, so we can test the
+	// persistence related portion of this assertion.
+	t.Logf("restarting bob again")
+	bobChannel, err = restartChannel(bobChannel)
+	require.NoError(t, err, "unable to restart channel")
+
+	// Verify that Bob has access to the blinding point even
+	// after restoring state from disk.
+	pdNew = bobChannel.remoteUpdateLog.lookupHtlc(1)
+	blindingPointAfterRestart := pdNew.BlindingPoint
+	require.Equal(t, blindingPointBeforeRestart, blindingPointAfterRestart,
+		"expect blinding_point to match")
 }
 
 // TestChannelRetransmissionFeeUpdate tests that the initiator will include any
