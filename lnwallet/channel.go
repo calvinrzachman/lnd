@@ -3604,6 +3604,25 @@ func (lc *LightningChannel) getUnsignedAckedUpdates() []channeldb.LogUpdate {
 				Amount:      pd.Amount,
 				Expiry:      pd.Timeout,
 				PaymentHash: pd.RHash,
+				// NOTE(1/11/23): We are pulling payment descs
+				// from our update log and converting them to
+				// LogUpdate to be written to disk. We have
+				// already completed the critical first step
+				// of ensuring that when an ADD update arrives
+				// the payment descriptor which represents it
+				// in our in-memory update log contains the
+				// route blinding point. Let's be sure we thread
+				// that blinding point through to the LogUpdate
+				// so it is written to disk!
+				// NOTE(11/27/22): This would be the incoming
+				// blinding point as this HTLC update is from
+				// our update log for the remote, thus is an
+				// incoming ADD. Processing of blind HTLC ADD
+				// updates is done in the incoming link, so it
+				// is important to ensure the link has the
+				// blinding point it will need to decrypt the
+				// onion & route blinding payload.
+				BlindingPoint: pd.BlindingPoint,
 			}
 			copy(htlc.OnionBlob[:], pd.OnionBlob)
 			logUpdate.UpdateMsg = htlc
