@@ -307,6 +307,8 @@ func (d *DecayedLog) Put(hash *sphinx.HashPrefix, cltv uint32) error {
 	binary.BigEndian.PutUint32(scratch[:], cltv)
 
 	return kvdb.Batch(d.db, func(tx kvdb.RwTx) error {
+		// NOTE(1/16/23): The (payment hash prefix, CLTV) key-value pairs are
+		// stored ENTIRELY separately from the (batch ID ==> replay sets).
 		sharedHashes := tx.ReadWriteBucket(sharedHashBucket)
 		if sharedHashes == nil {
 			return ErrDecayedLogCorrupted
@@ -314,6 +316,10 @@ func (d *DecayedLog) Put(hash *sphinx.HashPrefix, cltv uint32) error {
 
 		// Check to see if this hash prefix has been recorded before. If
 		// a value is found, this packet is being replayed.
+		//
+		// NOTE(1/16/23): Attempting to insert a redundant entry in our
+		// log fails. When we go to update the DB with a new key value pair
+		// we simply fail if the key-value pair already exists.
 		valueBytes := sharedHashes.Get(hash[:])
 		if valueBytes != nil {
 			return sphinx.ErrReplayedPacket
@@ -331,6 +337,11 @@ func (d *DecayedLog) Put(hash *sphinx.HashPrefix, cltv uint32) error {
 // value to subsequent calls. For the indices of the replay set to be aligned
 // properly, the batch MUST be constructed identically to the first attempt,
 // pruning will cause the indices to become invalid.
+//
+// NOTE(1/16/23): This is the function we use in practice while batch decrypting
+// onion packets for HTLCs which are part of the same forwarding package (ie: remote ADDs
+// which were irrevocably committed to at the same commitment height).
+// Analyze how it behaves.
 func (d *DecayedLog) PutBatch(b *sphinx.Batch) (*sphinx.ReplaySet, error) {
 	// Since batched boltdb txns may be executed multiple times before
 	// succeeding, we will create a new replay set for each invocation to
@@ -340,6 +351,8 @@ func (d *DecayedLog) PutBatch(b *sphinx.Batch) (*sphinx.ReplaySet, error) {
 	// processed, the replay set will be deserialized from disk.
 	var replays *sphinx.ReplaySet
 	if err := kvdb.Batch(d.db, func(tx kvdb.RwTx) error {
+		// NOTE(1/16/23): The (payment hash prefix, CLTV) key-value pairs are
+		// stored ENTIRELY separately from the (batch ID ==> replay sets).
 		sharedHashes := tx.ReadWriteBucket(sharedHashBucket)
 		if sharedHashes == nil {
 			return ErrDecayedLogCorrupted
@@ -358,20 +371,56 @@ func (d *DecayedLog) PutBatch(b *sphinx.Batch) (*sphinx.ReplaySet, error) {
 		// have already processed this batch before. We deserialize the
 		// resulting and return it to ensure calls to put batch are
 		// idempotent.
+		//
+		// NOTE(1/16/23): Idempotency is a nice property since we don't
+		// need to be as worried about multiple calls to the function.
+		// We just read what we wrote to disk on a previous call.
+		//
+		// - If this is called with a different ID for the same forwarding
+		// package, we will NOT catch replays. The whole forwarding package should be
+		// marked as a replay, but it will not be seen as such due to the ID
+		// not matching the first time the package was processed!
+		//
+		// - What happens if we use the same ID but with DIFFERENT
+		// ADDs/(hash prefix, cltv) key-value pairs?
+		// "For the indices of the replay set to be aligned properly,
+		// the batch  MUST be constructed identically to the first attempt,
+		// pruning will cause the indices to become invalid."
 		replayBytes := batchReplayBkt.Get(b.ID)
 		if replayBytes != nil {
 			replays = sphinx.NewReplaySet()
+
+			// NOTE(1/16/23): Repeated invocations of this function
+			// will have better performance as we can just return the
+			// result of our previous computation.
 			return replays.Decode(bytes.NewReader(replayBytes))
 		}
+		// NOTE(1/6/23): If the check for key=ID above doesn't return
+		// anything then this must be a fresh batch, so we'll write
+		// it to disk below.
 
 		// The CLTV will be stored into scratch and then stored into the
 		// sharedHashBucket.
 		var scratch [4]byte
 
+		// NOTE(1/16/23): Initialize a fresh replay set to track any replays
+		// detected between this batch and any previously seen batch of ADDs.
+		// A particular ADD can be marked as a reply during BOTH in-memory batching
+		// AND while persisting the in-memory batch to disk. The final replay set
+		// provided to the caller decoding a batch of onions is the merge of the
+		// replay set constructed during in memory batching and the replay set
+		// constructed during persisting to disk and indicates ALL ADDs which have been replayed.
+		// There can be replays within the SAME batch/forwarding package AND replays
+		// across different forwarding packages!
 		replays = sphinx.NewReplaySet()
+
+		// For every ADD in our in-memory batch, write a (hash, CLTV) pair
+		// to disk for each previously unseen payment hash prefix.
 		err := b.ForEach(func(seqNum uint16, hashPrefix *sphinx.HashPrefix, cltv uint32) error {
 			// Retrieve the bytes which represents the CLTV
 			valueBytes := sharedHashes.Get(hashPrefix[:])
+			// NOTE(1/16/23): A non-nil value means that we have previously persisted a
+			// (hash, CLTV) key pair with the same payment hash, ergo this is a replay.
 			if valueBytes != nil {
 				replays.Add(seqNum)
 				return nil
@@ -389,6 +438,10 @@ func (d *DecayedLog) PutBatch(b *sphinx.Batch) (*sphinx.ReplaySet, error) {
 		// Merge the replay set computed from checking the on-disk
 		// entries with the in-batch replays computed during this
 		// batch's construction.
+		// The final replay set provided to the caller decoding a batch
+		// of onions is the merge of the replay set constructed during
+		// in memory batching and the replay set constructed during persisting
+		// to disk and indicates ALL ADDs which have been replayed.
 		replays.Merge(b.ReplaySet)
 
 		// Write the replay set under the batch identifier to the batch

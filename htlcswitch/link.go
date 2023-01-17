@@ -3059,9 +3059,9 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 	}
 
 	// Atomically decode the incoming htlcs, simultaneously checking for
-	// replay attempts. A particular index in the returned, spare list of
+	// replay attempts. **A particular index in the returned, spare list of
 	// channel iterators should only be used if the failure code at the
-	// same index is lnwire.FailCodeNone.
+	// same index is lnwire.FailCodeNone.**
 	decodeResps, sphinxErr := l.cfg.DecodeHopIterators(
 		fwdPkg.ID(), decodeReqs,
 	)
@@ -3114,8 +3114,19 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 
 			l.log.Errorf("unable to decode onion hop "+
 				"iterator: %v", failureCode)
+
+			// NOTE(1/16/23): Only ADD updates which are NOT replays and for
+			// which the onion packet can be successfully decrypted will get
+			// a non-nil "hop iterator" which the caller can use to extract
+			// the forwarding information.
+			//
+			// As a result, it is important that the link not attempt to
+			// use the hop.Iterator for any ADD update/onion packet which
+			// has a failing code.
 			continue
 		}
+		// NOTE(1/16/23): The above check will ensure that we do not attempt
+		// to forward any HTLCs which have been replayed??
 
 		// Retrieve onion obfuscator from onion blob in order to
 		// produce initial obfuscation of the onion failureCode.
@@ -3383,6 +3394,10 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 	// Failing to do this could cause reorderings/gaps in the range of
 	// opened circuits, which violates assumptions made by the circuit
 	// trimming.
+	//
+	// QUESTION(1/6/23): I wonder if this could be relaxed. Would it offer
+	// greater privacy as network observers could not assume HTLCs are
+	// forwarded in any particular order?
 	l.forwardBatch(replay, switchPackets...)
 }
 
