@@ -33,6 +33,9 @@ const (
 	// FwdStateCompleted signals that all Adds have been acked, and that all
 	// settles and fails have been delivered to their sources. Packages in
 	// this state can be removed permanently.
+	//
+	// NOTE(1/20/23): This is used only to decide whether to garbage
+	// collect/delete a forwarding package from disk.
 	FwdStateCompleted
 )
 
@@ -85,6 +88,8 @@ var (
 	// validation and are to be forwarded to the switch.
 	// NOTE: The presence of this key within a forwarding package indicates
 	// that the package has reached FwdStateProcessed.
+	// NOTE(1/20/23): Our decision on whether or not we have processed a package
+	// comes down to whether we can read bytes from this key from disk.
 	fwdFilterKey = []byte("fwd-filter-key")
 
 	// ackFilterKey is a key used to access the PkgFilter indicating which
@@ -763,6 +768,10 @@ func (p *ChannelPackager) AckAddHtlcs(tx kvdb.RwTx, addRefs ...AddRef) error {
 	if len(addRefs) == 0 {
 		return nil
 	}
+	fmt.Printf("[AckAddHtlcs(%s)]: add refs: %+v!\n",
+		p.source,
+		addRefs,
+	)
 
 	fwdPkgBkt := tx.ReadWriteBucket(fwdPackagesKey)
 	if fwdPkgBkt == nil {
@@ -788,6 +797,11 @@ func (p *ChannelPackager) AckAddHtlcs(tx kvdb.RwTx, addRefs ...AddRef) error {
 	// Load each height bucket once and remove all acked htlcs at that
 	// height.
 	for height, indexes := range heightDiffs {
+		fmt.Printf("[AckAddHtlcs(%s)]: height diff: %d, %+v!\n",
+			p.source,
+			height,
+			indexes,
+		)
 		err := ackAddHtlcsAtHeight(sourceBkt, height, indexes)
 		if err != nil {
 			return err
@@ -843,6 +857,10 @@ func ackAddHtlcsAtHeight(sourceBkt kvdb.RwBucket, height uint64,
 // the settle/fail, or it becomes otherwise safe to forgo retransmitting the
 // settle/fail after a restart.
 func (p *ChannelPackager) AckSettleFails(tx kvdb.RwTx, settleFailRefs ...SettleFailRef) error {
+	fmt.Printf("[Packager.AckSettleFails(%s)]: settle/fail refs: %+v!\n",
+		p.source,
+		settleFailRefs,
+	)
 	return ackSettleFails(tx, settleFailRefs)
 }
 

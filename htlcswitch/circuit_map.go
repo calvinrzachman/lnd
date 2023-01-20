@@ -509,6 +509,8 @@ func (cm *circuitMap) restoreMemState() error {
 			return ErrCorruptedCircuitMap
 		}
 
+		// NOTE(1/20/23): Each payment circuit contains a reference (AddRef)
+		// to the incoming link's forwarding package!
 		if err := circuitBkt.ForEach(func(_, v []byte) error {
 			circuit, err := cm.decodeCircuit(v)
 			if err != nil {
@@ -824,6 +826,7 @@ func (cm *circuitMap) CommitCircuits(circuits ...*PaymentCircuit) (
 	var adds, drops, fails, addFails []*PaymentCircuit
 	for _, circuit := range circuits {
 		inKey := circuit.InKey()
+		// TODO(1/20/23): How is the Switch's pending map populated?
 		if foundCircuit, ok := cm.pending[inKey]; ok {
 			switch {
 
@@ -872,6 +875,11 @@ func (cm *circuitMap) CommitCircuits(circuits ...*PaymentCircuit) (
 	// Now, optimistically serialize the circuits to add.
 	var bs = make([]bytes.Buffer, len(adds))
 	for i, circuit := range adds {
+		// NOTE(1/20/23): We serialize the payment circuit here.
+		// This includes the AddRef which points to this updates location
+		// within a particular forwarding package. The AddRef does not refer
+		// to its owning link directly, rather this information is found
+		// elsewhere in this circuit struct.
 		if err := circuit.Encode(&bs[i]); err != nil {
 			actions.Drops = drops
 			actions.Fails = addFails

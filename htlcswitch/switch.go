@@ -703,6 +703,9 @@ func (s *Switch) ForwardPackets(linkQuit chan struct{},
 		switch htlc := packet.htlc.(type) {
 		case *lnwire.UpdateAddHTLC:
 			circuit := newPaymentCircuit(&htlc.PaymentHash, packet)
+			fmt.Printf("[switch.ForwardPackets()]: built payment circuit=%+v, switch link count=%d\n",
+				circuit, len(s.linkIndex))
+
 			packet.circuit = circuit
 			circuits = append(circuits, circuit)
 			addBatch = append(addBatch, packet)
@@ -1302,10 +1305,19 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 	case *lnwire.UpdateFailHTLC, *lnwire.UpdateFulfillHTLC:
 		// If the source of this packet has not been set, use the
 		// circuit map to lookup the origin.
+		//
+		// NOTE(1/20/23): Settle/Fail is pipelined, reaches this point
+		// and the AddRef is put back on the packet so that we
+		// can complete our internal forwarding package acknowledgement
+		// in the incomint link.
+		fmt.Printf("[switch.handlePacketForward()]: encountered Settle/Fail! incoming link add ref: %+v, switch link count=%d\n",
+			packet.sourceRef, len(s.linkIndex))
 		circuit, err := s.closeCircuit(packet)
 		if err != nil {
 			return err
 		}
+		fmt.Printf("[switch.handlePacketForward()]: encountered Settle/Fail - post close! incoming link add ref: %+v, switch link count=%d\n",
+			packet.sourceRef, len(s.linkIndex))
 
 		// closeCircuit returns a nil circuit when a settle packet returns an
 		// ErrUnknownCircuit error upon the inner call to CloseCircuit.
@@ -1533,6 +1545,9 @@ func (s *Switch) failAddPacket(packet *htlcPacket, failure *LinkError) error {
 // attempts to determine the source that forwarded this htlc. This method will
 // set the incoming chan and htlc ID of the given packet if the source was
 // found, and will properly [re]encrypt any failure messages.
+//
+// NOTE(1/20/23): This method accepts a pointer to an HTLC packet so any
+// modifications can be seen by callers/anyone who holds a reference.
 func (s *Switch) closeCircuit(pkt *htlcPacket) (*PaymentCircuit, error) {
 	// If the packet has its source, that means it was failed locally by
 	// the outgoing link. We fail it here to make sure only one response
@@ -1574,8 +1589,9 @@ func (s *Switch) closeCircuit(pkt *htlcPacket) (*PaymentCircuit, error) {
 		pkt.incomingChanID = circuit.Incoming.ChanID
 		pkt.incomingHTLCID = circuit.Incoming.HtlcID
 		pkt.circuit = circuit
-		// NOTE(11/23/22): Forwarding package related information
-		// being set up here!
+		// NOTE(1/20/23): This is where our persisted add reference
+		// gets put back in!
+		fmt.Printf("[switch.closeCircuit]: add ref: %+v\n", circuit.AddRef)
 		pkt.sourceRef = &circuit.AddRef
 
 		pktType := "SETTLE"
@@ -2008,6 +2024,8 @@ out:
 				s.cfg.AckEventTicker.Pause()
 				continue
 			}
+			fmt.Printf("[htlcForwarder]: ack event ticker. batch (internally) acknowledging "+
+				"settles from the switch: %+v\n", s.pendingSettleFails)
 
 			// Batch ack the settle/fail entries.
 			if err := s.ackSettleFail(s.pendingSettleFails...); err != nil {
