@@ -3384,6 +3384,12 @@ func (lc *LightningChannel) createCommitDiff(
 	newCommit *commitment, commitSig lnwire.Sig,
 	htlcSigs []lnwire.Sig) (*channeldb.CommitDiff, error) {
 
+	fmt.Printf("[SignNextCommittment --> createCommitDiff(%s) - local_key=%x, remote_key=%x]: signing committment for peer!\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+	)
+
 	// First, we need to convert the funding outpoint into the ID that's
 	// used on the wire to identify this channel. We'll use this shortly
 	// when recording the exact CommitSig message that we'll be sending
