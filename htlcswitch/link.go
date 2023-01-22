@@ -824,12 +824,24 @@ func (l *channelLink) syncChanStates() error {
 // if necessary. After a restart, this will also delete any previously
 // completed packages.
 func (l *channelLink) resolveFwdPkgs() error {
+	fmt.Printf("[link(%s).resolveFwdPackages - local_key=%x, remote_key=%x]: loading packages from disk and reprocessing!\n",
+		l.ShortChanID(),
+		l.channel.LocalFundingKey.SerializeCompressed()[:10],
+		l.channel.RemoteFundingKey.SerializeCompressed()[:10],
+	)
+
 	fwdPkgs, err := l.channel.LoadFwdPkgs()
 	if err != nil {
 		return err
 	}
 
-	l.log.Debugf("loaded %d fwd pks", len(fwdPkgs))
+	l.log.Debugf("loaded %d fwd pkgs", len(fwdPkgs))
+	fmt.Printf("[link(%s).resolveFwdPackages - local_key=%x, remote_key=%x]: loaded %d fwd pkgs.\n",
+		l.ShortChanID(),
+		l.channel.LocalFundingKey.SerializeCompressed()[:10],
+		l.channel.RemoteFundingKey.SerializeCompressed()[:10],
+		len(fwdPkgs),
+	)
 
 	for _, fwdPkg := range fwdPkgs {
 		if err := l.resolveFwdPkg(fwdPkg); err != nil {
@@ -854,6 +866,12 @@ func (l *channelLink) resolveFwdPkg(fwdPkg *channeldb.FwdPkg) error {
 	if fwdPkg.State == channeldb.FwdStateCompleted {
 		l.log.Debugf("removing completed fwd pkg for height=%d",
 			fwdPkg.Height)
+		fmt.Printf("[link(%s).resolveFwdPackage - local_key=%x, remote_key=%x]: removing completed fwd pkg for height=%d.\n",
+			l.ShortChanID(),
+			l.channel.LocalFundingKey.SerializeCompressed()[:10],
+			l.channel.RemoteFundingKey.SerializeCompressed()[:10],
+			fwdPkg.Height,
+		)
 
 		err := l.channel.RemoveFwdPkgs(fwdPkg.Height)
 		if err != nil {
@@ -1535,7 +1553,9 @@ func (l *channelLink) handleDownstreamPkt(pkt *htlcPacket) {
 			return
 		}
 
-		fmt.Printf("[link.handleDowntreamUpdateSettle(%s)]: htlcPacket: %+v, source ref: %+v, dest ref: %+v!\n",
+		fmt.Printf("[link.handleDowntreamUpdateSettle(%s) - local_key=%x, remote_key=%x]: htlcPacket: %+v, source ref: %+v, dest ref: %+v!\n",
+			l.channel.LocalFundingKey.SerializeCompressed()[:10],
+			l.channel.RemoteFundingKey.SerializeCompressed()[:10],
 			pkt.incomingChanID, pkt, pkt.sourceRef, pkt.destRef,
 		)
 
@@ -2217,6 +2237,18 @@ func (l *channelLink) ackDownStreamPackets() error {
 		}
 
 		l.log.Debugf("removing Add packet %s from mailbox", inKey)
+		fmt.Printf("[link.ackDownstreamPackets(%s) - local_key=%x, remote_key=%x]: removing ADD packet "+
+			"%s from our mailbox queue!\n",
+			l.ShortChanID(),
+			l.channel.LocalFundingKey.SerializeCompressed()[:10],
+			l.channel.RemoteFundingKey.SerializeCompressed()[:10],
+			inKey,
+		)
+
+		// NOTE(1/21/23): We have sent this HTLC ADD update and a signature
+		// covering it to our downstream peer. We do not wish to reprocess
+		// this packet representing this update again so we remove it from
+		// our packet mailbox queue.
 		l.mailBox.AckPacket(inKey)
 	}
 
@@ -2243,6 +2275,14 @@ func (l *channelLink) ackDownStreamPackets() error {
 	for _, inKey := range l.closedCircuits {
 		l.log.Debugf("removing Fail/Settle packet %s from mailbox",
 			inKey)
+		fmt.Printf("[link.ackDownstreamPackets(%s) - local_key=%x, remote_key=%x]: removing Fail/Settle packet "+
+			"%s from our mailbox queue!\n",
+			l.ShortChanID(),
+			l.channel.LocalFundingKey.SerializeCompressed()[:10],
+			l.channel.RemoteFundingKey.SerializeCompressed()[:10],
+			inKey,
+		)
+
 		l.mailBox.AckPacket(inKey)
 	}
 
@@ -2326,6 +2366,20 @@ func (l *channelLink) updateCommitTx() error {
 		return err
 	}
 
+	// NOTE(1/21/23): After we sign to extend the remote party's commitment
+	// chain, we do some internal acknowledgement of packets in our mailbox.
+	// QUESTION: Why is now a safe/logical place to do this? Because signing
+	// a new commitment we include ALL of our local updates. Once these updates
+	// are included in a commitment, then channel-re-establish will take care that
+	// they are re-transmitted to remote after a restart.
+	// Settle/Fails mark an Add fully responded to. We marked them as
+	// acknowledged in our forwarding package with the call to SignNextCommitment() above.
+	fmt.Printf("[link.updateCommitTx(%s) - local_key=%x, remote_key=%x]: about to internally acknowledge packets "+
+		"(from switch) in our mailbox queue!\n",
+		l.ShortChanID(),
+		l.channel.LocalFundingKey.SerializeCompressed()[:10],
+		l.channel.RemoteFundingKey.SerializeCompressed()[:10],
+	)
 	if err := l.ackDownStreamPackets(); err != nil {
 		return err
 	}
@@ -2922,8 +2976,14 @@ func (l *channelLink) processRemoteSettleFails(fwdPkg *channeldb.FwdPkg,
 				},
 			}
 
-			fmt.Printf("[processRemoteSettleFails(%s)]: payment descriptor dest reference: %+v, switch link count=%d!\n",
-				l.ShortChanID(), pd.DestRef, len(l.cfg.Switch.linkIndex),
+			// fmt.Printf("[processRemoteSettleFails(%s)]: payment descriptor dest reference: %+v, switch link count=%d!\n",
+			// 	l.ShortChanID(), pd.DestRef, len(l.cfg.Switch.linkIndex),
+			// )
+			fmt.Printf("[processRemoteSettleFails(%s) - local_key=%x, remote_key=%x]: payment descriptor dest reference: %+v!\n",
+				l.ShortChanID(),
+				l.channel.LocalFundingKey.SerializeCompressed()[:10],
+				l.channel.RemoteFundingKey.SerializeCompressed()[:10],
+				pd.DestRef,
 			)
 
 			// Add the packet to the batch to be forwarded, and
@@ -3046,6 +3106,18 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 	l.log.Tracef("processing %d remote adds for height %d",
 		len(lockedInHtlcs), fwdPkg.Height)
 
+	fmt.Printf("[processRemoteAdds(%s) - local_key=%x, remote_key=%x]: processing adds!\n",
+		l.ShortChanID(),
+		l.channel.LocalFundingKey.SerializeCompressed()[:10],
+		l.channel.RemoteFundingKey.SerializeCompressed()[:10],
+	)
+	fmt.Printf("[processRemoteAdds(%s) - local_key=%x, remote_key=%x]: forward-filter: %+v, ack-filter: %+v.\n",
+		l.ShortChanID(),
+		l.channel.LocalFundingKey.SerializeCompressed()[:10],
+		l.channel.RemoteFundingKey.SerializeCompressed()[:10],
+		fwdPkg.FwdFilter, fwdPkg.AckFilter,
+	)
+
 	decodeReqs := make(
 		[]hop.DecodeHopIteratorRequest, 0, len(lockedInHtlcs),
 	)
@@ -3112,6 +3184,12 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 			// been committed by one of our commitment txns. ADDs
 			// in this state are waiting for the rest of the fwding
 			// package to get acked before being garbage collected.
+			fmt.Printf("[processRemoteAdds(%s) - local_key=%x, remote_key=%x]: ADD comes from a previously seen forwarding package, "+
+				"and we have already internally acknowledged that we have received its (settle/fail) response!\n",
+				l.ShortChanID(),
+				l.channel.LocalFundingKey.SerializeCompressed()[:10],
+				l.channel.RemoteFundingKey.SerializeCompressed()[:10],
+			)
 			continue
 		}
 
@@ -3255,8 +3333,21 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 				// never even made it to the Switch! (I think).
 				// So we will need to...
 				if !fwdPkg.FwdFilter.Contains(idx) {
+					fmt.Printf("[processRemoteAdds(%s) - local_key=%x, remote_key=%x]: ADD comes from a previously seen forwarding package, "+
+						"and the ADD has NOT been forwarded to the Switch.\n",
+						l.ShortChanID(),
+						l.channel.LocalFundingKey.SerializeCompressed()[:10],
+						l.channel.RemoteFundingKey.SerializeCompressed()[:10],
+					)
 					break
 				}
+
+				fmt.Printf("[processRemoteAdds(%s) - local_key=%x, remote_key=%x]: ADD comes from a previously seen forwarding package, "+
+					"and the ADD has ALREADY been forwarded to the Switch once.\n",
+					l.ShortChanID(),
+					l.channel.LocalFundingKey.SerializeCompressed()[:10],
+					l.channel.RemoteFundingKey.SerializeCompressed()[:10],
+				)
 
 				// Otherwise, it was already processed, we can
 				// can collect it and continue.
@@ -3298,13 +3389,16 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 					customRecords:   pld.CustomRecords(),
 				}
 
-				fmt.Printf("[processRemoteAdds(%s)]: forwarding package (processed update) add reference: %+v, switch link count=%d!\n",
-					l.ShortChanID(), pd.SourceRef, len(l.cfg.Switch.linkIndex),
+				fmt.Printf("[processRemoteAdds(%s) - local_key=%x, remote_key=%x]: forwarding package (processed update) add reference: %+v!\n",
+					l.ShortChanID(),
+					l.channel.LocalFundingKey.SerializeCompressed()[:10],
+					l.channel.RemoteFundingKey.SerializeCompressed()[:10],
+					pd.SourceRef,
 				)
 
-				fmt.Printf("[processRemoteAdds(%s)]: htlcPacket we forward to switch receives this add ref: %+v, switch link count=%d!\n",
-					l.ShortChanID(), updatePacket.sourceRef, len(l.cfg.Switch.linkIndex),
-				)
+				// fmt.Printf("[processRemoteAdds(%s)]: htlcPacket we forward to switch receives this add ref: %+v, switch link count=%d!\n",
+				// 	l.ShortChanID(), updatePacket.sourceRef, len(l.cfg.Switch.linkIndex),
+				// )
 
 				switchPackets = append(
 					switchPackets, updatePacket,
@@ -3391,12 +3485,19 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 				// flow through the same code path.
 				// The index is the index in the ForwardingPackage
 				// not the channel state machine HTLC update log.
-				fmt.Printf("[processRemoteAdds(%s)]: forwarding package (new update) add reference: %+v!\n",
-					l.ShortChanID(), pd.SourceRef,
+				fmt.Printf("[processRemoteAdds(%s) - local_key=%x, remote_key=%x]: forwarding package (new update) add reference: %+v!\n",
+					l.ShortChanID(),
+					l.channel.LocalFundingKey.SerializeCompressed()[:10],
+					l.channel.RemoteFundingKey.SerializeCompressed()[:10],
+					pd.SourceRef,
 				)
 
-				fmt.Printf("[processRemoteAdds(%s)]: ADD comes from a NEW forwarding package, "+
-					"and has NOT been forwarded to the Switch. Marking in memory that we will try forwarding\n", l.ShortChanID())
+				fmt.Printf("[processRemoteAdds(%s) - local_key=%x, remote_key=%x]: ADD comes from a NEW forwarding package, "+
+					"and has NOT been forwarded to the Switch. Marking in memory that we will try forwarding\n",
+					l.ShortChanID(),
+					l.channel.LocalFundingKey.SerializeCompressed()[:10],
+					l.channel.RemoteFundingKey.SerializeCompressed()[:10],
+				)
 				fwdPkg.FwdFilter.Set(idx)
 				switchPackets = append(switchPackets,
 					updatePacket)
