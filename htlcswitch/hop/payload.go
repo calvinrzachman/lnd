@@ -76,6 +76,8 @@ type ErrInvalidPayload struct {
 	// in the route (identified by next hop id), otherwise the violation is
 	// for an intermediate hop.
 	FinalHop bool
+
+	BlindHop bool
 }
 
 // Error returns a human-readable description of the invalid payload error.
@@ -85,8 +87,13 @@ func (e ErrInvalidPayload) Error() string {
 		hopType = "final"
 	}
 
-	return fmt.Sprintf("onion payload for %s hop %v record with type %d",
-		hopType, e.Violation, e.Type)
+	payloadType := "onion"
+	if e.BlindHop {
+		payloadType = "route blinding"
+	}
+
+	return fmt.Sprintf("%s payload for %s hop %v record with type %d",
+		payloadType, hopType, e.Violation, e.Type)
 }
 
 // Payload encapsulates all information delivered to a hop in an onion payload.
@@ -542,6 +549,7 @@ func validateBlindedRouteData(blindedData *record.BlindedRouteData,
 			return ErrInvalidPayload{
 				Type:      record.LockTimeOnionType,
 				Violation: InsufficientViolation,
+				BlindHop:  true,
 			}
 		}
 
@@ -549,6 +557,7 @@ func validateBlindedRouteData(blindedData *record.BlindedRouteData,
 			return ErrInvalidPayload{
 				Type:      record.AmtOnionType,
 				Violation: InsufficientViolation,
+				BlindHop:  true,
 			}
 		}
 	}
@@ -559,6 +568,7 @@ func validateBlindedRouteData(blindedData *record.BlindedRouteData,
 		return ErrInvalidPayload{
 			Type:      record.FeatureVectorType,
 			Violation: InsufficientViolation,
+			BlindHop:  true,
 		}
 	}
 
@@ -583,6 +593,7 @@ func validateRouteBlindingPayloadTypes(parsedTypes tlv.TypeMap,
 				Type:      record.PaymentRelayType,
 				Violation: OmittedViolation,
 				FinalHop:  false,
+				BlindHop:  true,
 			}
 		}
 
@@ -592,6 +603,7 @@ func validateRouteBlindingPayloadTypes(parsedTypes tlv.TypeMap,
 				Type:      record.ShortChannelIDType,
 				Violation: OmittedViolation,
 				FinalHop:  false,
+				BlindHop:  true,
 			}
 		}
 	} else {
@@ -602,6 +614,7 @@ func validateRouteBlindingPayloadTypes(parsedTypes tlv.TypeMap,
 				Type:      record.PathIDType,
 				Violation: OmittedViolation,
 				FinalHop:  true,
+				BlindHop:  true,
 			}
 		}
 	}
