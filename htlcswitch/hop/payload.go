@@ -498,7 +498,7 @@ func validateBlindedRouteTypes(parsedTypes tlv.TypeMap,
 		return nil, ErrInvalidPayload{
 			Type:      record.BlindingPointOnionType,
 			Violation: OmittedViolation,
-			FinalHop:  false,
+			FinalHop:  blindingKit.lastHop,
 		}
 
 	case updateAddBlindingSet:
@@ -512,7 +512,7 @@ func validateBlindedRouteTypes(parsedTypes tlv.TypeMap,
 		return nil, ErrInvalidPayload{
 			Type:      record.EncryptedDataOnionType,
 			Violation: RequiredViolation,
-			FinalHop:  false,
+			FinalHop:  blindingKit.lastHop,
 		}
 	}
 
