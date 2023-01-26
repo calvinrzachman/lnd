@@ -529,6 +529,7 @@ func validateBlindedRouteTypes(parsedTypes tlv.TypeMap,
 	if blindingKit.lastHop {
 		allowedTLVs[record.AmtOnionType] = struct{}{}
 		allowedTLVs[record.LockTimeOnionType] = struct{}{}
+		allowedTLVs[record.MPPOnionType] = struct{}{}
 
 		requiredTLVs = []tlv.Type{
 			record.AmtOnionType,

@@ -533,8 +533,19 @@ var crossPayloadValidationTests = []crossPayloadValidationTest{
 		},
 	},
 	{
-		name: "final blind hop with MPP set in top level TLV payload", // Are we supposed to allow this?
+		// NOTE(1/26/23):  Are we supposed to allow this? I am presently a
+		// bit confused on the interplay between MPP record and the spec
+		// suggested total_amt_msat record. We are supposed to require that
+		// the final hop set total_amt_msat, and one way to get that seems to
+		// be to allow the MPP record to be set as that already contains a
+		// total amount field denominated in milli-satoshis.
+		name: "final blind hop with MPP set in top level TLV payload",
 		onionPayload: &Payload{
+			FwdInfo: ForwardingInfo{
+				NextHop:         Exit,
+				AmountToForward: 100,
+				OutgoingCTLV:    10,
+			},
 			MPP: &record.MPP{},
 		},
 		routeBlindingPayload: &record.BlindedRouteData{
@@ -579,7 +590,7 @@ func TestEnforceBolt04Validation(t *testing.T) {
 func testEnforceBolt04Validation(t *testing.T,
 	test crossPayloadValidationTest) {
 
-	t.Parallel()
+	// t.Parallel()
 
 	routeBlindingTLV, err := record.EncodeBlindedRouteData(test.routeBlindingPayload)
 	require.Nil(t, err, "unable to encode route blinding payload")
