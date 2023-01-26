@@ -165,6 +165,25 @@ func MakeBlindingKit(processor BlindingProcessor,
 	}
 }
 
+// blindHopProcessor provides the functionality necessary for
+// the channel link to process hops as part of a blinded route.
+type blindHopProcessor interface {
+	// // DeriveBlindingFactor...
+	// // Note(8/8/22): This is not needed with Elle's current implementation.
+	// DeriveBlindingFactor(*btcec.PrivateKey, *btcec.PublicKey) (
+	// 	*btcec.PrivateKey, error)
+
+	// DecryptBlindedPayload decrypts the route blinding payload.
+	DecryptBlindedData(blindingPoint *btcec.PublicKey,
+		payload []byte) ([]byte, error)
+
+	// NextBlindingPoint computes the ephemeral blinding point
+	// that the next hop (our downstream peer) in a blinded route
+	// will need in order to decrypt the onion.
+	NextEphemeral(currentBlindingPoint *btcec.PublicKey) (
+		*btcec.PublicKey, error)
+}
+
 // deriveForwardingInfo produces a function that will decrypt and deserialize
 // an encrypted blob of data for a hop in a blinded route and reconstruct the
 // forwarding information for the hop from the information provided.
