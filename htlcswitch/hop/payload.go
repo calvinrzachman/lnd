@@ -129,6 +129,104 @@ type Payload struct {
 	metadata []byte
 }
 
+// PackHopPayload writes to the passed io.Writer, the series of byes that can
+// be placed directly into the per-hop payload (EOB) for this hop. This will
+// include the required routing fields, as well as serializing any of the
+// passed optional TLVRecords.  nextChanID is the unique channel ID that
+// references the _outgoing_ channel ID that follows this hop. This field
+// follows the same semantics as the NextAddress field in the onion: it should
+// be set to zero to indicate the terminal hop.
+func PackHopPayload(w io.Writer, p Payload) error {
+
+	// Otherwise, we'll need to make a new stream that includes our
+	// required routing fields, as well as these optional values.
+	var records []tlv.Record
+
+	// Hops that are not part of a blinded path will have an amount and
+	// CLTV expiry.
+	amt := uint64(p.FwdInfo.AmountToForward)
+	if amt != 0 {
+		records = append(
+			records, record.NewAmtToFwdRecord(&amt),
+		)
+	}
+
+	if p.FwdInfo.OutgoingCTLV != 0 {
+		records = append(
+			records, record.NewLockTimeRecord(&p.FwdInfo.OutgoingCTLV),
+		)
+	}
+
+	// BOLT 04 says the next_hop_id should be omitted for the final hop,
+	// but present for all others.
+	//
+	// TODO(conner): test using hop.Exit once available
+	nextChanID := p.FwdInfo.NextHop.ToUint64()
+	if nextChanID != 0 {
+		records = append(records,
+			record.NewNextHopIDRecord(&nextChanID),
+		)
+	}
+
+	// If an MPP record is destined for this hop, ensure that we only ever
+	// attach it to the final hop. Otherwise the route was constructed
+	// incorrectly.
+	if p.MPP != nil {
+		if nextChanID == 0 {
+			records = append(records, p.MPP.Record())
+		} else {
+			// return ErrIntermediateMPPHop
+		}
+	}
+
+	// Add encrypted data and blinding point if present.
+	// if p.encryptedData != nil {
+	records = append(records, record.NewEncryptedDataRecord(
+		&p.encryptedData,
+	))
+	// }
+
+	if p.blindingPoint != nil {
+		records = append(records, record.NewBlindingPointRecord(
+			&p.blindingPoint,
+		))
+	}
+
+	// If an AMP record is destined for this hop, ensure that we only ever
+	// attach it if we also have an MPP record. We can infer that this is
+	// already a final hop if MPP is non-nil otherwise we would have exited
+	// above.
+	if p.AMP != nil {
+		if p.MPP != nil {
+			records = append(records, p.AMP.Record())
+		} else {
+			// return ErrAMPMissingMPP
+		}
+	}
+
+	// If metadata is specified, generate a tlv record for it.
+	if p.metadata != nil {
+		records = append(records,
+			record.NewMetadataRecord(&p.metadata),
+		)
+	}
+
+	// Append any custom types destined for this hop.
+	tlvRecords := tlv.MapToRecords(p.customRecords)
+	records = append(records, tlvRecords...)
+
+	// To ensure we produce a canonical stream, we'll sort the records
+	// before encoding them as a stream in the hop payload.
+	tlv.SortRecords(records)
+
+	tlvStream, err := tlv.NewStream(records...)
+	if err != nil {
+		return err
+	}
+
+	return tlvStream.Encode(w)
+}
+
 // NewLegacyPayload builds a Payload from the amount, cltv, and next hop
 // parameters provided by leegacy onion payloads.
 func NewLegacyPayload(f *sphinx.HopData) *Payload {
