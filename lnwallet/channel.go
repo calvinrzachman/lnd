@@ -2847,12 +2847,30 @@ func (lc *LightningChannel) fetchCommitmentView(remoteChain bool,
 
 	nextHeight := commitChain.tip().height + 1
 
+	fmt.Printf("[ReceiveNewCommitment --> fetchCommitmentView(%s) - local_key=%x, remote_key=%x]: "+
+		"our_log_index: %d, our_htlc_index: %d, remote_log_index: %d, remote_htlc_index: %d!\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+		ourLogIndex, ourHtlcIndex, theirLogIndex, theirHtlcIndex,
+	)
+
 	// Run through all the HTLCs that will be covered by this transaction
 	// in order to update their commitment addition height, and to adjust
 	// the balances on the commitment transaction accordingly. Note that
 	// these balances will be *before* taking a commitment fee from the
 	// initiator.
 	htlcView := lc.fetchHTLCView(theirLogIndex, ourLogIndex)
+	// fmt.Printf("[[ReceiveNewCommitment --> fetchCommitmentView(%s) - local_key=%x, remote_key=%x]: "+
+	// 	"htlc view: %+v\n",
+	// 	lc.ShortChanID(),
+	// 	lc.LocalFundingKey.SerializeCompressed()[:10],
+	// 	lc.RemoteFundingKey.SerializeCompressed()[:10],
+	// 	newLogClosure(func() string {
+	// 		return spew.Sdump(htlcView)
+	// 	}),
+	// )
+
 	ourBalance, theirBalance, _, filteredHTLCView, err := lc.computeView(
 		htlcView, remoteChain, true,
 	)
@@ -2860,6 +2878,13 @@ func (lc *LightningChannel) fetchCommitmentView(remoteChain bool,
 		return nil, err
 	}
 	feePerKw := filteredHTLCView.feePerKw
+	fmt.Printf("[ReceiveNewCommitment --> fetchCommitmentView(%s) - local_key=%x, remote_key=%x]: "+
+		"our_balance: %d, remote_balance: %d!\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+		ourBalance, theirBalance,
+	)
 
 	// Actually generate unsigned commitment transaction for this view.
 	commitTx, err := lc.commitBuilder.createUnsignedCommitmentTx(
@@ -2999,6 +3024,14 @@ func (lc *LightningChannel) evaluateHTLCView(view *htlcView, ourBalance,
 			return nil, err
 		}
 
+		fmt.Printf("[evaluateHTLCView(%s) - local_key=%x, remote_key=%x]: "+
+			"found the corresponding add for our settle/fail! our_balance: %s, remote_balance: %s!\n",
+			lc.ShortChanID(),
+			lc.LocalFundingKey.SerializeCompressed()[:10],
+			lc.RemoteFundingKey.SerializeCompressed()[:10],
+			*ourBalance, *theirBalance,
+		)
+
 		skipThem[addEntry.HtlcIndex] = struct{}{}
 		processRemoveEntry(entry, ourBalance, theirBalance,
 			nextHeight, remoteChain, true, mutateState)
@@ -3032,6 +3065,14 @@ func (lc *LightningChannel) evaluateHTLCView(view *htlcView, ourBalance,
 			return nil, err
 		}
 
+		fmt.Printf("[evaluateHTLCView(%s) - local_key=%x, remote_key=%x]: "+
+			"found the corresponding add for their settle/fail! our_balance: %s, remote_balance: %s!\n",
+			lc.ShortChanID(),
+			lc.LocalFundingKey.SerializeCompressed()[:10],
+			lc.RemoteFundingKey.SerializeCompressed()[:10],
+			*ourBalance, *theirBalance,
+		)
+
 		skipUs[addEntry.HtlcIndex] = struct{}{}
 		processRemoveEntry(entry, ourBalance, theirBalance,
 			nextHeight, remoteChain, false, mutateState)
@@ -3046,6 +3087,14 @@ func (lc *LightningChannel) evaluateHTLCView(view *htlcView, ourBalance,
 			continue
 		}
 
+		fmt.Printf("[evaluateHTLCView(%s) - local_key=%x, remote_key=%x]: "+
+			"found our Add update! our_balance: %s, remote_balance: %s!\n",
+			lc.ShortChanID(),
+			lc.LocalFundingKey.SerializeCompressed()[:10],
+			lc.RemoteFundingKey.SerializeCompressed()[:10],
+			*ourBalance, *theirBalance,
+		)
+
 		processAddEntry(entry, ourBalance, theirBalance, nextHeight,
 			remoteChain, false, mutateState)
 		newView.ourUpdates = append(newView.ourUpdates, entry)
@@ -3055,6 +3104,14 @@ func (lc *LightningChannel) evaluateHTLCView(view *htlcView, ourBalance,
 		if _, ok := skipThem[entry.HtlcIndex]; !isAdd || ok {
 			continue
 		}
+
+		fmt.Printf("[evaluateHTLCView(%s) - local_key=%x, remote_key=%x]: "+
+			"found a remote Add update! our_balance: %s, remote_balance: %s!\n",
+			lc.ShortChanID(),
+			lc.LocalFundingKey.SerializeCompressed()[:10],
+			lc.RemoteFundingKey.SerializeCompressed()[:10],
+			*ourBalance, *theirBalance,
+		)
 
 		processAddEntry(entry, ourBalance, theirBalance, nextHeight,
 			remoteChain, true, mutateState)
@@ -3169,7 +3226,20 @@ func processRemoveEntry(htlc *PaymentDescriptor, ourBalance,
 
 	// Ignore any removal entries which have already been processed.
 	if *removeHeight != 0 {
+		fmt.Printf("[evaluateHTLCView --> processRemoveEntry()]: "+
+			"ignoring entry! our_balance: %s, remote_balance: %s! remote_chain: %t, remove_height: %d "+
+			"add_height_local: %d, add_height_remote: %d\n",
+			*ourBalance, *theirBalance, remoteChain, removeHeight,
+			htlc.addCommitHeightLocal, htlc.addCommitHeightRemote,
+		)
 		return
+	} else {
+		fmt.Printf("[evaluateHTLCView --> processRemoveEntry()]: "+
+			"NOT ignoring entry! our_balance: %s, remote_balance: %s! remote_chain: %t, remove_height: %d "+
+			"add_height_local: %d, add_height_remote: %d\n",
+			*ourBalance, *theirBalance, remoteChain, removeHeight,
+			htlc.addCommitHeightLocal, htlc.addCommitHeightRemote,
+		)
 	}
 
 	switch {
@@ -3198,8 +3268,24 @@ func processRemoveEntry(htlc *PaymentDescriptor, ourBalance,
 		*ourBalance += htlc.Amount
 	}
 
+	// NOTE(2/1/23): If mutate is set, which should NOT be the case for validation,
+	// then we set the remove height for the update by setting this pointer?
+	// Where is this pointer used?
 	if mutateState {
+		fmt.Printf("[evaluateHTLCView --> processRemoveEntry()]: "+
+			"MUTATING state! our_balance: %s, remote_balance: %s! remote_chain: %t, remove_height: %d "+
+			"remove height: %d, add_height_local: %d, add_height_remote: %d\n",
+			*ourBalance, *theirBalance, remoteChain, removeHeight,
+			nextHeight, htlc.addCommitHeightLocal, htlc.addCommitHeightRemote,
+		)
 		*removeHeight = nextHeight
+	} else {
+		fmt.Printf("[evaluateHTLCView --> processRemoveEntry()]: "+
+			"NOT mutating state. This could be validation! our_balance: %s, remote_balance: %s! remote_chain: %t, remove_height: %d "+
+			"add_height_local: %d, add_height_remote: %d\n",
+			*ourBalance, *theirBalance, remoteChain, removeHeight,
+			htlc.addCommitHeightLocal, htlc.addCommitHeightRemote,
+		)
 	}
 }
 
@@ -3691,6 +3777,13 @@ func (lc *LightningChannel) validateCommitmentSanity(theirLogCounter,
 	ourLogCounter uint64, remoteChain bool,
 	predictOurAdd, predictTheirAdd *PaymentDescriptor) error {
 
+	fmt.Printf("[validateCommitmentSanity(%s) - local_key=%x, remote_key=%x]: "+
+		"beginning commitment output construction/validation!\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+	)
+
 	// Fetch all updates not committed.
 	view := lc.fetchHTLCView(theirLogCounter, ourLogCounter)
 
@@ -3711,6 +3804,9 @@ func (lc *LightningChannel) validateCommitmentSanity(theirLogCounter,
 	ourInitialBalance := commitChain.tip().ourBalance
 	theirInitialBalance := commitChain.tip().theirBalance
 
+	// NOTE(2/1/23): We do NOT mutate state when validating.
+	// I think this means that we shoud not ignore the HTLC updates
+	// when they are processed again later.
 	ourBalance, theirBalance, commitWeight, filteredView, err := lc.computeView(
 		view, remoteChain, false,
 	)
@@ -3718,6 +3814,14 @@ func (lc *LightningChannel) validateCommitmentSanity(theirLogCounter,
 		return err
 	}
 	feePerKw := filteredView.feePerKw
+
+	fmt.Printf("[validateCommitmentSanity(%s) - local_key=%x, remote_key=%x]: "+
+		"computed balances! our_balance: %d, remote_balance: %d!\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+		ourBalance, theirBalance,
+	)
 
 	// Calculate the commitment fee, and subtract it from the initiator's
 	// balance.
@@ -3929,6 +4033,28 @@ func (lc *LightningChannel) SignNextCommitment() (lnwire.Sig, []lnwire.Sig,
 
 	lc.log.Tracef("remote chain: our_balance=%v, "+
 		"their_balance=%v, commit_tx: %v",
+		newCommitView.ourBalance,
+		newCommitView.theirBalance,
+		newLogClosure(func() string {
+			return spew.Sdump(newCommitView.txn)
+		}),
+	)
+
+	fmt.Printf("[SignNextCommittment(%s) - local_key=%x, remote_key=%x]: "+
+		"extending remote chain to height %v, "+
+		"local_log=%v, remote_log=%v\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+		newCommitView.height,
+		lc.localUpdateLog.logIndex, remoteACKedIndex)
+
+	fmt.Printf("[SignNextCommittment(%s) - local_key=%x, remote_key=%x]: "+
+		"remote chain: our_balance=%v, "+
+		"their_balance=%v, commit_tx: %v\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
 		newCommitView.ourBalance,
 		newCommitView.theirBalance,
 		newLogClosure(func() string {
@@ -4743,6 +4869,12 @@ func (lc *LightningChannel) ReceiveNewCommitment(commitSig lnwire.Sig,
 		return err
 	}
 
+	fmt.Printf("[ReceiveNewCommitment(%s) - local_key=%x, remote_key=%x]: validated commitment sanity!\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+	)
+
 	// We're receiving a new commitment which attempts to extend our local
 	// commitment chain height by one, so fetch the proper commitment point
 	// as this will be needed to derive the keys required to construct the
@@ -4758,6 +4890,12 @@ func (lc *LightningChannel) ReceiveNewCommitment(commitSig lnwire.Sig,
 		&lc.channelState.LocalChanCfg, &lc.channelState.RemoteChanCfg,
 	)
 
+	fmt.Printf("[ReceiveNewCommitment(%s) - local_key=%x, remote_key=%x]: building local commitment view!\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+	)
+
 	// With the current commitment point re-calculated, construct the new
 	// commitment view which includes all the entries (pending or committed)
 	// we know of in the remote node's HTLC log, but only our local changes
@@ -4771,6 +4909,12 @@ func (lc *LightningChannel) ReceiveNewCommitment(commitSig lnwire.Sig,
 		return err
 	}
 
+	fmt.Printf("[ReceiveNewCommitment(%s) - local_key=%x, remote_key=%x]: built local view of commitment we received signature for!\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+	)
+
 	lc.log.Tracef("extending local chain to height %v, "+
 		"local_log=%v, remote_log=%v",
 		localCommitmentView.height,
@@ -4778,6 +4922,27 @@ func (lc *LightningChannel) ReceiveNewCommitment(commitSig lnwire.Sig,
 
 	lc.log.Tracef("local chain: our_balance=%v, "+
 		"their_balance=%v, commit_tx: %v",
+		localCommitmentView.ourBalance, localCommitmentView.theirBalance,
+		newLogClosure(func() string {
+			return spew.Sdump(localCommitmentView.txn)
+		}),
+	)
+
+	fmt.Printf("[ReceiveNewCommitment(%s) - local_key=%x, remote_key=%x]: "+
+		"extending local chain to height %v, "+
+		"local_log=%v, remote_log=%v\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+		localCommitmentView.height,
+		localACKedIndex, lc.remoteUpdateLog.logIndex)
+
+	fmt.Printf("[ReceiveNewCommitment(%s) - local_key=%x, remote_key=%x]: "+
+		"local chain: our_balance=%v, "+
+		"their_balance=%v, commit_tx: %v\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
 		localCommitmentView.ourBalance, localCommitmentView.theirBalance,
 		newLogClosure(func() string {
 			return spew.Sdump(localCommitmentView.txn)
