@@ -668,6 +668,9 @@ func (s *Switch) ForwardPackets(linkQuit chan struct{},
 		numSent int
 	)
 
+	fmt.Printf("[switch.ForwardPackets(%s)]: Forwarding %d packets! switch link count=%d\n",
+		"this", len(packets), len(s.linkIndex))
+
 	// No packets, nothing to do.
 	if len(packets) == 0 {
 		return nil
@@ -2025,7 +2028,7 @@ out:
 				continue
 			}
 			fmt.Printf("[htlcForwarder]: ack event ticker. batch (internally) acknowledging "+
-				"settles from the switch: %+v\n", s.pendingSettleFails)
+				"settles from the switch: %+v, switch link count=%d\n", s.pendingSettleFails, len(s.linkIndex))
 
 			// Batch ack the settle/fail entries.
 			if err := s.ackSettleFail(s.pendingSettleFails...); err != nil {
@@ -2037,6 +2040,11 @@ out:
 				newLogClosure(func() string {
 					return spew.Sdump(s.pendingSettleFails)
 				}))
+
+			fmt.Printf("[htlcForwarder]: internally acknowledged %d settle fails: %v, switch link count=%d\n", len(s.pendingSettleFails),
+				newLogClosure(func() string {
+					return spew.Sdump(s.pendingSettleFails)
+				}), len(s.linkIndex))
 
 			// Reset the pendingSettleFails buffer while keeping acquired
 			// memory.

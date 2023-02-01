@@ -590,6 +590,9 @@ func (m *memoryMailBox) AddMessage(msg lnwire.Message) error {
 //
 // NOTE: This method is safe for concrete use and part of the MailBox
 // interface.
+//
+// NOTE(1/22/23): This function is called by the Switch post "forwarding decision"
+// when adding a packet to the queue/mailbox for the outgoing link.
 func (m *memoryMailBox) AddPacket(pkt *htlcPacket) error {
 	m.pktCond.L.Lock()
 	switch htlc := pkt.htlc.(type) {

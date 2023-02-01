@@ -333,6 +333,7 @@ func (p *OnionProcessor) DecodeHopIterators(id []byte,
 	// in the replay set should be considered valid, as they are
 	// opportunistically computed.
 	packets, replays, err := tx.Commit()
+	fmt.Printf("[DecodeHopIterators()]: batch replays: %+v!\n", replays)
 	if err != nil {
 		log.Errorf("unable to process onion packet batch %x: %v",
 			id, err)
@@ -376,11 +377,17 @@ func (p *OnionProcessor) DecodeHopIterators(id []byte,
 			log.Errorf("unable to process onion packet: %v",
 				sphinx.ErrReplayedPacket)
 
+			fmt.Printf("[DecodeHopIterators()]: unable to process %dth onion packet: %v!\n",
+				i, sphinx.ErrReplayedPacket)
+
 			// NOTE(1/16/23): Replayed ADD updates are marked with
 			// a failure code.
 			resp.FailCode = lnwire.CodeTemporaryChannelFailure
 			continue
 		}
+
+		fmt.Printf("[DecodeHopIterators()]: successfully processed %dth onion packet! "+
+			"creating hop iterator...\n", i)
 
 		// Finally, construct a hop iterator from our processed sphinx
 		// packet, simultaneously caching the original onion packet.

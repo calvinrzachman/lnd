@@ -349,6 +349,7 @@ func (d *DecayedLog) PutBatch(b *sphinx.Batch) (*sphinx.ReplaySet, error) {
 	// will be merged with the replay set computed during batch construction
 	// to generate the complete replay set. If this batch was previously
 	// processed, the replay set will be deserialized from disk.
+	fmt.Printf("[DecayedLog.PutBatch()]: adding batch with ID: %v to replay log!\n", b.ID)
 	var replays *sphinx.ReplaySet
 	if err := kvdb.Batch(d.db, func(tx kvdb.RwTx) error {
 		// NOTE(1/16/23): The (payment hash prefix, CLTV) key-value pairs are
@@ -372,9 +373,11 @@ func (d *DecayedLog) PutBatch(b *sphinx.Batch) (*sphinx.ReplaySet, error) {
 		// resulting and return it to ensure calls to put batch are
 		// idempotent.
 		//
-		// NOTE(1/16/23): Idempotency is a nice property since we don't
+		// ***NOTE(1/16/23): Idempotency is a nice property since we don't
 		// need to be as worried about multiple calls to the function.
 		// We just read what we wrote to disk on a previous call.
+		// Without this we would treat internal reprocessing of a forwarding
+		// package, something necessary to reliably forward HTLC, as a replay!
 		//
 		// - If this is called with a different ID for the same forwarding
 		// package, we will NOT catch replays. The whole forwarding package should be
@@ -390,14 +393,17 @@ func (d *DecayedLog) PutBatch(b *sphinx.Batch) (*sphinx.ReplaySet, error) {
 		if replayBytes != nil {
 			replays = sphinx.NewReplaySet()
 
+			fmt.Printf("[DecayedLog.PutBatch()]: batch with ID: %v has been processed previously! "+
+				"NOTE: This does NOT mean this is a HTLC replay\n", b.ID)
+
 			// NOTE(1/16/23): Repeated invocations of this function
 			// will have better performance as we can just return the
-			// result of our previous computation.
+			// result of our previous replay set computation.
 			return replays.Decode(bytes.NewReader(replayBytes))
 		}
 		// NOTE(1/6/23): If the check for key=ID above doesn't return
-		// anything then this must be a fresh batch, so we'll write
-		// it to disk below.
+		// anything then this must be a fresh (never before seen) batch,
+		// so we'll write it to disk below.
 
 		// The CLTV will be stored into scratch and then stored into the
 		// sharedHashBucket.
@@ -422,6 +428,7 @@ func (d *DecayedLog) PutBatch(b *sphinx.Batch) (*sphinx.ReplaySet, error) {
 			// NOTE(1/16/23): A non-nil value means that we have previously persisted a
 			// (hash, CLTV) key pair with the same payment hash, ergo this is a replay.
 			if valueBytes != nil {
+				fmt.Printf("[DecayedLog.PutBatch()]: htlc @ index %d with hash %x is replay!\n", seqNum, hashPrefix)
 				replays.Add(seqNum)
 				return nil
 			}
@@ -442,6 +449,8 @@ func (d *DecayedLog) PutBatch(b *sphinx.Batch) (*sphinx.ReplaySet, error) {
 		// of onions is the merge of the replay set constructed during
 		// in memory batching and the replay set constructed during persisting
 		// to disk and indicates ALL ADDs which have been replayed.
+		// Merging the two replay sets allows us to catch replays both
+		// in the same batch and across batches.
 		replays.Merge(b.ReplaySet)
 
 		// Write the replay set under the batch identifier to the batch
@@ -454,6 +463,7 @@ func (d *DecayedLog) PutBatch(b *sphinx.Batch) (*sphinx.ReplaySet, error) {
 			return err
 		}
 
+		fmt.Printf("[DecayedLog.PutBatch()]: batch with ID: %v persisted!\n", b.ID)
 		return batchReplayBkt.Put(b.ID, replayBuf.Bytes())
 	}); err != nil {
 		return nil, err

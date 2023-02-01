@@ -1479,6 +1479,7 @@ func (l *channelLink) handleDownstreamUpdateAdd(pkt *htlcPacket) error {
 		l.log.Warnf("Unable to handle downstream add HTLC: %v",
 			err)
 
+		// NOTE(1/21/23): Nice comment from Joost.
 		// Remove this packet from the link's mailbox, this
 		// prevents it from being reprocessed if the link
 		// restarts and resets it mailbox. If this response
@@ -1507,9 +1508,17 @@ func (l *channelLink) handleDownstreamUpdateAdd(pkt *htlcPacket) error {
 	l.log.Debugf("queueing keystone of ADD open circuit: %s->%s",
 		pkt.inKey(), pkt.outKey())
 
+	// NOTE(1/21/23): These is an outgoing ADD update so we will
+	// mark the payment circuit tracking its flow through the Switch
+	// as "open". The circuit will be marked as open by the presence
+	// of the "keystone".
+	//
+	// QUESTION: When are these batches of opened circuits and keystones handled?
 	l.openedCircuits = append(l.openedCircuits, pkt.inKey())
 	l.keystoneBatch = append(l.keystoneBatch, pkt.keystone())
 
+	// NOTE(1/21/23): We immediately send Add updates from the
+	// Switch to our peer.
 	_ = l.cfg.Peer.SendMessage(false, htlc)
 
 	// Send a forward event notification to htlcNotifier.
@@ -2227,6 +2236,16 @@ func (l *channelLink) ackDownStreamPackets() error {
 	// First, remove the downstream Add packets that were included in the
 	// previous commitment signature. This will prevent the Adds from being
 	// replayed if this link disconnects.
+	//
+	// IMPORTANT NOTE(1/21/23): This might be how we prevent HTLC replay
+	// or attemtping to add the same HTLC twice to the outgoing commitment.
+	// It is important so that we do not lose funds while forwarding!
+	//
+	// NOTE(1/21/23): This is the in-memory list of all the updates we just
+	// included in the signature we just sent to our peer?
+	// We add the incoming circuit key for an outgoing add to this in-memory
+	// list (batch) after recieving the ADD from our Switch and immediately
+	// prior to forwarding the ADD update to our downstream peer.
 	for _, inKey := range l.openedCircuits {
 		// In order to test the sphinx replay logic of the remote
 		// party, unsafe replay does not acknowledge the packets from
@@ -2256,6 +2275,17 @@ func (l *channelLink) ackDownStreamPackets() error {
 	// signature, which is the result of downstream Settle/Fail packets. We
 	// batch them here to ensure circuits are closed atomically and for
 	// performance.
+	//
+	// NOTE(1/21/23): Another example of batching.
+	// Recall we may have just sent a signature which covers a collection
+	// of add, settle, and fail updates. Outgoing Settle/Fail updates represent
+	// an HTLC fully processed and internally acknowledged in our (and soon
+	// to be the outgoing link's - cuz lazy delayed batching with pipelining)
+	// forwarding package, so we can delete the circuit which tracked the flow
+	// of such an HTLC. We, as the incoming link for the add, will no longer
+	// retransmit to the Switch. The outgoing link will stop trying to make
+	// sure we received this settle/fail as soon as the Switch acknowledges/
+	// marks the settle/fail as received in its forwarding package.
 	err := l.cfg.Circuits.DeleteCircuits(l.closedCircuits...)
 	switch err {
 	case nil:
@@ -2406,6 +2436,7 @@ func (l *channelLink) updateCommitTx() error {
 	default:
 	}
 
+	// Construct and send the CommitmentSigned message to our peer.
 	commitSig := &lnwire.CommitSig{
 		ChanID:    l.ChanID(),
 		CommitSig: theirCommitSig,
@@ -3121,15 +3152,17 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 	decodeReqs := make(
 		[]hop.DecodeHopIteratorRequest, 0, len(lockedInHtlcs),
 	)
+	// NOTE(11/25/22): When reprocessing a forwarding package, say
+	// after a restart, we redecrypt the onion packet for EVERY
+	// ADD, even those which we have decrypted before.
+	// Maybe our batch onion decoding is smart enough to not do the
+	// work twice? Or maybe we just decrypt all onion packets in the
+	// forwarding package again and let the switch prevent duplicate
+	// forwards.
 	for _, pd := range lockedInHtlcs {
 		switch pd.EntryType {
 
 		// TODO(conner): remove type switch?
-		// NOTE(1/20/23): At one point this function processed
-		// updates of different types. We could get rid of the switch
-		// statement as it would now be a programming error to call this
-		// with payment descriptors representing anything besides an
-		// ADD update.
 		case lnwallet.Add:
 			// Before adding the new htlc to the state machine,
 			// parse the onion object in order to obtain the
@@ -3148,12 +3181,14 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 	}
 
 	// Atomically decode the incoming htlcs, simultaneously checking for
-	// replay attempts. **A particular index in the returned, spare list of
+	// replay attempts. A particular index in the returned, spare list of
 	// channel iterators should only be used if the failure code at the
-	// same index is lnwire.FailCodeNone.**
+	// same index is lnwire.FailCodeNone.
 	//
-	// NOTE(1/20/23): We send ALL ADD updates in the entire forwarding
-	// package to the batch onion processor.
+	// NOTE(12/17/22): An alternate approach would be to instead hide all
+	// elements of blind hop processing behind this call. This may be preferable
+	// to the current approach taken, as it avoids complicating this already
+	// involved function.
 	decodeResps, sphinxErr := l.cfg.DecodeHopIterators(
 		fwdPkg.ID(), decodeReqs,
 	)
@@ -3168,14 +3203,6 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 	for i, pd := range lockedInHtlcs {
 		idx := uint16(i)
 
-		// NOTE(1/20/23): This link has processed this ADD previously
-		// and has already marked in memory as having received the
-		// associated reply (settle/fail). We should not re-forward the
-		// HTLC for and ADD which we have already received a reply!
-		// So we step in to prevent our Switch from weeding out duplicates
-		// if an ADD has a reply. Why not any ADD? Would it simplify
-		// the Switch if it could rely on the assumption all duplicates
-		// would be filtered by the link?
 		if fwdPkg.State == channeldb.FwdStateProcessed &&
 			fwdPkg.AckFilter.Contains(idx) {
 
