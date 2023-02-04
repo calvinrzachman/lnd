@@ -2954,7 +2954,7 @@ func processRemoveEntry(htlcAmt lnwire.MilliSatoshi, childEntry ChildLogEntry,
 
 	if mutateState && remoteChain {
 		childEntry.SetRemoveHeightRemote(nextHeight)
-	} else {
+	} else if mutateState && !remoteChain {
 		childEntry.SetRemoveHeightLocal(nextHeight)
 	}
 }
