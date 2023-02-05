@@ -1009,6 +1009,11 @@ var queryRoutesCommand = cli.Command{
 	ArgsUsage:   "dest amt",
 	Flags: []cli.Flag{
 		cli.StringFlag{
+			Name: "src",
+			Usage: "the 33-byte hex-encoded public key from " +
+				"which to begin pathfinding",
+		},
+		cli.StringFlag{
 			Name: "dest",
 			Usage: "the 33-byte hex-encoded public key for the payment " +
 				"destination",
@@ -1060,6 +1065,7 @@ func queryRoutes(ctx *cli.Context) error {
 	defer cleanUp()
 
 	var (
+		src  string
 		dest string
 		amt  int64
 		err  error
@@ -1075,6 +1081,19 @@ func queryRoutes(ctx *cli.Context) error {
 		args = args.Tail()
 	default:
 		return fmt.Errorf("dest argument missing")
+	}
+
+	// Optionally include an arbitrary source node
+	// from which to begin pathfinding.
+	// NOTE: We do no validation that the key is valid here.
+	// We'll let the backend do that!
+	switch {
+	case ctx.IsSet("src"):
+		dest = ctx.String("src")
+	case args.Present():
+		dest = args.First()
+		args = args.Tail()
+	default:
 	}
 
 	switch {
@@ -1120,6 +1139,7 @@ func queryRoutes(ctx *cli.Context) error {
 	}
 
 	req := &lnrpc.QueryRoutesRequest{
+		SourcePubKey:      src,
 		PubKey:            dest,
 		Amt:               amt,
 		FeeLimit:          feeLimit,
