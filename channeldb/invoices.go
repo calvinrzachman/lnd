@@ -359,6 +359,7 @@ func (d *DB) LookupInvoice(ref invpkg.InvoiceRef) (invpkg.Invoice, error) {
 // error is returned if the invoice is not found.
 func fetchInvoiceNumByRef(invoiceIndex, payAddrIndex, setIDIndex kvdb.RBucket,
 	ref invpkg.InvoiceRef) ([]byte, error) {
+	fmt.Println("[fetchInvoiceNumByRef] start")
 
 	// If the set id is present, we only consult the set id index for this
 	// invoice. This type of query is only used to facilitate user-facing
@@ -366,12 +367,15 @@ func fetchInvoiceNumByRef(invoiceIndex, payAddrIndex, setIDIndex kvdb.RBucket,
 	setID := ref.SetID()
 	if setID != nil {
 		invoiceNumBySetID := setIDIndex.Get(setID[:])
+		fmt.Printf("[fetchInvoiceNumByRef] set ID: %x, invoice number? %x\n",
+			setID, invoiceNumBySetID)
 		if invoiceNumBySetID == nil {
 			return nil, invpkg.ErrInvoiceNotFound
 		}
 
 		return invoiceNumBySetID, nil
 	}
+	fmt.Printf("[fetchInvoiceNumByRef] set ID: %x, no invoice #\n", setID)
 
 	payHash := ref.PayHash()
 	payAddr := ref.PayAddr()
@@ -396,7 +400,9 @@ func fetchInvoiceNumByRef(invoiceIndex, payAddrIndex, setIDIndex kvdb.RBucket,
 	}
 
 	invoiceNumByHash := getInvoiceNumByHash()
+	fmt.Printf("[fetchInvoiceNumByRef] invoice # according to payment hash: %x\n", invoiceNumByHash)
 	invoiceNumByAddr := getInvoiceNumByAddr()
+	fmt.Printf("[fetchInvoiceNumByRef] invoice # according to payment addr: %x\n", invoiceNumByAddr)
 	switch {
 	// If payment address and payment hash both reference an existing
 	// invoice, ensure they reference the _same_ invoice.
@@ -426,6 +432,7 @@ func fetchInvoiceNumByRef(invoiceIndex, payAddrIndex, setIDIndex kvdb.RBucket,
 
 	// Otherwise we don't know of the target invoice.
 	default:
+		fmt.Println("[fetchInvoiceNumByRef] default not found")
 		return nil, invpkg.ErrInvoiceNotFound
 	}
 }
@@ -598,6 +605,8 @@ func (d *DB) UpdateInvoice(ref invpkg.InvoiceRef, setIDHint *invpkg.SetID,
 	callback invpkg.InvoiceUpdateCallback) (*invpkg.Invoice, error) {
 
 	var updatedInvoice *invpkg.Invoice
+	fmt.Printf("[channelDB.UpdateInvoice()]: invoice ref: %s\n", ref)
+
 	err := kvdb.Update(d, func(tx kvdb.RwTx) error {
 		invoices, err := tx.CreateTopLevelBucket(invoiceBucket)
 		if err != nil {
@@ -620,6 +629,7 @@ func (d *DB) UpdateInvoice(ref invpkg.InvoiceRef, setIDHint *invpkg.SetID,
 
 		// Retrieve the invoice number for this invoice using the
 		// provided invoice reference.
+		fmt.Printf("[channelDB.UpdateInvoice()]: fetching invoice # by ref? %+v\n", ref)
 		invoiceNum, err := fetchInvoiceNumByRef(
 			invoiceIndex, payAddrIndex, setIDIndex, ref,
 		)
@@ -628,6 +638,7 @@ func (d *DB) UpdateInvoice(ref invpkg.InvoiceRef, setIDHint *invpkg.SetID,
 		}
 
 		payHash := ref.PayHash()
+		fmt.Printf("[channelDB.UpdateInvoice()]: updating invoice w/ payment hash: %x\n", payHash[:])
 		updatedInvoice, err = d.updateInvoice(
 			payHash, setIDHint, invoices, settleIndex, setIDIndex,
 			invoiceNum, callback,
@@ -1136,6 +1147,7 @@ func fetchInvoice(invoiceNum []byte, invoices kvdb.RBucket,
 	invoiceBytes := invoices.Get(invoiceNum)
 	if invoiceBytes == nil {
 		return invpkg.Invoice{}, invpkg.ErrInvoiceNotFound
+		fmt.Println("[fetchInvoice()]: unable to find invoice")
 	}
 
 	invoiceReader := bytes.NewReader(invoiceBytes)
@@ -1922,11 +1934,13 @@ func (d *DB) updateInvoice(hash *lntypes.Hash, refSetID *invpkg.SetID, invoices,
 			return nil, fmt.Errorf("duplicate add of htlc %v", key)
 		}
 
+		fmt.Println("[channeldb.updateInvoice]: custom records check")
 		// Force caller to supply htlc without custom records in a
 		// consistent way.
 		if htlcUpdate.CustomRecords == nil {
 			return nil, errors.New("nil custom records map")
 		}
+		fmt.Println("[channeldb.updateInvoice]: survived custom records check")
 
 		// If a newly added HTLC has an associated set id, use it to
 		// index this invoice in the set id index. An error is returned

@@ -3,6 +3,7 @@ package invoices
 import (
 	"encoding/hex"
 	"errors"
+	"fmt"
 
 	"github.com/lightningnetwork/lnd/amp"
 	"github.com/lightningnetwork/lnd/lntypes"
@@ -106,9 +107,11 @@ func updateInvoice(ctx *invoiceUpdateCtx, inv *Invoice) (
 			return nil, ctx.failRes(ResultReplayToCanceled), nil
 
 		case HtlcStateAccepted:
+			fmt.Println("[updateInvoice]: HTLC State accepted")
 			return nil, ctx.acceptRes(resultReplayToAccepted), nil
 
 		case HtlcStateSettled:
+			fmt.Println("[updateInvoice]: HTLC State settled")
 			pre := inv.Terms.PaymentPreimage
 
 			// Terms.PaymentPreimage will be nil for AMP invoices.
@@ -130,10 +133,14 @@ func updateInvoice(ctx *invoiceUpdateCtx, inv *Invoice) (
 	// If no MPP payload was provided, then we expect this to be a keysend,
 	// or a payment to an invoice created before we started to require the
 	// MPP payload.
+	// NOTE(10/25/22): Our Link test is getting stuck here with an amount
+	// lower than what is expected. I think we hit this for itest.
 	if ctx.mpp == nil {
+		fmt.Println("[updateInvoice]: handling legacy payment with legacy payload")
 		return updateLegacy(ctx, inv)
 	}
 
+	fmt.Println("[updateInvoice]: handling payment with MPP payload")
 	return updateMpp(ctx, inv)
 }
 
@@ -190,12 +197,16 @@ func updateMpp(ctx *invoiceUpdateCtx, inv *Invoice) (*InvoiceUpdateDesc,
 
 	// Don't accept zero-valued sets.
 	if ctx.mpp.TotalMsat() == 0 {
+		fmt.Println("[updateMPP()]: MPP total_amount_msat is zero")
 		return nil, ctx.failRes(ResultHtlcSetTotalTooLow), nil
 	}
 
 	// Check that the total amt of the htlc set is high enough. In case this
 	// is a zero-valued invoice, it will always be enough.
 	if ctx.mpp.TotalMsat() < inv.Terms.Value {
+		fmt.Printf("[updateMPP()]: htlc amount: %d received insufficient "+
+			"for invoice: %d\n",
+			ctx.mpp.TotalMsat(), inv.Terms.Value)
 		return nil, ctx.failRes(ResultHtlcSetTotalTooLow), nil
 	}
 
@@ -244,12 +255,16 @@ func updateMpp(ctx *invoiceUpdateCtx, inv *Invoice) (*InvoiceUpdateDesc,
 	// If the invoice cannot be settled yet, only record the htlc.
 	setComplete := newSetTotal == ctx.mpp.TotalMsat()
 	if !setComplete {
+		fmt.Printf("[updateMPP()]: amount: %d received not equal to "+
+			"total_amt_msat: %d\n",
+			newSetTotal, ctx.mpp.TotalMsat())
 		return &update, ctx.acceptRes(resultPartialAccepted), nil
 	}
 
 	// Check to see if we can settle or this is an hold invoice and
 	// we need to wait for the preimage.
 	if inv.HodlInvoice {
+		fmt.Println("[updateMPP()]: hodl invoice so waiting...")
 		update.State = &InvoiceStateUpdateDesc{
 			NewState: ContractAccepted,
 			SetID:    setID,
@@ -379,7 +394,9 @@ func updateLegacy(ctx *invoiceUpdateCtx,
 	// check this for duplicate payments if the invoice is already settled
 	// or accepted. In case this is a zero-valued invoice, it will always be
 	// enough.
+	fmt.Printf("[updateLegacy]: amount. want: %d got: %d\n", inv.Terms.Value, ctx.amtPaid)
 	if ctx.amtPaid < inv.Terms.Value {
+		fmt.Printf("[updateLegacy]: amount too low. want: %d got: %d\n", inv.Terms.Value, ctx.amtPaid)
 		return nil, ctx.failRes(ResultAmountTooLow), nil
 	}
 
@@ -417,6 +434,7 @@ func updateLegacy(ctx *invoiceUpdateCtx,
 	}
 
 	// Record HTLC in the invoice database.
+	fmt.Printf("[updateLegacy]: building htlc accept description. ctx: %+v, nil records?: %+v\n", ctx, ctx.customRecords == nil)
 	newHtlcs := map[CircuitKey]*HtlcAcceptDesc{
 		ctx.circuitKey: {
 			Amt:           ctx.amtPaid,
@@ -457,6 +475,7 @@ func updateLegacy(ctx *invoiceUpdateCtx,
 		Preimage: inv.Terms.PaymentPreimage,
 	}
 
+	fmt.Println("[updateLegacy]: calling settle res")
 	return &update, ctx.settleRes(
 		*inv.Terms.PaymentPreimage, ResultSettled,
 	), nil

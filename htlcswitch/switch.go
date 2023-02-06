@@ -870,6 +870,7 @@ func (s *Switch) getLocalLink(pkt *htlcPacket, htlc *lnwire.UpdateAddHTLC) (
 		baseScid, ok := s.baseIndex[pkt.outgoingChanID]
 		if !ok {
 			log.Errorf("Link %v not found", pkt.outgoingChanID)
+			fmt.Printf("Link %v not found\n", pkt.outgoingChanID)
 			return nil, NewLinkError(&lnwire.FailUnknownNextPeer{})
 		}
 
@@ -878,6 +879,7 @@ func (s *Switch) getLocalLink(pkt *htlcPacket, htlc *lnwire.UpdateAddHTLC) (
 		link, err = s.getLinkByShortID(baseScid)
 		if err != nil {
 			log.Errorf("Link %v not found", baseScid)
+			fmt.Printf("Link %v not found\n", baseScid)
 			return nil, NewLinkError(&lnwire.FailUnknownNextPeer{})
 		}
 	}
@@ -895,6 +897,7 @@ func (s *Switch) getLocalLink(pkt *htlcPacket, htlc *lnwire.UpdateAddHTLC) (
 	}
 
 	// Ensure that the htlc satisfies the outgoing channel policy.
+	// fmt.Printf("[switch.getLocalLink()]: checking whether htlc %+v can be forwarded.\n", htlc)
 	currentHeight := atomic.LoadUint32(&s.bestHeight)
 	htlcErr := link.CheckHtlcTransit(
 		htlc.PaymentHash, htlc.Amount, htlc.Expiry, currentHeight,
@@ -987,6 +990,7 @@ func (s *Switch) handleLocalResponse(pkt *htlcPacket) {
 // the given network message.
 func (s *Switch) extractResult(deobfuscator ErrorDecrypter, n *networkResult,
 	attemptID uint64, paymentHash lntypes.Hash) (*PaymentResult, error) {
+	fmt.Println("[extractResult]: working on payment result")
 
 	switch htlc := n.msg.(type) {
 
@@ -1134,6 +1138,8 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 
 			log.Debugf("unable to find link with "+
 				"destination %v", packet.outgoingChanID)
+			fmt.Printf("[switch.HandlePacketForward()]: unable to find link with "+
+				"destination %v\n", packet.outgoingChanID)
 
 			// If packet was forwarded from another channel link
 			// than we should notify this link that some error
@@ -1163,6 +1169,7 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 			// We'll skip any links that aren't yet eligible for
 			// forwarding.
 			if !link.EligibleToForward() {
+				fmt.Println("[switch.HandlePacketForward()]: link ineligible to forward")
 				failure = NewDetailedLinkError(
 					&lnwire.FailUnknownNextPeer{},
 					OutgoingFailureLinkNotEligible,
@@ -1172,6 +1179,7 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 				// current forwarding conditions of this target
 				// link.
 				currentHeight := atomic.LoadUint32(&s.bestHeight)
+				fmt.Printf("[switch.handlePacketForward()]: checking whether htlc packet %+v can be forwarded.\n", packet)
 				failure = link.CheckHtlcForward(
 					htlc.PaymentHash, packet.incomingAmount,
 					packet.amount, packet.incomingTimeout,
