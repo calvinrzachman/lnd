@@ -351,6 +351,10 @@ func testDecodeHopPayloadValidation(t *testing.T, test decodePayloadTest) {
 		testChildIndex = uint32(9)
 	)
 
+	// TODO(12/22/22): We will need a non-nil blinding kit in order
+	// to parse & validate payloads for blind hops. Right now, this test
+	// fails with error: "blinding kit required".
+
 	p, err := hop.NewPayloadFromReader(
 		bytes.NewReader(test.payload),
 		&hop.BlindingKit{},

@@ -285,6 +285,9 @@ func NewPayloadFromReader(r io.Reader, blindingKit *BlindingKit) (
 	// Validate whether the sender properly included or omitted tlv records
 	// in accordance with BOLT 04.
 	nextHop := lnwire.NewShortChanIDFromInt(cid)
+	// NOTE(12/28/22): Carla does all the validation for blind hops here.
+	// This is BEFORE we even decrypt the route blinding payload!!
+	// Does this cover all the validation required by BOLT-04?
 	activeBlindingPoint, err := ValidateParsedPayloadTypes(
 		parsedTypes, nextHop, blindingKit, blindingPoint,
 	)
@@ -349,6 +352,9 @@ func NewPayloadFromReader(r io.Reader, blindingKit *BlindingKit) (
 			OutgoingCTLV:    cltv,
 		}
 	} else {
+		// NOTE(12/28/22): This is where we actually decrypt and parse the
+		// route blinding TLV payload, compute the forwarding information
+		// using the payment relay info contained therein.
 		forwarding, err := blindingKit.forwardingInfo(
 			activeBlindingPoint, payload.encryptedData,
 		)
@@ -401,6 +407,7 @@ func ValidateParsedPayloadTypes(parsedTypes tlv.TypeMap,
 	// instead of the onion TLVs.
 	_, dataPresent := parsedTypes[record.EncryptedDataOnionType]
 	if dataPresent {
+		fmt.Println("[ValidateParsedPayloadTypes()]: We are a blind hop!")
 		return validateBlindedRouteTypes(
 			parsedTypes, blindingKit, onionBlinding,
 		)
@@ -479,6 +486,7 @@ func validateBlindedRouteTypes(parsedTypes tlv.TypeMap,
 		onionBlindingSet     = onionBlinding != nil
 	)
 
+	fmt.Println("[validateBlindedRouteTypes()]: validating top level onion payload and UpdateAddHTLC TLV types...")
 	switch {
 	// We should have a blinding key either in update_add_htlc or in the
 	// onion, but not both.
@@ -516,6 +524,7 @@ func validateBlindedRouteTypes(parsedTypes tlv.TypeMap,
 		}
 	}
 
+	fmt.Println("[validateBlindedRouteTypes()]: validating route blinding TLV types...")
 	// We have restrictions on the types of TLVs that we allow in
 	// intermediate and final hops. Set a map of allowed TLVs and run a
 	// check for any other non-nil values in our parsed map.
@@ -527,6 +536,7 @@ func validateBlindedRouteTypes(parsedTypes tlv.TypeMap,
 
 	// The last hop is both allowed and requires some additional TLVs.
 	if blindingKit.lastHop {
+		fmt.Println("[validateBlindedRouteTypes()]: we are the last hop in this route!")
 		allowedTLVs[record.AmtOnionType] = struct{}{}
 		allowedTLVs[record.LockTimeOnionType] = struct{}{}
 		allowedTLVs[record.MPPOnionType] = struct{}{}
@@ -536,6 +546,8 @@ func validateBlindedRouteTypes(parsedTypes tlv.TypeMap,
 			record.LockTimeOnionType,
 			// TODO(1/26/23): add total_amt_msat as a required field for final hops.
 		}
+	} else {
+		fmt.Println("[validateBlindedRouteTypes()]: we are an intermediate hop in this route.")
 	}
 
 	for tlvType := range parsedTypes {
@@ -562,6 +574,10 @@ func validateBlindedRouteTypes(parsedTypes tlv.TypeMap,
 			}
 		}
 	}
+
+	// TODO(12/28/22): Validate that required fields are set!
+	// Does some of this need to wait until after we decrypt the
+	// route blinding payload?
 
 	return blindingPoint, nil
 }

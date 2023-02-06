@@ -739,6 +739,10 @@ func testForwardBlindedRoute(ht *lntemp.HarnessTest) {
 	// Dave. Once we hit the outgoing link, we know that we successfully
 	// parsed the htlc, so this is an acceptable compromise.
 	// Assert that our interceptor has exited without an error.
+	//
+	// TODO(12/28/22): Update this such that Dave can actually handle the
+	// payment. Then make sure that the assertion actually enforces that
+	// the payment was settled by Dave!
 	errChan := testCase.interceptFinalHop()
 	testCase.sendBlindedPayment(blindedRoute)
 

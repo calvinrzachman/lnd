@@ -2933,6 +2933,7 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 			// routing information with DecodeHopIterator function
 			// which process the Sphinx packet.
 			onionReader := bytes.NewReader(pd.OnionBlob)
+			fmt.Printf("[processRemoteAdds()]: onion blob: %+v\n", pd.OnionBlob)
 
 			req := hop.DecodeHopIteratorRequest{
 				OnionReader:    onionReader,
@@ -2950,6 +2951,10 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 	// replay attempts. A particular index in the returned, spare list of
 	// channel iterators should only be used if the failure code at the
 	// same index is lnwire.FailCodeNone.
+	//
+	// NOTE(12/28/22): With Carla's implementation we have already
+	// decrypted the route blinding payload and computed all necessary
+	// forwarding information by the time this batch onion decoding returns.
 	decodeResps, sphinxErr := l.cfg.DecodeHopIterators(
 		fwdPkg.ID(), decodeReqs,
 	)
@@ -3022,6 +3027,9 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 
 		heightNow := l.cfg.BestHeight()
 
+		// NOTE(12/28/22): With Carla's implementation we have already
+		// decrypted the route blinding payload and computed all necessary
+		// forwarding information!
 		pld, err := chanIterator.HopPayload()
 		if err != nil {
 			// If we're unable to process the onion payload, or we
@@ -3048,11 +3056,14 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 				"instructions: %v", err)
 			continue
 		}
+		fmt.Printf("[processRemoteAdds()]: parsed top level onion tlv payload: %+v\n", pld)
 
 		fwdInfo := pld.ForwardingInfo()
+		fmt.Printf("[processRemoteAdds()]: hop forwarding info: %+v\n", fwdInfo)
 
 		switch fwdInfo.NextHop {
 		case hop.Exit:
+			fmt.Println("[processRemoteAdds()]: We are the exit hop for this payment!")
 			err := l.processExitHop(
 				pd, obfuscator, fwdInfo, heightNow, pld,
 			)
@@ -3067,6 +3078,7 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 		// There are additional channels left within this route. So
 		// we'll simply do some forwarding package book-keeping.
 		default:
+			fmt.Println("[processRemoteAdds]: We are an intermediate hop for this payment!")
 			// If hodl.AddIncoming is requested, we will not
 			// validate the forwarded ADD, nor will we send the
 			// packet to the htlc switch.

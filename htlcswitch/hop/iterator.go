@@ -146,8 +146,11 @@ type BlindingKit struct {
 	// forwardingInfo uses the ephemeral blinding key provided to decrypt
 	// a blob of encrypted data provided in the onion and obtain the
 	// forwarding information for the blinded hop.
-	forwardingInfo func(*btcec.PublicKey, []byte) (*ForwardingInfo,
-		error)
+	//
+	// QUESTION(12/29/22): Why is this function signature the way it is?
+	// Do we really use the route blinding point to decrypt the data?
+	forwardingInfo func(blindingPoint *btcec.PublicKey,
+		encryptedData []byte) (*ForwardingInfo, error)
 }
 
 // MakeBlindingKit produces a kit that is used to decrypte and decode
@@ -228,11 +231,20 @@ func deriveForwardingInfo(processor BlindingProcessor, lastHop bool,
 			fwdAmt  = incomingAmount
 		)
 
+		// NOTE(12/28/22): Eventually this will support determination of
+		// the next node via scid or node_id? Should it be an error to not
+		// include a next hop?
 		if routeData.ShortChannelID != nil {
 			nextHop = *routeData.ShortChannelID
 		}
 
+		// NOTE(12/28/22): Should it be an error to not include
+		// payment relay information?
+		// The final hop should not receive payment relay information
+		// (should we validate this is the case?). As a result, the values
+		// for amount_to_forward and outgoing_cltv will incorrectly be 0!
 		if routeData.RelayInfo != nil {
+			fmt.Printf("[blindingKit.forwardingInfo()]: payment relay: %+v\n", routeData.RelayInfo)
 			fwdAmt, err = calculateForwardingAmount(
 				incomingAmount, routeData.RelayInfo.BaseFee,
 				routeData.RelayInfo.FeeRate,
@@ -252,8 +264,9 @@ func deriveForwardingInfo(processor BlindingProcessor, lastHop bool,
 		}
 
 		return &ForwardingInfo{
-			Network:         BitcoinNetwork,
-			NextHop:         nextHop,
+			Network: BitcoinNetwork,
+			NextHop: nextHop,
+			// NOTE(12/28/22): These remain intialized to 0 values for final hop!
 			AmountToForward: fwdAmt,
 			OutgoingCTLV:    expiry,
 			NextBlinding:    nextEph,
@@ -302,6 +315,9 @@ func calculateForwardingAmount(incomingAmount lnwire.MilliSatoshi, baseFee,
 	ceiling := ((uint64(incomingAmount) - uint64(baseFee)) +
 		(1 + uint64(proportionalFee)/proportionalParts) - 1) /
 		(1 + uint64(proportionalFee)/proportionalParts)
+
+	fmt.Printf("[calculateForwardingAmount()]: incoming sats: %d, gearing up "+
+		"to forward %d satoshis\n", incomingAmount, ceiling)
 
 	return lnwire.MilliSatoshi(ceiling), nil
 }
