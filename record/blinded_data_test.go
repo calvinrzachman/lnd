@@ -110,7 +110,7 @@ func TestBlindedDataEncoding(t *testing.T) {
 			}
 
 			b := bytes.NewBuffer(encoded)
-			decodedData, err := DecodeBlindedRouteData(b)
+			decodedData, _, err := DecodeBlindedRouteData(b)
 			require.NoError(t, err)
 
 			require.Equal(t, encodedData, decodedData)

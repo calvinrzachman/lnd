@@ -525,3 +525,47 @@ func validateBlindedRouteData(blindedData *record.BlindedRouteData,
 
 	return nil
 }
+
+// ValidateRouteBlindingPayloadTypes checks the types parsed from a route
+// blinding payload to ensure that the proper fields are either included
+// or omitted. The requirements for this method are described in BOLT 04.
+func validateRouteBlindingPayloadTypes(parsedTypes tlv.TypeMap,
+	isFinalHop bool) error {
+
+	_, hasNextHop := parsedTypes[record.ShortChannelIDType]
+	_, hasNextNode := parsedTypes[record.NextNodeType]
+	_, hasPathID := parsedTypes[record.PathIDType]
+	_, hasForwardingParams := parsedTypes[record.PaymentRelayType]
+
+	if !isFinalHop {
+		// An intermediate hop MUST specify how the payment is to be forwarded.
+		if !hasForwardingParams {
+			return ErrInvalidPayload{
+				Type:      record.PaymentRelayType,
+				Violation: OmittedViolation,
+				FinalHop:  false,
+			}
+		}
+
+		// An intermedate hop MUST specify the node to which we should forward.
+		if !hasNextHop && !hasNextNode {
+			return ErrInvalidPayload{
+				Type:      record.ShortChannelIDType,
+				Violation: OmittedViolation,
+				FinalHop:  false,
+			}
+		}
+	} else {
+		// The final hop MUST have a path_id with which we can validate
+		// this payment is for a blind route we created.
+		if !hasPathID {
+			return ErrInvalidPayload{
+				Type:      record.PathIDType,
+				Violation: OmittedViolation,
+				FinalHop:  true,
+			}
+		}
+	}
+
+	return nil
+}

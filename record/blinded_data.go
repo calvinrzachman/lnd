@@ -59,7 +59,7 @@ type BlindedRouteData struct {
 }
 
 // DecodeBlindedRouteData decodes the data provided within a blinded route.
-func DecodeBlindedRouteData(r io.Reader) (*BlindedRouteData, error) {
+func DecodeBlindedRouteData(r io.Reader) (*BlindedRouteData, tlv.TypeMap, error) {
 	var (
 		routeData = &BlindedRouteData{
 			RelayInfo:   &PaymentRelayInfo{},
@@ -86,12 +86,12 @@ func DecodeBlindedRouteData(r io.Reader) (*BlindedRouteData, error) {
 
 	stream, err := tlv.NewStream(records...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	tlvMap, err := stream.DecodeWithParsedTypes(r)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// If no path ID field was parsed, set the path ID field
@@ -113,7 +113,7 @@ func DecodeBlindedRouteData(r io.Reader) (*BlindedRouteData, error) {
 		routeData.ShortChannelID = &shortID
 	}
 
-	return routeData, nil
+	return routeData, tlvMap, nil
 }
 
 // EncodeBlindedRouteData encodes the blinded route data provided.
