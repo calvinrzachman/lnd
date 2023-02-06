@@ -658,12 +658,11 @@ func (b *blindedForwardTest) createBlindedRoute(hops []*forwardingEdge,
 	// add any forwarding parameters because we're at the final hop.
 	payloadBytes, err := record.EncodeBlindedRouteData(
 		&record.BlindedRouteData{
-			// TODO: we don't have support for the final hop fields,
-			// because only forwarding is supported. We add a next
-			// node ID here so that it _looks like_ a valid
-			// forwarding hop (though in reality it's the last
-			// hop).
-			NextNodeID: dest,
+			// NOTE(2/7/23): the final hop expects a path_id.
+			// For now we use filler data, though in the wild
+			// this field could be used to validate that we created
+			// the blinded route.
+			PathID: bytes.Repeat([]byte{1}, 32),
 		},
 	)
 	require.NoError(b.ht, err, "final payload")
