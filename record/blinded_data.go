@@ -18,6 +18,10 @@ const (
 	// NextNodeType is a record type for the unblinded next node ID.
 	NextNodeType tlv.Type = 4
 
+	// PathIDType is a record type for an optional field recipients can use
+	// to verify that a blinded route is used in the proper context.
+	PathIDType tlv.Type = 6
+
 	// PaymentRelayType is the record type for a tlv containing fee and
 	// cltv forwarding information.
 	PaymentRelayType tlv.Type = 10
@@ -39,6 +43,10 @@ type BlindedRouteData struct {
 
 	// NextNodeID is the unblinded node ID of the next hop.
 	NextNodeID *btcec.PublicKey
+
+	// PathID is an optional field recipients can use to verify
+	// that a blinded route was used as they expect.
+	PathID []byte
 
 	// RelayInfo provides the relay parameters for the hop.
 	RelayInfo *PaymentRelayInfo
@@ -70,6 +78,7 @@ func DecodeBlindedRouteData(r io.Reader) (*BlindedRouteData, error) {
 	records := []tlv.Record{
 		tlv.MakePrimitiveRecord(ShortChannelIDType, &shortID),
 		tlv.MakePrimitiveRecord(NextNodeType, &routeData.NextNodeID),
+		tlv.MakePrimitiveRecord(PathIDType, &routeData.PathID),
 		newPaymentRelayRecord(routeData.RelayInfo),
 		newPaymentConstraintsRecord(routeData.Constraints),
 		routeData.Features.Record(FeatureVectorType),
@@ -83,6 +92,12 @@ func DecodeBlindedRouteData(r io.Reader) (*BlindedRouteData, error) {
 	tlvMap, err := stream.DecodeWithParsedTypes(r)
 	if err != nil {
 		return nil, err
+	}
+
+	// If no path ID field was parsed, set the path ID field
+	// on the resulting payload to nil.
+	if _, ok := tlvMap[PathIDType]; !ok {
+		routeData.PathID = nil
 	}
 
 	if _, ok := tlvMap[PaymentRelayType]; !ok {
@@ -123,6 +138,13 @@ func EncodeBlindedRouteData(data *BlindedRouteData) ([]byte, error) {
 			NextNodeType, &data.NextNodeID,
 		)
 		records = append(records, nodeIDRecord)
+	}
+
+	if data.PathID != nil {
+		pathID := tlv.MakePrimitiveRecord(
+			PathIDType, &data.PathID,
+		)
+		records = append(records, pathID)
 	}
 
 	if data.RelayInfo != nil {
