@@ -160,7 +160,7 @@ func MakeBlindingKit(processor BlindingProcessor,
 		BlindingPoint: blindingPoint,
 		lastHop:       lastHop,
 		forwardingInfo: deriveForwardingInfo(
-			processor, incomingAmount, incomingCltv,
+			processor, lastHop, incomingAmount, incomingCltv,
 		),
 	}
 }
@@ -168,7 +168,7 @@ func MakeBlindingKit(processor BlindingProcessor,
 // deriveForwardingInfo produces a function that will decrypt and deserialize
 // an encrypted blob of data for a hop in a blinded route and reconstruct the
 // forwarding information for the hop from the information provided.
-func deriveForwardingInfo(processor BlindingProcessor,
+func deriveForwardingInfo(processor BlindingProcessor, lastHop bool,
 	incomingAmount lnwire.MilliSatoshi, incomingCltv uint32) func(
 	*btcec.PublicKey, []byte) (*ForwardingInfo, error) {
 
@@ -181,11 +181,18 @@ func deriveForwardingInfo(processor BlindingProcessor,
 		}
 
 		b := bytes.NewBuffer(decrypted)
-		routeData, err := record.DecodeBlindedRouteData(b)
+		routeData, parsedTlvs, err := record.DecodeBlindedRouteData(b)
 		if err != nil {
 			return nil, fmt.Errorf("decode route data: %w", err)
 		}
 
+		// Validate parsed types.
+		err = validateRouteBlindingPayloadTypes(parsedTlvs, lastHop)
+		if err != nil {
+			return nil, err
+		}
+
+		// Validate payment contraints and features.
 		if err := validateBlindedRouteData(
 			routeData, incomingAmount, incomingCltv,
 		); err != nil {
