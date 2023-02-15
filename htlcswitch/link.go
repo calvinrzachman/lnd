@@ -1359,6 +1359,8 @@ func (l *channelLink) processHtlcResolution(resolution invoices.HtlcResolution,
 		l.log.Debugf("received settle resolution for %v "+
 			"with outcome: %v", circuitKey, res.Outcome)
 
+		// settleDesc := lnwallet.SettleLogEntry{}
+
 		return l.settleHTLC(res.Preimage, htlc.pd)
 
 	// For htlc failures, we get the relevant failure message based
@@ -1370,6 +1372,8 @@ func (l *channelLink) processHtlcResolution(resolution invoices.HtlcResolution,
 		// Get the lnwire failure message based on the resolution
 		// result.
 		failure := getResolutionFailure(res, htlc.pd.Amount)
+
+		// failDesc := lnwallet.FailLogEntry{}
 
 		l.sendHTLCError(
 			htlc.pd, failure, htlc.obfuscator, true,
@@ -3321,6 +3325,7 @@ func (l *channelLink) processExitHop(pd lnwallet.LogEntry,
 func (l *channelLink) settleHTLC(preimage lntypes.Preimage,
 	pd lnwallet.LogEntry) error {
 
+	// settleDesc, ok := pd.(*lnwallet.SettleLogEntry)
 	settleDesc, ok := pd.(*lnwallet.AddLogEntry)
 	if !ok {
 		return fmt.Errorf("unexpected HTLC update type: %+v", pd)
@@ -3330,6 +3335,8 @@ func (l *channelLink) settleHTLC(preimage lntypes.Preimage,
 
 	l.log.Infof("settling htlc %v as exit hop", hash)
 
+	// NOTE(2/15/23): This creates a SettleLogEntry. Prior to this we
+	// are dealing with the LogEntry for an Add, or AddLogEntry!
 	err := l.channel.SettleHTLC(
 		preimage, pd.LogIndex(), settleDesc.SourceRef, nil, nil,
 	)
@@ -3393,10 +3400,12 @@ func (l *channelLink) forwardBatch(replay bool, packets ...*htlcPacket) {
 
 // sendHTLCError functions cancels HTLC and send cancel message back to the
 // peer from which HTLC was received.
+// func (l *channelLink) sendHTLCError(pd lnwallet.FailLogEntry,
 func (l *channelLink) sendHTLCError(pd lnwallet.LogEntry,
 	failure *LinkError, e hop.ErrorEncrypter, isReceive bool) {
 
-	failDesc, ok := pd.(*lnwallet.FailLogEntry)
+	// failDesc, ok := pd.(*lnwallet.FailLogEntry)
+	failDesc, ok := pd.(*lnwallet.AddLogEntry)
 	if !ok {
 		return
 	}
@@ -3407,6 +3416,8 @@ func (l *channelLink) sendHTLCError(pd lnwallet.LogEntry,
 		return
 	}
 
+	// NOTE(2/15/23): This creates a FailLogEntry. Prior to this we
+	// are dealing with the LogEntry for an Add, or AddLogEntry!
 	err = l.channel.FailHTLC(pd.LogIndex(), reason, failDesc.SourceRef, nil, nil)
 	if err != nil {
 		l.log.Errorf("unable cancel htlc: %v", err)
