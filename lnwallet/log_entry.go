@@ -18,6 +18,8 @@ type LogEntry interface {
 	IsForwarded() bool
 
 	MarkForwarded()
+
+	// Type() // does this make any sense?
 }
 
 type ChildLogEntry interface {

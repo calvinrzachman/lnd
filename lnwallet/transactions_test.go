@@ -379,17 +379,22 @@ func testVectors(t *testing.T, chanType channeldb.ChannelType, test testCase) {
 func htlcViewFromHTLCs(htlcs []channeldb.HTLC) *htlcView {
 	var theHTLCView htlcView
 	for _, htlc := range htlcs {
-		paymentDesc := &PaymentDescriptor{
+		// paymentDesc := &PaymentDescriptor{
+		// 	RHash:   htlc.RHash,
+		// 	Timeout: htlc.RefundTimeout,
+		// 	Amount:  htlc.Amt,
+		// }
+		addDesc := &AddLogEntry{
 			RHash:   htlc.RHash,
 			Timeout: htlc.RefundTimeout,
 			Amount:  htlc.Amt,
 		}
 		if htlc.Incoming {
 			theHTLCView.theirUpdates =
-				append(theHTLCView.theirUpdates, paymentDesc)
+				append(theHTLCView.theirUpdates, addDesc)
 		} else {
 			theHTLCView.ourUpdates =
-				append(theHTLCView.ourUpdates, paymentDesc)
+				append(theHTLCView.ourUpdates, addDesc)
 		}
 	}
 	return &theHTLCView

@@ -4770,12 +4770,12 @@ func (lc *LightningChannel) RevokeCurrentCommitment() (*lnwire.RevokeAndAck,
 //      that was revoked.
 //   2. The LogEntry of any Add HTLCs that were locked in by this
 //      revocation.
-//   3. The LogEntry of any Settle/Fail HTLCs that were locked in by
+//   3. The (Child)LogEntry of any Settle/Fail HTLCs that were locked in by
 //      this revocation.
 //   4. The set of HTLCs present on the current valid commitment transaction
 //      for the remote party.
 func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
-	*channeldb.FwdPkg, []LogEntry, []LogEntry,
+	*channeldb.FwdPkg, []LogEntry, []ChildLogEntry,
 	[]channeldb.HTLC, error) {
 
 	lc.Lock()
@@ -4829,7 +4829,7 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 	var (
 		addsToForward        []LogEntry
 		addUpdates           []channeldb.LogUpdate
-		settleFailsToForward []LogEntry
+		settleFailsToForward []ChildLogEntry
 		settleFailUpdates    []channeldb.LogUpdate
 	)
 
@@ -4912,7 +4912,7 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 
 			logEntry.MarkForwarded()
 			settleFailsToForward = append(
-				settleFailsToForward, logEntry,
+				settleFailsToForward, childEntry,
 			)
 
 		default:
