@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+
+	"github.com/lightningnetwork/lnd/tlv"
 )
 
 var (
@@ -91,7 +93,7 @@ const (
 	// attacks on the receiver of a payment.
 	PaymentAddrOptional FeatureBit = 15
 
-	// MPPOptional is a required feature bit that signals that the receiver
+	// MPPRequired is a required feature bit that signals that the receiver
 	// of a payment requires settlement of an invoice with more than one
 	// HTLC.
 	MPPRequired FeatureBit = 16
@@ -124,10 +126,111 @@ const (
 	// transactions, which also imply anchor commitments.
 	AnchorsZeroFeeHtlcTxRequired FeatureBit = 22
 
-	// AnchorsZeroFeeHtlcTxRequired is an optional feature bit that signals
+	// AnchorsZeroFeeHtlcTxOptional is an optional feature bit that signals
 	// that the node supports channels having zero-fee second-level HTLC
 	// transactions, which also imply anchor commitments.
 	AnchorsZeroFeeHtlcTxOptional FeatureBit = 23
+
+	// RouteBlindingRequired is a required bit that indicates that the
+	// receiving peer must understand forwarding of blinded payments.
+	RouteBlindingRequired = 24
+
+	// RouteBlindingOptional is an optional bit that indicates that this
+	// node understands forwarding of blinded payments, but the remote
+	// peer is not required to.
+	RouteBlindingOptional = 25
+
+	// ShutdownAnySegwitRequired is an required feature bit that signals
+	// that the sender is able to properly handle/parse segwit witness
+	// programs up to version 16. This enables utilization of Taproot
+	// addresses for cooperative closure addresses.
+	ShutdownAnySegwitRequired FeatureBit = 26
+
+	// ShutdownAnySegwitOptional is an optional feature bit that signals
+	// that the sender is able to properly handle/parse segwit witness
+	// programs up to version 16. This enables utilization of Taproot
+	// addresses for cooperative closure addresses.
+	ShutdownAnySegwitOptional FeatureBit = 27
+
+	// AMPRequired is a required feature bit that signals that the receiver
+	// of a payment supports accepts spontaneous payments, i.e.
+	// sender-generated preimages according to BOLT XX.
+	AMPRequired FeatureBit = 30
+
+	// AMPOptional is an optional feature bit that signals that the receiver
+	// of a payment supports accepts spontaneous payments, i.e.
+	// sender-generated preimages according to BOLT XX.
+	AMPOptional FeatureBit = 31
+
+	// ExplicitChannelTypeRequired is a required bit that denotes that a
+	// connection established with this node is to use explicit channel
+	// commitment types for negotiation instead of the existing implicit
+	// negotiation methods. With this bit, there is no longer a "default"
+	// implicit channel commitment type, allowing a connection to
+	// open/maintain types of several channels over its lifetime.
+	ExplicitChannelTypeRequired = 44
+
+	// ExplicitChannelTypeOptional is an optional bit that denotes that a
+	// connection established with this node is to use explicit channel
+	// commitment types for negotiation instead of the existing implicit
+	// negotiation methods. With this bit, there is no longer a "default"
+	// implicit channel commitment type, allowing a connection to
+	// TODO: Decide on actual feature bit value.
+	ExplicitChannelTypeOptional = 45
+
+	// ScidAliasRequired is a required feature bit that signals that the
+	// node requires understanding of ShortChannelID aliases in the TLV
+	// segment of the funding_locked message.
+	ScidAliasRequired FeatureBit = 46
+
+	// ScidAliasOptional is an optional feature bit that signals that the
+	// node understands ShortChannelID aliases in the TLV segment of the
+	// funding_locked message.
+	ScidAliasOptional FeatureBit = 47
+
+	// PaymentMetadataRequired is a required bit that denotes that if an
+	// invoice contains metadata, it must be passed along with the payment
+	// htlc(s).
+	PaymentMetadataRequired = 48
+
+	// PaymentMetadataOptional is an optional bit that denotes that if an
+	// invoice contains metadata, it may be passed along with the payment
+	// htlc(s).
+	PaymentMetadataOptional = 49
+
+	// ZeroConfRequired is a required feature bit that signals that the
+	// node requires understanding of the zero-conf channel_type.
+	ZeroConfRequired FeatureBit = 50
+
+	// ZeroConfOptional is an optional feature bit that signals that the
+	// node understands the zero-conf channel type.
+	ZeroConfOptional FeatureBit = 51
+
+	// KeysendRequired is a required bit that indicates that the node is
+	// able and willing to accept keysend payments.
+	KeysendRequired = 54
+
+	// KeysendOptional is an optional bit that indicates that the node is
+	// able and willing to accept keysend payments.
+	KeysendOptional = 55
+
+	// ScriptEnforcedLeaseOptional is an optional feature bit that signals
+	// that the node requires channels having zero-fee second-level HTLC
+	// transactions, which also imply anchor commitments, along with an
+	// additional CLTV constraint of a channel lease's expiration height
+	// applied to all outputs that pay directly to the channel initiator.
+	//
+	// TODO: Decide on actual feature bit value.
+	ScriptEnforcedLeaseRequired FeatureBit = 2022
+
+	// ScriptEnforcedLeaseOptional is an optional feature bit that signals
+	// that the node requires channels having zero-fee second-level HTLC
+	// transactions, which also imply anchor commitments, along with an
+	// additional CLTV constraint of a channel lease's expiration height
+	// applied to all outputs that pay directly to the channel initiator.
+	//
+	// TODO: Decide on actual feature bit value.
+	ScriptEnforcedLeaseOptional FeatureBit = 2023
 
 	// maxAllowedSize is a maximum allowed size of feature vector.
 	//
@@ -170,8 +273,26 @@ var Features = map[FeatureBit]string{
 	AnchorsOptional:               "anchor-commitments",
 	AnchorsZeroFeeHtlcTxRequired:  "anchors-zero-fee-htlc-tx",
 	AnchorsZeroFeeHtlcTxOptional:  "anchors-zero-fee-htlc-tx",
+	RouteBlindingRequired:         "route-blinding",
+	RouteBlindingOptional:         "route-blinding",
 	WumboChannelsRequired:         "wumbo-channels",
 	WumboChannelsOptional:         "wumbo-channels",
+	AMPRequired:                   "amp",
+	AMPOptional:                   "amp",
+	PaymentMetadataOptional:       "payment-metadata",
+	PaymentMetadataRequired:       "payment-metadata",
+	ExplicitChannelTypeOptional:   "explicit-commitment-type",
+	ExplicitChannelTypeRequired:   "explicit-commitment-type",
+	KeysendOptional:               "keysend",
+	KeysendRequired:               "keysend",
+	ScriptEnforcedLeaseRequired:   "script-enforced-lease",
+	ScriptEnforcedLeaseOptional:   "script-enforced-lease",
+	ScidAliasRequired:             "scid-alias",
+	ScidAliasOptional:             "scid-alias",
+	ZeroConfRequired:              "zero-conf",
+	ZeroConfOptional:              "zero-conf",
+	ShutdownAnySegwitRequired:     "shutdown-any-segwit",
+	ShutdownAnySegwitOptional:     "shutdown-any-segwit",
 }
 
 // RawFeatureVector represents a set of feature bits as defined in BOLT-09.  A
@@ -180,17 +301,49 @@ var Features = map[FeatureBit]string{
 // can be serialized and deserialized to/from a byte representation that is
 // transmitted in Lightning network messages.
 type RawFeatureVector struct {
-	features map[FeatureBit]bool
+	features map[FeatureBit]struct{}
 }
 
 // NewRawFeatureVector creates a feature vector with all of the feature bits
 // given as arguments enabled.
 func NewRawFeatureVector(bits ...FeatureBit) *RawFeatureVector {
-	fv := &RawFeatureVector{features: make(map[FeatureBit]bool)}
+	fv := &RawFeatureVector{features: make(map[FeatureBit]struct{})}
 	for _, bit := range bits {
 		fv.Set(bit)
 	}
 	return fv
+}
+
+// IsEmpty returns whether the feature vector contains any feature bits.
+func (fv RawFeatureVector) IsEmpty() bool {
+	return len(fv.features) == 0
+}
+
+// OnlyContains determines whether only the specified feature bits are found.
+func (fv RawFeatureVector) OnlyContains(bits ...FeatureBit) bool {
+	if len(bits) != len(fv.features) {
+		return false
+	}
+	for _, bit := range bits {
+		if !fv.IsSet(bit) {
+			return false
+		}
+	}
+	return true
+}
+
+// Equals determines whether two features vectors contain exactly the same
+// features.
+func (fv RawFeatureVector) Equals(other *RawFeatureVector) bool {
+	if len(fv.features) != len(other.features) {
+		return false
+	}
+	for bit := range fv.features {
+		if _, ok := other.features[bit]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // Merges sets all feature bits in other on the receiver's feature vector.
@@ -215,12 +368,13 @@ func (fv *RawFeatureVector) Clone() *RawFeatureVector {
 
 // IsSet returns whether a particular feature bit is enabled in the vector.
 func (fv *RawFeatureVector) IsSet(feature FeatureBit) bool {
-	return fv.features[feature]
+	_, ok := fv.features[feature]
+	return ok
 }
 
 // Set marks a feature as enabled in the vector.
 func (fv *RawFeatureVector) Set(feature FeatureBit) {
-	fv.features[feature] = true
+	fv.features[feature] = struct{}{}
 }
 
 // SafeSet sets the chosen feature bit in the feature vector, but returns an
@@ -371,6 +525,41 @@ func (fv *RawFeatureVector) decode(r io.Reader, length, width int) error {
 	return nil
 }
 
+// sizeFunc returns the length required to encode the feature vector.
+func (fv *RawFeatureVector) sizeFunc() uint64 {
+	return uint64(fv.SerializeSize())
+}
+
+// Record returns a TLV record that can be used to encode/decode raw feature
+// vectors. Note that the length of the feature vector is not included, because
+// it is covered by the TLV record's length field.
+func (fv *RawFeatureVector) Record(recordType tlv.Type) tlv.Record {
+	return tlv.MakeDynamicRecord(
+		recordType, fv, fv.sizeFunc, rawFeatureEncoder,
+		rawFeatureDecoder,
+	)
+}
+
+// rawFeatureEncoder is a custom TLV encoder for raw feature vectors.
+func rawFeatureEncoder(w io.Writer, val interface{}, buf *[8]byte) error {
+	if f, ok := val.(*RawFeatureVector); ok {
+		return f.encode(w, f.SerializeSize(), 8)
+	}
+
+	return tlv.NewTypeForEncodingErr(val, "*lnwire.RawFeatureVector")
+}
+
+// rawFeatureDecoder is a custom TLV decoder for raw feature vectors.
+func rawFeatureDecoder(r io.Reader, val interface{}, buf *[8]byte,
+	l uint64) error {
+
+	if f, ok := val.(*RawFeatureVector); ok {
+		return f.decode(r, int(l), 8)
+	}
+
+	return tlv.NewTypeForEncodingErr(val, "*lnwire.RawFeatureVector")
+}
+
 // FeatureVector represents a set of enabled features. The set stores
 // information on enabled flags and metadata about the feature names. A feature
 // vector is serializable to a compact byte representation that is included in
@@ -435,6 +624,18 @@ func (fv *FeatureVector) UnknownRequiredFeatures() []FeatureBit {
 		}
 	}
 	return unknown
+}
+
+// UnknownFeatures returns a boolean if a feature vector contains *any*
+// unknown features (even if they are off).
+func (fv *FeatureVector) UnknownFeatures() bool {
+	for feature := range fv.features {
+		if !fv.IsKnown(feature) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // Name returns a string identifier for the feature represented by this bit. If

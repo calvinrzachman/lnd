@@ -27,7 +27,7 @@ const (
 	// V3DecodedLen is the length of a decoded v3 onion service.
 	V3DecodedLen = 35
 
-	// V3Len is the length of a v2 onion service including the ".onion"
+	// V3Len is the length of a v3 onion service including the ".onion"
 	// suffix.
 	V3Len = 62
 )
@@ -45,6 +45,9 @@ type OnionAddr struct {
 
 	// Port is the port of the onion address.
 	Port int
+
+	// PrivateKey is the onion address' private key.
+	PrivateKey string
 }
 
 // A compile-time check to ensure that OnionAddr implements the net.Addr

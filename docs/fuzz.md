@@ -1,54 +1,40 @@
 # Fuzzing LND #
 
-The `fuzz` package is organized into subpackages which are named after the `lnd` package they test. Each subpackage has its own set of fuzz targets.
-
-### Setup and Installation ###
-This section will cover setup and installation of `go-fuzz` and fuzzing binaries.
-
-* First, we must get `go-fuzz`.
+The following runs all fuzz tests on default settings:
+```shell
+$  make fuzz
 ```
-$ go get -u github.com/dvyukov/go-fuzz/...
+The following runs all fuzz tests inside the lnwire package, each for a total of 1 minute, using 4 procs. 
+It is recommended that processes be set to the number of processor cores in the system:
+```shell
+$  make fuzz pkg=lnwire fuzztime=1m parallel=4
 ```
-* The following is a command to build all fuzzing harnesses for a specific package.
+Alternatively, individual fuzz tests can be ran manually by setting the working directory to the location of the .go file holding the fuzz tests.
+The go test command can only test one fuzz test at a time:
+```shell
+$  cd lnwire
+$  go test -fuzz=FuzzAcceptChannel -fuzztime=1m -parallel=4
 ```
-$ cd fuzz/<package>
-$ find * -maxdepth 1 -regex '[A-Za-z0-9\-_.]'* -not -name fuzz_utils.go | sed 's/\.go$//1' | xargs -I % sh -c 'go-fuzz-build -func Fuzz_% -o <package>-%-fuzz.zip github.com/lightningnetwork/lnd/fuzz/<package>'
+The following can be used to show all fuzz tests in the working directory:
+```shell
+$  cd lnwire
+$  go test -list=Fuzz.*
 ```
 
-* This may take a while since this will create zip files associated with each fuzzing target.
-
-* Now, run `go-fuzz` with `workdir` set as below!
+Fuzz tests can be ran as normal tests, which only runs the seed corpus:
+```shell
+$  cd lnwire
+$  go test -run=FuzzAcceptChannel -parallel=4
 ```
-$ go-fuzz -bin=<.zip archive here> -workdir=<harness> -procs=<num workers>
-```
+The generated corpus values can be found in the $(go env GOCACHE)/fuzz directory.
+## Options ##
+Several parameters can be appended to the end of the make commands to tune the build process or the way the fuzzer runs.
+- `fuzztime` specifies how long each fuzz test runs for, corresponding to the `go test -fuzztime` option. The default is 30s.
+- `parallel` specifies the number of parallel processes to use while running the harnesses, corresponding to the `go test -parallel` option.
+- `pkg` specifies the `lnd` packages to build or fuzz. The default is to build and run all available packages (`brontide lnwire watchtower/wtwire zpay32`). This can be changed to build/run against individual packages.
 
-`go-fuzz` will print out log lines every couple of seconds. Example output:
-```
-2017/09/19 17:44:23 workers: 8, corpus: 23 (3s ago), crashers: 1, restarts: 1/748, execs: 400690 (16694/sec), cover: 394, uptime: 24s
-```
-Corpus is the number of items in the corpus. `go-fuzz` may add valid inputs to
-the corpus in an attempt to gain more coverage. Crashers is the number of inputs
-resulting in a crash. The inputs, and their outputs are logged in:
-`fuzz/<package>/<harness>/crashers`. `go-fuzz` also creates a `suppressions` directory
-of stacktraces to ignore so that it doesn't create duplicate stacktraces.
-Cover is a number representing edge coverage of the program being fuzzed.
+## Corpus ##
+Fuzzing generally works best with a corpus that is of minimal size while achieving the maximum coverage.
 
-### Brontide ###
-The brontide fuzzers need to be run with a `-timeout` flag of 20 seconds or greater since there is a lot of machine state that must be printed on panic. 
-
-### Corpus ###
-Fuzzing generally works best with a corpus that is of minimal size while achieving the maximum coverage. However, `go-fuzz` automatically minimizes the corpus in-memory before fuzzing so a large corpus shouldn't make a difference - edge coverage is all that really matters.
-
-### Test Harness ###
-If you take a look at the test harnesses that are used, you will see that they all consist of one function: 
-```
-func Fuzz(data []byte) int
-```
-If:
-
-- `-1` is returned, the fuzzing input is ignored
-- `0` is returned, `go-fuzz` will add the input to the corpus and deprioritize it in future mutations.
-- `1` is returned, `go-fuzz` will add the input to the corpus and prioritize it in future mutations.
-
-### Conclusion ###
-Citizens, do your part and `go-fuzz` `lnd` today!
+## Disclosure ##
+If you find any crashers that affect LND security, please disclose with the information found [here](https://github.com/lightningnetwork/lnd/#security).

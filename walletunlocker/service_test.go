@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 	"testing"
@@ -15,8 +14,8 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/lightningnetwork/lnd/aezeed"
-	"github.com/lightningnetwork/lnd/channeldb/kvdb"
 	"github.com/lightningnetwork/lnd/keychain"
+	"github.com/lightningnetwork/lnd/kvdb"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwallet/btcwallet"
@@ -41,12 +40,19 @@ var (
 
 	testRecoveryWindow uint32 = 150
 
-	defaultTestTimeout = 3 * time.Second
+	defaultTestTimeout = 30 * time.Second
 
 	defaultRootKeyIDContext = macaroons.ContextWithRootKeyID(
 		context.Background(), macaroons.DefaultRootKeyID,
 	)
 )
+
+func testLoaderOpts(testDir string) []btcwallet.LoaderOption {
+	dbDir := btcwallet.NetworkDir(testDir, testNetParams)
+	return []btcwallet.LoaderOption{
+		btcwallet.LoaderWithLocalWalletDB(dbDir, true, time.Minute),
+	}
+}
 
 func createTestWallet(t *testing.T, dir string, netParams *chaincfg.Params) {
 	createTestWalletWithPw(t, testPassword, testPassword, dir, netParams)
@@ -82,8 +88,9 @@ func createTestWalletWithPw(t *testing.T, pubPw, privPw []byte, dir string,
 
 func createSeedAndMnemonic(t *testing.T,
 	pass []byte) (*aezeed.CipherSeed, aezeed.Mnemonic) {
+
 	cipherSeed, err := aezeed.New(
-		keychain.KeyDerivationVersion, &testEntropy, time.Now(),
+		keychain.CurrentKeyDerivationVersion, &testEntropy, time.Now(),
 	)
 	require.NoError(t, err)
 
@@ -106,7 +113,7 @@ func openOrCreateTestMacStore(tempDir string, pw *[]byte,
 		return nil, err
 	}
 	db, err := kvdb.Create(
-		kvdb.BoltBackendName, path.Join(netDir, macaroons.DBFilename),
+		kvdb.BoltBackendName, path.Join(netDir, "macaroons.db"),
 		true, kvdb.DefaultDBTimeout,
 	)
 	if err != nil {
@@ -140,15 +147,10 @@ func TestGenSeed(t *testing.T) {
 
 	// First, we'll create a new test directory and unlocker service for
 	// that directory.
-	testDir, err := ioutil.TempDir("", "testcreate")
-	require.NoError(t, err)
-	defer func() {
-		_ = os.RemoveAll(testDir)
-	}()
+	testDir := t.TempDir()
 
 	service := walletunlocker.New(
-		testDir, testNetParams, true, nil, kvdb.DefaultDBTimeout,
-		false,
+		testNetParams, nil, false, testLoaderOpts(testDir),
 	)
 
 	// Now that the service has been created, we'll ask it to generate a
@@ -179,14 +181,9 @@ func TestGenSeedGenerateEntropy(t *testing.T) {
 
 	// First, we'll create a new test directory and unlocker service for
 	// that directory.
-	testDir, err := ioutil.TempDir("", "testcreate")
-	require.NoError(t, err)
-	defer func() {
-		_ = os.RemoveAll(testDir)
-	}()
+	testDir := t.TempDir()
 	service := walletunlocker.New(
-		testDir, testNetParams, true, nil, kvdb.DefaultDBTimeout,
-		false,
+		testNetParams, nil, false, testLoaderOpts(testDir),
 	)
 
 	// Now that the service has been created, we'll ask it to generate a
@@ -216,14 +213,9 @@ func TestGenSeedInvalidEntropy(t *testing.T) {
 
 	// First, we'll create a new test directory and unlocker service for
 	// that directory.
-	testDir, err := ioutil.TempDir("", "testcreate")
-	require.NoError(t, err)
-	defer func() {
-		_ = os.RemoveAll(testDir)
-	}()
+	testDir := t.TempDir()
 	service := walletunlocker.New(
-		testDir, testNetParams, true, nil, kvdb.DefaultDBTimeout,
-		false,
+		testNetParams, nil, false, testLoaderOpts(testDir),
 	)
 
 	// Now that the service has been created, we'll ask it to generate a
@@ -237,7 +229,7 @@ func TestGenSeedInvalidEntropy(t *testing.T) {
 
 	// We should get an error now since the entropy source was invalid.
 	ctx := context.Background()
-	_, err = service.GenSeed(ctx, genSeedReq)
+	_, err := service.GenSeed(ctx, genSeedReq)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "incorrect entropy length")
 }
@@ -248,16 +240,11 @@ func TestInitWallet(t *testing.T) {
 	t.Parallel()
 
 	// testDir is empty, meaning wallet was not created from before.
-	testDir, err := ioutil.TempDir("", "testcreate")
-	require.NoError(t, err)
-	defer func() {
-		_ = os.RemoveAll(testDir)
-	}()
+	testDir := t.TempDir()
 
 	// Create new UnlockerService.
 	service := walletunlocker.New(
-		testDir, testNetParams, true, nil, kvdb.DefaultDBTimeout,
-		false,
+		testNetParams, nil, false, testLoaderOpts(testDir),
 	)
 
 	// Once we have the unlocker service created, we'll now instantiate a
@@ -322,7 +309,7 @@ func TestInitWallet(t *testing.T) {
 
 	// Now calling InitWallet should fail, since a wallet already exists in
 	// the directory.
-	_, err = service.InitWallet(ctx, req)
+	_, err := service.InitWallet(ctx, req)
 	require.Error(t, err)
 
 	// Similarly, if we try to do GenSeed again, we should get an error as
@@ -337,16 +324,11 @@ func TestCreateWalletInvalidEntropy(t *testing.T) {
 	t.Parallel()
 
 	// testDir is empty, meaning wallet was not created from before.
-	testDir, err := ioutil.TempDir("", "testcreate")
-	require.NoError(t, err)
-	defer func() {
-		_ = os.RemoveAll(testDir)
-	}()
+	testDir := t.TempDir()
 
 	// Create new UnlockerService.
 	service := walletunlocker.New(
-		testDir, testNetParams, true, nil, kvdb.DefaultDBTimeout,
-		false,
+		testNetParams, nil, false, testLoaderOpts(testDir),
 	)
 
 	// We'll attempt to init the wallet with an invalid cipher seed and
@@ -358,7 +340,7 @@ func TestCreateWalletInvalidEntropy(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	_, err = service.InitWallet(ctx, req)
+	_, err := service.InitWallet(ctx, req)
 	require.Error(t, err)
 }
 
@@ -369,17 +351,12 @@ func TestUnlockWallet(t *testing.T) {
 	t.Parallel()
 
 	// testDir is empty, meaning wallet was not created from before.
-	testDir, err := ioutil.TempDir("", "testunlock")
-	require.NoError(t, err)
-	defer func() {
-		_ = os.RemoveAll(testDir)
-	}()
+	testDir := t.TempDir()
 
 	// Create new UnlockerService that'll also drop the wallet's history on
 	// unlock.
 	service := walletunlocker.New(
-		testDir, testNetParams, true, nil, kvdb.DefaultDBTimeout,
-		true,
+		testNetParams, nil, true, testLoaderOpts(testDir),
 	)
 
 	ctx := context.Background()
@@ -390,7 +367,7 @@ func TestUnlockWallet(t *testing.T) {
 	}
 
 	// Should fail to unlock non-existing wallet.
-	_, err = service.UnlockWallet(ctx, req)
+	_, err := service.UnlockWallet(ctx, req)
 	require.Error(t, err)
 
 	// Create a wallet we can try to unlock.
@@ -427,24 +404,21 @@ func TestUnlockWallet(t *testing.T) {
 		// Send a fake macaroon that should be returned in the response
 		// in the async code above.
 		service.MacResponseChan <- testMac
+		require.NoError(t, unlockMsg.UnloadWallet())
 
 	case <-time.After(defaultTestTimeout):
 		t.Fatalf("password not received")
 	}
 }
 
-// TestChangeWalletPasswordNewRootkey tests that we can successfully change the
+// TestChangeWalletPasswordNewRootKey tests that we can successfully change the
 // wallet's password needed to unlock it and rotate the root key for the
 // macaroons in the same process.
-func TestChangeWalletPasswordNewRootkey(t *testing.T) {
+func TestChangeWalletPasswordNewRootKey(t *testing.T) {
 	t.Parallel()
 
 	// testDir is empty, meaning wallet was not created from before.
-	testDir, err := ioutil.TempDir("", "testchangepassword")
-	require.NoError(t, err)
-	defer func() {
-		_ = os.RemoveAll(testDir)
-	}()
+	testDir := t.TempDir()
 
 	// Changing the password of the wallet will also try to change the
 	// password of the macaroon DB. We create a default DB here but close it
@@ -460,7 +434,7 @@ func TestChangeWalletPasswordNewRootkey(t *testing.T) {
 	// requested.
 	var tempFiles []string
 	for i := 0; i < 3; i++ {
-		file, err := ioutil.TempFile(testDir, "")
+		file, err := os.CreateTemp(testDir, "")
 		if err != nil {
 			t.Fatalf("unable to create temp file: %v", err)
 		}
@@ -470,9 +444,9 @@ func TestChangeWalletPasswordNewRootkey(t *testing.T) {
 
 	// Create a new UnlockerService with our temp files.
 	service := walletunlocker.New(
-		testDir, testNetParams, true, tempFiles, kvdb.DefaultDBTimeout,
-		false,
+		testNetParams, tempFiles, false, testLoaderOpts(testDir),
 	)
+	service.SetMacaroonDB(store.Backend)
 
 	ctx := context.Background()
 	newPassword := []byte("hunter2???")
@@ -530,6 +504,7 @@ func TestChangeWalletPasswordNewRootkey(t *testing.T) {
 		// Send a fake macaroon that should be returned in the response
 		// in the async code above.
 		service.MacResponseChan <- testMac
+		require.NoError(t, unlockMsg.UnloadWallet())
 
 	case <-time.After(defaultTestTimeout):
 		t.Fatalf("password not received")
@@ -537,7 +512,9 @@ func TestChangeWalletPasswordNewRootkey(t *testing.T) {
 
 	// The files should no longer exist.
 	for _, tempFile := range tempFiles {
-		if _, err := os.Open(tempFile); err == nil {
+		f, err := os.Open(tempFile)
+		if err == nil {
+			_ = f.Close()
 			t.Fatal("file exists but it shouldn't")
 		}
 	}
@@ -551,11 +528,7 @@ func TestChangeWalletPasswordStateless(t *testing.T) {
 	t.Parallel()
 
 	// testDir is empty, meaning wallet was not created from before.
-	testDir, err := ioutil.TempDir("", "testchangepasswordstateless")
-	require.NoError(t, err)
-	defer func() {
-		_ = os.RemoveAll(testDir)
-	}()
+	testDir := t.TempDir()
 
 	// Changing the password of the wallet will also try to change the
 	// password of the macaroon DB. We create a default DB here but close it
@@ -568,7 +541,7 @@ func TestChangeWalletPasswordStateless(t *testing.T) {
 
 	// Create a temp file that will act as the macaroon DB file that will
 	// be deleted by changing the password.
-	tmpFile, err := ioutil.TempFile(testDir, "")
+	tmpFile, err := os.CreateTemp(testDir, "")
 	require.NoError(t, err)
 	tempMacFile := tmpFile.Name()
 	err = tmpFile.Close()
@@ -581,10 +554,11 @@ func TestChangeWalletPasswordStateless(t *testing.T) {
 
 	// Create a new UnlockerService with our temp files.
 	service := walletunlocker.New(
-		testDir, testNetParams, true, []string{
+		testNetParams, []string{
 			tempMacFile, nonExistingFile,
-		}, kvdb.DefaultDBTimeout, false,
+		}, false, testLoaderOpts(testDir),
 	)
+	service.SetMacaroonDB(store.Backend)
 
 	// Create a wallet we can try to unlock. We use the default password
 	// so we can check that the unlocker service defaults to this when
@@ -633,6 +607,7 @@ func TestChangeWalletPasswordStateless(t *testing.T) {
 		// Send a fake macaroon that should be returned in the response
 		// in the async code above.
 		service.MacResponseChan <- testMac
+		require.NoError(t, unlockMsg.UnloadWallet())
 
 	case <-time.After(defaultTestTimeout):
 		t.Fatalf("password not received")
@@ -642,47 +617,50 @@ func TestChangeWalletPasswordStateless(t *testing.T) {
 func doChangePassword(service *walletunlocker.UnlockerService, testDir string,
 	req *lnrpc.ChangePasswordRequest, errChan chan error) {
 
-	// When providing the correct wallet's current password and a
-	// new password that meets the length requirement, the password
-	// change should succeed.
+	// When providing the correct wallet's current password and a new
+	// password that meets the length requirement, the password change
+	// should succeed.
 	ctx := context.Background()
 	response, err := service.ChangePassword(ctx, req)
 	if err != nil {
-		errChan <- fmt.Errorf("could not change password: %v", err)
+		errChan <- fmt.Errorf("could not change password: %w", err)
 		return
 	}
 
 	if !bytes.Equal(response.AdminMacaroon, testMac) {
-		errChan <- fmt.Errorf("mismatched macaroon: expected "+
-			"%x, got %x", testMac, response.AdminMacaroon)
+		errChan <- fmt.Errorf("mismatched macaroon: expected %x, got "+
+			"%x", testMac, response.AdminMacaroon)
 	}
 
-	// Close the macaroon DB and try to open it and read the root
-	// key with the new password.
+	// Close the macaroon DB and try to open it and read the root key with
+	// the new password.
 	store, err := openOrCreateTestMacStore(
 		testDir, &testPassword, testNetParams,
 	)
 	if err != nil {
-		errChan <- fmt.Errorf("could not create test store: %v", err)
+		errChan <- fmt.Errorf("could not create test store: %w", err)
 		return
 	}
 	_, _, err = store.RootKey(defaultRootKeyIDContext)
 	if err != nil {
-		errChan <- fmt.Errorf("could not get root key: %v", err)
+		errChan <- fmt.Errorf("could not get root key: %w", err)
 		return
 	}
 
-	// Do cleanup now. Since we are in a go func, the defer at the
-	// top of the outer would not work, because it would delete
-	// the directory before we could check the content in here.
+	// Do cleanup now. Since we are in a go func, the defer at the top of
+	// the outer would not work, because it would delete the directory
+	// before we could check the content in here.
 	err = store.Close()
 	if err != nil {
-		errChan <- fmt.Errorf("could not close store: %v", err)
+		errChan <- fmt.Errorf("could not close store: %w", err)
 		return
 	}
-	err = os.RemoveAll(testDir)
+
+	// The backend database isn't closed automatically if the store is
+	// closed, do that now manually.
+	err = store.Backend.Close()
 	if err != nil {
-		errChan <- err
+		errChan <- fmt.Errorf("could not close db: %w", err)
 		return
 	}
 }

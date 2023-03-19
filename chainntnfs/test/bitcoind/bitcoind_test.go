@@ -1,3 +1,4 @@
+//go:build dev
 // +build dev
 
 package bitcoind_test
@@ -11,5 +12,13 @@ import (
 // TestInterfaces executes the generic notifier test suite against a bitcoind
 // powered chain notifier.
 func TestInterfaces(t *testing.T) {
-	chainntnfstest.TestInterfaces(t, "bitcoind")
+	t.Run("bitcoind", func(st *testing.T) {
+		st.Parallel()
+		chainntnfstest.TestInterfaces(st, "bitcoind")
+	})
+
+	t.Run("bitcoind rpc polling", func(st *testing.T) {
+		st.Parallel()
+		chainntnfstest.TestInterfaces(st, "bitcoind-rpc-polling")
+	})
 }

@@ -18,8 +18,10 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/go-errors/errors"
 	"github.com/lightningnetwork/lnd/lnrpc"
+	"github.com/lightningnetwork/lnd/lnrpc/walletrpc"
 	"github.com/lightningnetwork/lnd/lntest"
 	"github.com/lightningnetwork/lnd/lntest/wait"
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -29,6 +31,8 @@ var (
 	lndExecutable = flag.String(
 		"lndexec", itestLndBinary, "full path to lnd binary",
 	)
+
+	slowMineDelay = 20 * time.Millisecond
 )
 
 const (
@@ -36,7 +40,6 @@ const (
 	defaultCSV          = lntest.DefaultCSV
 	defaultTimeout      = lntest.DefaultTimeout
 	minerMempoolTimeout = lntest.MinerMempoolTimeout
-	channelOpenTimeout  = lntest.ChannelOpenTimeout
 	channelCloseTimeout = lntest.ChannelCloseTimeout
 	itestLndBinary      = "../../lnd-itest"
 	anchorSize          = 330
@@ -44,6 +47,7 @@ const (
 
 	AddrTypeWitnessPubkeyHash = lnrpc.AddressType_WITNESS_PUBKEY_HASH
 	AddrTypeNestedPubkeyHash  = lnrpc.AddressType_NESTED_PUBKEY_HASH
+	AddrTypeTaprootPubkey     = lnrpc.AddressType_TAPROOT_PUBKEY
 )
 
 // harnessTest wraps a regular testing.T providing enhanced error detection
@@ -79,7 +83,7 @@ func (h *harnessTest) Skipf(format string, args ...interface{}) {
 // the error stack traces it produces.
 func (h *harnessTest) Fatalf(format string, a ...interface{}) {
 	if h.lndHarness != nil {
-		h.lndHarness.SaveProfilesPages()
+		h.lndHarness.SaveProfilesPages(h.t)
 	}
 
 	stacktrace := errors.Wrap(fmt.Sprintf(format, a...), 1).ErrorStack()
@@ -95,7 +99,6 @@ func (h *harnessTest) Fatalf(format string, a ...interface{}) {
 // RunTestCase executes a harness test case. Any errors or panics will be
 // represented as fatal.
 func (h *harnessTest) RunTestCase(testCase *testCase) {
-
 	h.testCase = testCase
 	defer func() {
 		h.testCase = nil
@@ -197,7 +200,7 @@ func waitForNTxsInMempool(miner *rpcclient.Client, n int,
 // mineBlocks mine 'num' of blocks and check that blocks are present in
 // node blockchain. numTxs should be set to the number of transactions
 // (excluding the coinbase) we expect to be included in the first mined block.
-func mineBlocks(t *harnessTest, net *lntest.NetworkHarness,
+func mineBlocksFast(t *harnessTest, net *lntest.NetworkHarness,
 	num uint32, numTxs int) []*wire.MsgBlock {
 
 	// If we expect transactions to be included in the blocks we'll mine,
@@ -206,7 +209,7 @@ func mineBlocks(t *harnessTest, net *lntest.NetworkHarness,
 	var err error
 	if numTxs > 0 {
 		txids, err = waitForNTxsInMempool(
-			net.Miner.Node, numTxs, minerMempoolTimeout,
+			net.Miner.Client, numTxs, minerMempoolTimeout,
 		)
 		if err != nil {
 			t.Fatalf("unable to find txns in mempool: %v", err)
@@ -215,16 +218,77 @@ func mineBlocks(t *harnessTest, net *lntest.NetworkHarness,
 
 	blocks := make([]*wire.MsgBlock, num)
 
-	blockHashes, err := net.Miner.Node.Generate(num)
+	blockHashes, err := net.Miner.Client.Generate(num)
 	if err != nil {
 		t.Fatalf("unable to generate blocks: %v", err)
 	}
 
 	for i, blockHash := range blockHashes {
-		block, err := net.Miner.Node.GetBlock(blockHash)
+		block, err := net.Miner.Client.GetBlock(blockHash)
 		if err != nil {
 			t.Fatalf("unable to get block: %v", err)
 		}
+
+		blocks[i] = block
+	}
+
+	// Finally, assert that all the transactions were included in the first
+	// block.
+	for _, txid := range txids {
+		assertTxInBlock(t, blocks[0], txid)
+	}
+
+	return blocks
+}
+
+// mineBlocksSlow mines 'num' of blocks and checks that blocks are present in
+// the mining node's blockchain. numTxs should be set to the number of
+// transactions (excluding the coinbase) we expect to be included in the first
+// mined block. Between each mined block an artificial delay is introduced to
+// give all network participants time to catch up.
+//
+// NOTE: This function currently is just an alias for mineBlocksSlow.
+func mineBlocks(t *harnessTest, net *lntest.NetworkHarness,
+	num uint32, numTxs int) []*wire.MsgBlock {
+
+	return mineBlocksSlow(t, net, num, numTxs)
+}
+
+// mineBlocksSlow mines 'num' of blocks and checks that blocks are present in
+// the mining node's blockchain. numTxs should be set to the number of
+// transactions (excluding the coinbase) we expect to be included in the first
+// mined block. Between each mined block an artificial delay is introduced to
+// give all network participants time to catch up.
+func mineBlocksSlow(t *harnessTest, net *lntest.NetworkHarness,
+	num uint32, numTxs int) []*wire.MsgBlock {
+
+	t.t.Helper()
+
+	// If we expect transactions to be included in the blocks we'll mine,
+	// we wait here until they are seen in the miner's mempool.
+	var txids []*chainhash.Hash
+	var err error
+	if numTxs > 0 {
+		txids, err = waitForNTxsInMempool(
+			net.Miner.Client, numTxs, minerMempoolTimeout,
+		)
+		require.NoError(t.t, err, "unable to find txns in mempool")
+	}
+
+	blocks := make([]*wire.MsgBlock, num)
+	blockHashes := make([]*chainhash.Hash, 0, num)
+
+	for i := uint32(0); i < num; i++ {
+		generatedHashes, err := net.Miner.Client.Generate(1)
+		require.NoError(t.t, err, "generate blocks")
+		blockHashes = append(blockHashes, generatedHashes...)
+
+		time.Sleep(slowMineDelay)
+	}
+
+	for i, blockHash := range blockHashes {
+		block, err := net.Miner.Client.GetBlock(blockHash)
+		require.NoError(t.t, err, "get blocks")
 
 		blocks[i] = block
 	}
@@ -249,13 +313,20 @@ func assertTxInBlock(t *harnessTest, block *wire.MsgBlock, txid *chainhash.Hash)
 	t.Fatalf("tx was not included in block")
 }
 
-func assertWalletUnspent(t *harnessTest, node *lntest.HarnessNode, out *lnrpc.OutPoint) {
+func assertWalletUnspent(t *harnessTest, node *lntest.HarnessNode,
+	out *lnrpc.OutPoint, account string) {
+
 	t.t.Helper()
 
+	ctxb := context.Background()
 	err := wait.NoError(func() error {
-		ctxt, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+		ctxt, cancel := context.WithTimeout(ctxb, defaultTimeout)
 		defer cancel()
-		unspent, err := node.ListUnspent(ctxt, &lnrpc.ListUnspentRequest{})
+		unspent, err := node.WalletKitClient.ListUnspent(
+			ctxt, &walletrpc.ListUnspentRequest{
+				Account: account,
+			},
+		)
 		if err != nil {
 			return err
 		}
@@ -276,8 +347,5 @@ func assertWalletUnspent(t *harnessTest, node *lntest.HarnessNode, out *lnrpc.Ou
 
 		return err
 	}, defaultTimeout)
-	if err != nil {
-		t.Fatalf("outpoint %s not unspent by %s's wallet: %v", out,
-			node.Name(), err)
-	}
+	require.NoError(t.t, err)
 }

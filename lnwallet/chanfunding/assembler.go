@@ -1,8 +1,8 @@
 package chanfunding
 
 import (
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 )
 
@@ -102,6 +102,16 @@ type Intent interface {
 	// selection, we may bleed from of that LocalAmt into fees to minimize
 	// change.
 	LocalFundingAmt() btcutil.Amount
+
+	// Inputs returns all inputs to the final funding transaction that we
+	// know about. Note that there might be more, but we are not (yet)
+	// aware of.
+	Inputs() []wire.OutPoint
+
+	// Outputs returns all outputs of the final funding transaction that we
+	// know about. Note that there might be more, but we are not (yet)
+	// aware of.
+	Outputs() []*wire.TxOut
 
 	// Cancel allows the caller to cancel a funding Intent at any time.
 	// This will return any resources such as coins back to the eligible

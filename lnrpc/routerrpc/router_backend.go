@@ -2,17 +2,20 @@ package routerrpc
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	math "math"
 	"time"
 
-	"github.com/btcsuite/btcd/btcec"
-
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcd/wire"
+	sphinx "github.com/lightningnetwork/lightning-onion"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/feature"
 	"github.com/lightningnetwork/lnd/htlcswitch"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lntypes"
@@ -22,6 +25,15 @@ import (
 	"github.com/lightningnetwork/lnd/routing/route"
 	"github.com/lightningnetwork/lnd/subscribe"
 	"github.com/lightningnetwork/lnd/zpay32"
+)
+
+const (
+	// DefaultMaxParts is the default number of splits we'll possibly use
+	// for MPP when the user is attempting to send a payment.
+	//
+	// TODO(roasbeef): make this value dynamic based on expected number of
+	// attempts for given amount.
+	DefaultMaxParts = 16
 )
 
 // RouterBackend contains the backend implementation of the router rpc sub
@@ -34,6 +46,11 @@ type RouterBackend struct {
 	// capacity of a channel to populate in responses.
 	FetchChannelCapacity func(chanID uint64) (btcutil.Amount, error)
 
+	// FetchAmountPairCapacity determines the maximal channel capacity
+	// between two nodes given a certain amount.
+	FetchAmountPairCapacity func(nodeFrom, nodeTo route.Vertex,
+		amount lnwire.MilliSatoshi) (btcutil.Amount, error)
+
 	// FetchChannelEndpoints returns the pubkeys of both endpoints of the
 	// given channel id.
 	FetchChannelEndpoints func(chanID uint64) (route.Vertex,
@@ -41,11 +58,7 @@ type RouterBackend struct {
 
 	// FindRoutes is a closure that abstracts away how we locate/query for
 	// routes.
-	FindRoute func(source, target route.Vertex,
-		amt lnwire.MilliSatoshi, restrictions *routing.RestrictParams,
-		destCustomRecords record.CustomSet,
-		routeHints map[route.Vertex][]*channeldb.ChannelEdgePolicy,
-		finalExpiry uint16) (*route.Route, error)
+	FindRoute func(*routing.RouteRequest) (*route.Route, float64, error)
 
 	MissionControl MissionControl
 
@@ -74,6 +87,16 @@ type RouterBackend struct {
 	// InterceptableForwarder exposes the ability to intercept forward events
 	// by letting the router register a ForwardInterceptor.
 	InterceptableForwarder htlcswitch.InterceptableHtlcForwarder
+
+	// SetChannelEnabled exposes the ability to manually enable a channel.
+	SetChannelEnabled func(wire.OutPoint) error
+
+	// SetChannelDisabled exposes the ability to manually disable a channel
+	SetChannelDisabled func(wire.OutPoint) error
+
+	// SetChannelAuto exposes the ability to restore automatic channel state
+	// management after manually setting channel status.
+	SetChannelAuto func(wire.OutPoint) error
 }
 
 // MissionControl defines the mission control dependencies of routerrpc.
@@ -81,7 +104,7 @@ type MissionControl interface {
 	// GetProbability is expected to return the success probability of a
 	// payment from fromNode to toNode.
 	GetProbability(fromNode, toNode route.Vertex,
-		amt lnwire.MilliSatoshi) float64
+		amt lnwire.MilliSatoshi, capacity btcutil.Amount) float64
 
 	// ResetHistory resets the history of MissionControl returning it to a
 	// state as if no payment attempts have been made.
@@ -91,15 +114,27 @@ type MissionControl interface {
 	// state and actual probability estimates.
 	GetHistorySnapshot() *routing.MissionControlSnapshot
 
+	// ImportHistory imports the mission control snapshot to our internal
+	// state. This import will only be applied in-memory, and will not be
+	// persisted across restarts.
+	ImportHistory(snapshot *routing.MissionControlSnapshot, force bool) error
+
 	// GetPairHistorySnapshot returns the stored history for a given node
 	// pair.
 	GetPairHistorySnapshot(fromNode,
 		toNode route.Vertex) routing.TimedPairResult
+
+	// GetConfig gets mission control's current config.
+	GetConfig() *routing.MissionControlConfig
+
+	// SetConfig sets mission control's config to the values provided, if
+	// they are valid.
+	SetConfig(cfg *routing.MissionControlConfig) error
 }
 
 // QueryRoutes attempts to query the daemons' Channel Router for a possible
 // route to a target destination capable of carrying a specific amount of
-// satoshis within the route's flow. The retuned route contains the full
+// satoshis within the route's flow. The returned route contains the full
 // details required to craft and send an HTLC, also including the necessary
 // information that should be present within the Sphinx packet encapsulated
 // within the HTLC.
@@ -109,21 +144,49 @@ type MissionControl interface {
 func (r *RouterBackend) QueryRoutes(ctx context.Context,
 	in *lnrpc.QueryRoutesRequest) (*lnrpc.QueryRoutesResponse, error) {
 
-	parsePubKey := func(key string) (route.Vertex, error) {
-		pubKeyBytes, err := hex.DecodeString(key)
-		if err != nil {
-			return route.Vertex{}, err
-		}
-
-		return route.NewVertexFromBytes(pubKeyBytes)
-	}
-
-	// Parse the hex-encoded source and target public keys into full public
-	// key objects we can properly manipulate.
-	targetPubKey, err := parsePubKey(in.PubKey)
+	routeReq, err := r.parseQueryRoutesRequest(in)
 	if err != nil {
 		return nil, err
 	}
+
+	// Query the channel router for a possible path to the destination that
+	// can carry `in.Amt` satoshis _including_ the total fee required on
+	// the route
+	route, successProb, err := r.FindRoute(routeReq)
+	if err != nil {
+		return nil, err
+	}
+
+	// For each valid route, we'll convert the result into the format
+	// required by the RPC system.
+	rpcRoute, err := r.MarshallRoute(route)
+	if err != nil {
+		return nil, err
+	}
+
+	routeResp := &lnrpc.QueryRoutesResponse{
+		Routes:      []*lnrpc.Route{rpcRoute},
+		SuccessProb: successProb,
+	}
+
+	return routeResp, nil
+}
+
+func parsePubKey(key string) (route.Vertex, error) {
+	pubKeyBytes, err := hex.DecodeString(key)
+	if err != nil {
+		return route.Vertex{}, err
+	}
+
+	return route.NewVertexFromBytes(pubKeyBytes)
+}
+
+//nolint:funlen
+func (r *RouterBackend) parseQueryRoutesRequest(in *lnrpc.QueryRoutesRequest) (
+	*routing.RouteRequest, error) {
+
+	// Parse the hex-encoded source public key into a full public key that
+	// we can properly manipulate.
 
 	var sourcePubKey route.Vertex
 	if in.SourcePubKey != "" {
@@ -193,7 +256,79 @@ func (r *RouterBackend) QueryRoutes(ctx context.Context,
 	if sourcePubKey != r.SelfNode {
 		maxTotalTimelock = math.MaxUint32
 	}
-	cltvLimit, err := ValidateCLTVLimit(in.CltvLimit, maxTotalTimelock)
+
+	// If we have a blinded path set, we'll get a few of our fields from
+	// inside of the path rather than the request's fields.
+	var (
+		cltvLimit      = in.CltvLimit
+		targetPubKey   *route.Vertex
+		routeHintEdges map[route.Vertex][]*channeldb.CachedEdgePolicy
+		blindedPmt     *routing.BlindedPayment
+	)
+
+	// Validate that the fields provided in the request are sane depending
+	// on whether it is using a blinded path or not.
+	if in.BlindedPath != nil { //nolint:nestif
+		if len(in.PubKey) != 0 {
+			return nil, fmt.Errorf("target pubkey: %x should "+
+				"not be set when blinded path is provided",
+				in.PubKey)
+		}
+
+		var (
+			limitSet     = in.CltvLimit != 0
+			blindedLimit uint32
+		)
+
+		if in.BlindedPath.RelayConstraints != nil {
+			blindedLimit = in.BlindedPath.RelayConstraints.CltvLimit
+		}
+
+		if limitSet && in.CltvLimit != blindedLimit {
+			return nil, fmt.Errorf("cltv limit in request: %v "+
+				"different to blinded path: %v", in.CltvLimit,
+				blindedLimit)
+		}
+		cltvLimit = blindedLimit
+
+		if len(in.RouteHints) > 0 {
+			return nil, errors.New("route hints and blinded " +
+				"path can't both be set")
+		}
+
+		blindedPmt, err = unmarshalBlindedPayment(in.BlindedPath)
+		if err != nil {
+			return nil, fmt.Errorf("unmarshal blinded payment: %w",
+				err)
+		}
+
+		if err := blindedPmt.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid blinded path: %w", err)
+		}
+	} else {
+		// If we do not have a blinded path, a target pubkey must be
+		// set.
+		pk, err := parsePubKey(in.PubKey)
+		if err != nil {
+			return nil, err
+		}
+		targetPubKey = &pk
+
+		// Convert route hints to an edge map.
+		routeHints, err := unmarshallRouteHints(in.RouteHints)
+		if err != nil {
+			return nil, err
+		}
+
+		routeHintEdges, err = routing.RouteHintsToEdges(
+			routeHints, *targetPubKey,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	cltvLimit, err = ValidateCLTVLimit(cltvLimit, maxTotalTimelock)
 	if err != nil {
 		return nil, err
 	}
@@ -201,10 +336,17 @@ func (r *RouterBackend) QueryRoutes(ctx context.Context,
 	// We need to subtract the final delta before passing it into path
 	// finding. The optimal path is independent of the final cltv delta and
 	// the path finding algorithm is unaware of this value.
-	finalCLTVDelta := r.DefaultFinalCltvDelta
-	if in.FinalCltvDelta != 0 {
-		finalCLTVDelta = uint16(in.FinalCltvDelta)
+	finalCLTVDelta := FinalCLTVDelta(
+		uint16(in.FinalCltvDelta), r.DefaultFinalCltvDelta,
+	)
+
+	// Do bounds checking without block padding so we don't give routes
+	// that will leave the router in a zombie payment state.
+	err = routing.ValidateCLTVLimit(cltvLimit, finalCLTVDelta, false)
+	if err != nil {
+		return nil, err
 	}
+
 	cltvLimit -= uint32(finalCLTVDelta)
 
 	// Parse destination feature bits.
@@ -216,7 +358,8 @@ func (r *RouterBackend) QueryRoutes(ctx context.Context,
 	restrictions := &routing.RestrictParams{
 		FeeLimit: feeLimit,
 		ProbabilitySource: func(fromNode, toNode route.Vertex,
-			amt lnwire.MilliSatoshi) float64 {
+			amt lnwire.MilliSatoshi,
+			capacity btcutil.Amount) float64 {
 
 			if _, ok := ignoredNodes[fromNode]; ok {
 				return 0
@@ -235,7 +378,7 @@ func (r *RouterBackend) QueryRoutes(ctx context.Context,
 			}
 
 			return r.MissionControl.GetProbability(
-				fromNode, toNode, amt,
+				fromNode, toNode, amt, capacity,
 			)
 		},
 		DestCustomRecords: record.CustomSet(in.DestCustomRecords),
@@ -267,69 +410,118 @@ func (r *RouterBackend) QueryRoutes(ctx context.Context,
 		return nil, err
 	}
 
-	// Convert route hints to an edge map.
-	routeHints, err := unmarshallRouteHints(in.RouteHints)
-	if err != nil {
-		return nil, err
-	}
-	routeHintEdges, err := routing.RouteHintsToEdges(
-		routeHints, targetPubKey,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	// Query the channel router for a possible path to the destination that
-	// can carry `in.Amt` satoshis _including_ the total fee required on
-	// the route.
-	route, err := r.FindRoute(
-		sourcePubKey, targetPubKey, amt, restrictions,
-		customRecords, routeHintEdges, finalCLTVDelta,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	// For each valid route, we'll convert the result into the format
-	// required by the RPC system.
-	rpcRoute, err := r.MarshallRoute(route)
-	if err != nil {
-		return nil, err
-	}
-
-	// Calculate route success probability. Do not rely on a probability
-	// that could have been returned from path finding, because mission
-	// control may have been disabled in the provided ProbabilitySource.
-	successProb := r.getSuccessProbability(route)
-
-	routeResp := &lnrpc.QueryRoutesResponse{
-		Routes:      []*lnrpc.Route{rpcRoute},
-		SuccessProb: successProb,
-	}
-
-	return routeResp, nil
+	return routing.NewRouteRequest(
+		sourcePubKey, targetPubKey, amt, in.TimePref, restrictions,
+		customRecords, routeHintEdges, blindedPmt, finalCLTVDelta,
+	), nil
 }
 
-// getSuccessProbability returns the success probability for the given route
-// based on the current state of mission control.
-func (r *RouterBackend) getSuccessProbability(rt *route.Route) float64 {
-	fromNode := rt.SourcePubKey
-	amtToFwd := rt.TotalAmount
-	successProb := 1.0
-	for _, hop := range rt.Hops {
-		toNode := hop.PubKeyBytes
+func unmarshalBlindedPayment(rpcPayment *lnrpc.BlindedPayment) (
+	*routing.BlindedPayment, error) {
 
-		probability := r.MissionControl.GetProbability(
-			fromNode, toNode, amtToFwd,
-		)
-
-		successProb *= probability
-
-		amtToFwd = hop.AmtToForward
-		fromNode = toNode
+	if rpcPayment == nil {
+		return nil, errors.New("nil blinded payment")
 	}
 
-	return successProb
+	path, err := unmarshalBlindedPath(rpcPayment.Route)
+	if err != nil {
+		return nil, err
+	}
+
+	features, err := UnmarshalFeatures(rpcPayment.Features)
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		relay       = rpcPayment.RelayParameters
+		constraints = rpcPayment.RelayConstraints
+	)
+
+	if relay == nil {
+		return nil, errors.New("relay parameters required")
+	}
+
+	if constraints == nil {
+		return nil, errors.New("constraints required")
+	}
+
+	return &routing.BlindedPayment{
+		BlindedPath: path,
+		RelayInfo: &routing.AggregateRelay{
+			CltvExpiryDelta: uint16(relay.TotalCltvDelta),
+			BaseFee:         uint32(relay.AggregateBaseFeeMsat),
+			FeeRate: uint32(
+				relay.AggregateProportionalFeePpm,
+			),
+		},
+		Constraints: &routing.AggregateConstraints{
+			HtlcMinimumMsat: lnwire.MilliSatoshi(
+				constraints.MinHtlc,
+			),
+			MaxCltvExpiry: constraints.CltvLimit,
+		},
+
+		Features: features,
+	}, nil
+}
+
+func unmarshalBlindedPath(rpcPath *lnrpc.BlindedRoute) (*sphinx.BlindedPath,
+	error) {
+
+	if rpcPath == nil {
+		return nil, errors.New("blinded path required when blinded " +
+			"route is provided")
+	}
+
+	introduction, err := btcec.ParsePubKey(rpcPath.IntroductionNode)
+	if err != nil {
+		return nil, err
+	}
+
+	blinding, err := btcec.ParsePubKey(rpcPath.BlindingPoint)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(rpcPath.BlindedHops) < 1 { //nolint:gomnd
+		return nil, errors.New("at least 1 blinded hops required")
+	}
+
+	path := &sphinx.BlindedPath{
+		IntroductionPoint: introduction,
+		BlindingPoint:     blinding,
+		BlindedHops: make(
+			[]*sphinx.BlindedHopInfo, len(rpcPath.BlindedHops),
+		),
+	}
+
+	for i, hop := range rpcPath.BlindedHops {
+		path.BlindedHops[i], err = unmarshalBlindedHop(hop)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return path, nil
+}
+
+func unmarshalBlindedHop(rpcHop *lnrpc.BlindedHop) (*sphinx.BlindedHopInfo,
+	error) {
+
+	pubkey, err := btcec.ParsePubKey(rpcHop.BlindedNode)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(rpcHop.EncryptedData) == 0 {
+		return nil, errors.New("empty encrypted data not allowed")
+	}
+
+	return &sphinx.BlindedHopInfo{
+		NodePub: pubkey,
+		Payload: rpcHop.EncryptedData,
+	}, nil
 }
 
 // rpcEdgeToPair looks up the provided channel and returns the channel endpoints
@@ -402,6 +594,13 @@ func (r *RouterBackend) MarshallRoute(route *route.Route) (*lnrpc.Route, error) 
 			CustomRecords: hop.CustomRecords,
 			TlvPayload:    !hop.LegacyPayload,
 			MppRecord:     mpp,
+			Metadata:      hop.Metadata,
+			EncryptedData: hop.EncryptedData,
+		}
+
+		if hop.BlindingPoint != nil {
+			blinding := hop.BlindingPoint.SerializeCompressed()
+			resp.Hops[i].BlindingPoint = blinding
 		}
 		incomingAmt = hop.AmtToForward
 	}
@@ -424,15 +623,33 @@ func UnmarshallHopWithPubkey(rpcHop *lnrpc.Hop, pubkey route.Vertex) (*route.Hop
 		return nil, err
 	}
 
-	return &route.Hop{
+	amp, err := UnmarshalAMP(rpcHop.AmpRecord)
+	if err != nil {
+		return nil, err
+	}
+
+	hop := &route.Hop{
 		OutgoingTimeLock: rpcHop.Expiry,
 		AmtToForward:     lnwire.MilliSatoshi(rpcHop.AmtToForwardMsat),
 		PubKeyBytes:      pubkey,
 		ChannelID:        rpcHop.ChanId,
 		CustomRecords:    customRecords,
-		LegacyPayload:    !rpcHop.TlvPayload,
+		LegacyPayload:    false,
 		MPP:              mpp,
-	}, nil
+		AMP:              amp,
+		EncryptedData:    rpcHop.EncryptedData,
+	}
+
+	if len(rpcHop.BlindingPoint) != 0 {
+		hop.BlindingPoint, err = btcec.ParsePubKey(
+			rpcHop.BlindingPoint,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("blinding point: %w", err)
+		}
+	}
+
+	return hop, nil
 }
 
 // UnmarshallHop unmarshalls an rpc hop that may or may not contain a node
@@ -512,6 +729,12 @@ func (r *RouterBackend) extractIntentFromSendRequest(
 
 	payIntent := &routing.LightningPayment{}
 
+	// Pass along time preference.
+	if rpcPayReq.TimePref < -1 || rpcPayReq.TimePref > 1 {
+		return nil, errors.New("time preference out of range")
+	}
+	payIntent.TimePref = rpcPayReq.TimePref
+
 	// Pass along restrictions on the outgoing channels that may be used.
 	payIntent.OutgoingChannelIDs = rpcPayReq.OutgoingChanIds
 
@@ -547,13 +770,22 @@ func (r *RouterBackend) extractIntentFromSendRequest(
 	}
 	payIntent.CltvLimit = cltvLimit
 
-	// Take max htlcs from the request. Map zero to one for backwards
-	// compatibility.
+	// Attempt to parse the max parts value set by the user, if this value
+	// isn't set, then we'll use the current default value for this
+	// setting.
 	maxParts := rpcPayReq.MaxParts
 	if maxParts == 0 {
-		maxParts = 1
+		maxParts = DefaultMaxParts
 	}
 	payIntent.MaxParts = maxParts
+
+	// If this payment had a max shard amount specified, then we'll apply
+	// that now, which'll force us to always make payment splits smaller
+	// than this.
+	if rpcPayReq.MaxShardSizeMsat > 0 {
+		shardAmtMsat := lnwire.MilliSatoshi(rpcPayReq.MaxShardSizeMsat)
+		payIntent.MaxShardAmt = &shardAmtMsat
+	}
 
 	// Take fee limit from request.
 	payIntent.FeeLimit, err = lnrpc.UnmarshallAmt(
@@ -605,11 +837,11 @@ func (r *RouterBackend) extractIntentFromSendRequest(
 				"cannot appear together")
 
 		case len(rpcPayReq.PaymentHash) > 0:
-			return nil, errors.New("dest and payment_hash " +
+			return nil, errors.New("payment_hash and payment_request " +
 				"cannot appear together")
 
 		case rpcPayReq.FinalCltvDelta != 0:
-			return nil, errors.New("dest and final_cltv_delta " +
+			return nil, errors.New("final_cltv_delta and payment_request " +
 				"cannot appear together")
 		}
 
@@ -627,7 +859,7 @@ func (r *RouterBackend) extractIntentFromSendRequest(
 		}
 
 		// If the amount was not included in the invoice, then we let
-		// the payee specify the amount of satoshis they wish to send.
+		// the payer specify the amount of satoshis they wish to send.
 		// We override the amount to pay with the amount provided from
 		// the payment request.
 		if payReq.MilliSat == nil {
@@ -648,7 +880,51 @@ func (r *RouterBackend) extractIntentFromSendRequest(
 			payIntent.Amount = *payReq.MilliSat
 		}
 
-		copy(payIntent.PaymentHash[:], payReq.PaymentHash[:])
+		if !payReq.Features.HasFeature(lnwire.MPPOptional) &&
+			!payReq.Features.HasFeature(lnwire.AMPOptional) {
+
+			payIntent.MaxParts = 1
+		}
+
+		payAddr := payReq.PaymentAddr
+		if payReq.Features.HasFeature(lnwire.AMPOptional) {
+			// Generate random SetID and root share.
+			var setID [32]byte
+			_, err = rand.Read(setID[:])
+			if err != nil {
+				return nil, err
+			}
+
+			var rootShare [32]byte
+			_, err = rand.Read(rootShare[:])
+			if err != nil {
+				return nil, err
+			}
+			err := payIntent.SetAMP(&routing.AMPOptions{
+				SetID:     setID,
+				RootShare: rootShare,
+			})
+			if err != nil {
+				return nil, err
+			}
+
+			// For AMP invoices, we'll allow users to override the
+			// included payment addr to allow the invoice to be
+			// pseudo-reusable, e.g. the invoice parameters are
+			// reused (amt, cltv, hop hints, etc) even though the
+			// payments will share different payment hashes.
+			if len(rpcPayReq.PaymentAddr) > 0 {
+				var addr [32]byte
+				copy(addr[:], rpcPayReq.PaymentAddr)
+				payAddr = &addr
+			}
+		} else {
+			err = payIntent.SetPaymentHash(*payReq.PaymentHash)
+			if err != nil {
+				return nil, err
+			}
+		}
+
 		destKey := payReq.Destination.SerializeCompressed()
 		copy(payIntent.Target[:], destKey)
 
@@ -657,8 +933,9 @@ func (r *RouterBackend) extractIntentFromSendRequest(
 			payIntent.RouteHints, payReq.RouteHints...,
 		)
 		payIntent.DestFeatures = payReq.Features
-		payIntent.PaymentAddr = payReq.PaymentAddr
+		payIntent.PaymentAddr = payAddr
 		payIntent.PaymentRequest = []byte(rpcPayReq.PaymentRequest)
+		payIntent.Metadata = payReq.Metadata
 	} else {
 		// Otherwise, If the payment request field was not specified
 		// (and a custom route wasn't specified), construct the payment
@@ -672,12 +949,10 @@ func (r *RouterBackend) extractIntentFromSendRequest(
 		payIntent.Target = target
 
 		// Final payment CLTV delta.
-		if rpcPayReq.FinalCltvDelta != 0 {
-			payIntent.FinalCLTVDelta =
-				uint16(rpcPayReq.FinalCltvDelta)
-		} else {
-			payIntent.FinalCLTVDelta = r.DefaultFinalCltvDelta
-		}
+		payIntent.FinalCLTVDelta = FinalCLTVDelta(
+			uint16(rpcPayReq.FinalCltvDelta),
+			r.DefaultFinalCltvDelta,
+		)
 
 		// Amount.
 		if reqAmt == 0 {
@@ -686,16 +961,107 @@ func (r *RouterBackend) extractIntentFromSendRequest(
 
 		payIntent.Amount = reqAmt
 
-		// Payment hash.
-		copy(payIntent.PaymentHash[:], rpcPayReq.PaymentHash)
-
 		// Parse destination feature bits.
 		features, err := UnmarshalFeatures(rpcPayReq.DestFeatures)
 		if err != nil {
 			return nil, err
 		}
 
+		// Validate the features if any was specified.
+		if features != nil {
+			err = feature.ValidateDeps(features)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		// If this is an AMP payment, we must generate the initial
+		// randomness.
+		if rpcPayReq.Amp {
+			// If no destination features were specified, we set
+			// those necessary for AMP payments.
+			if features == nil {
+				ampFeatures := []lnrpc.FeatureBit{
+					lnrpc.FeatureBit_TLV_ONION_OPT,
+					lnrpc.FeatureBit_PAYMENT_ADDR_OPT,
+					lnrpc.FeatureBit_AMP_OPT,
+				}
+
+				features, err = UnmarshalFeatures(ampFeatures)
+				if err != nil {
+					return nil, err
+				}
+			}
+
+			// First make sure the destination supports AMP.
+			if !features.HasFeature(lnwire.AMPOptional) {
+				return nil, fmt.Errorf("destination doesn't " +
+					"support AMP payments")
+			}
+
+			// If no payment address is set, generate a random one.
+			var payAddr [32]byte
+			if len(rpcPayReq.PaymentAddr) == 0 {
+				_, err = rand.Read(payAddr[:])
+				if err != nil {
+					return nil, err
+				}
+			} else {
+				copy(payAddr[:], rpcPayReq.PaymentAddr)
+			}
+			payIntent.PaymentAddr = &payAddr
+
+			// Generate random SetID and root share.
+			var setID [32]byte
+			_, err = rand.Read(setID[:])
+			if err != nil {
+				return nil, err
+			}
+
+			var rootShare [32]byte
+			_, err = rand.Read(rootShare[:])
+			if err != nil {
+				return nil, err
+			}
+			err := payIntent.SetAMP(&routing.AMPOptions{
+				SetID:     setID,
+				RootShare: rootShare,
+			})
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			// Payment hash.
+			paymentHash, err := lntypes.MakeHash(rpcPayReq.PaymentHash)
+			if err != nil {
+				return nil, err
+			}
+
+			err = payIntent.SetPaymentHash(paymentHash)
+			if err != nil {
+				return nil, err
+			}
+
+			// If the payment addresses is specified, then we'll
+			// also populate that now as well.
+			if len(rpcPayReq.PaymentAddr) != 0 {
+				var payAddr [32]byte
+				copy(payAddr[:], rpcPayReq.PaymentAddr)
+
+				payIntent.PaymentAddr = &payAddr
+			}
+		}
+
 		payIntent.DestFeatures = features
+	}
+
+	// Do bounds checking with the block padding so the router isn't
+	// left with a zombie payment in case the user messes up.
+	err = routing.ValidateCLTVLimit(
+		payIntent.CltvLimit, payIntent.FinalCLTVDelta, true,
+	)
+	if err != nil {
+		return nil, err
 	}
 
 	// Check for disallowed payments to self.
@@ -736,7 +1102,7 @@ func unmarshallHopHint(rpcHint *lnrpc.HopHint) (zpay32.HopHint, error) {
 		return zpay32.HopHint{}, err
 	}
 
-	pubkey, err := btcec.ParsePubKey(pubBytes, btcec.S256())
+	pubkey, err := btcec.ParsePubKey(pubBytes)
 	if err != nil {
 		return zpay32.HopHint{}, err
 	}
@@ -800,6 +1166,16 @@ func ValidateCLTVLimit(val, max uint32) (uint32, error) {
 	}
 }
 
+// FinalCLTVDelta returns a final delta for a route, returning a default if no
+// user-provided value was given.
+func FinalCLTVDelta(val, defaultDelta uint16) uint16 {
+	if val != 0 {
+		return val
+	}
+
+	return defaultDelta
+}
+
 // UnmarshalMPP accepts the mpp_total_amt_msat and mpp_payment_addr fields from
 // an RPC request and converts into an record.MPP object. An error is returned
 // if the payment address is not 0 or 32 bytes. If the total amount and payment
@@ -817,7 +1193,6 @@ func UnmarshalMPP(reqMPP *lnrpc.MPPRecord) (*record.MPP, error) {
 	reqAddr := reqMPP.PaymentAddr
 
 	switch {
-
 	// No MPP fields were provided.
 	case reqTotal == 0 && len(reqAddr) == 0:
 		return nil, fmt.Errorf("missing total_msat and payment_addr")
@@ -842,6 +1217,32 @@ func UnmarshalMPP(reqMPP *lnrpc.MPPRecord) (*record.MPP, error) {
 	return record.NewMPP(total, addr), nil
 }
 
+func UnmarshalAMP(reqAMP *lnrpc.AMPRecord) (*record.AMP, error) {
+	if reqAMP == nil {
+		return nil, nil
+	}
+
+	reqRootShare := reqAMP.RootShare
+	reqSetID := reqAMP.SetId
+
+	switch {
+	case len(reqRootShare) != 32:
+		return nil, errors.New("AMP root_share must be 32 bytes")
+
+	case len(reqSetID) != 32:
+		return nil, errors.New("AMP set_id must be 32 bytes")
+	}
+
+	var (
+		rootShare [32]byte
+		setID     [32]byte
+	)
+	copy(rootShare[:], reqRootShare)
+	copy(setID[:], reqSetID)
+
+	return record.NewAMP(rootShare, setID, reqAMP.ChildIndex), nil
+}
+
 // MarshalHTLCAttempt constructs an RPC HTLCAttempt from the db representation.
 func (r *RouterBackend) MarshalHTLCAttempt(
 	htlc channeldb.HTLCAttempt) (*lnrpc.HTLCAttempt, error) {
@@ -852,6 +1253,7 @@ func (r *RouterBackend) MarshalHTLCAttempt(
 	}
 
 	rpcAttempt := &lnrpc.HTLCAttempt{
+		AttemptId:     htlc.AttemptID,
 		AttemptTimeNs: MarshalTimeNano(htlc.AttemptTime),
 		Route:         route,
 	}
@@ -892,7 +1294,6 @@ func marshallHtlcFailure(failure *channeldb.HTLCFailInfo) (*lnrpc.Failure,
 	}
 
 	switch failure.Reason {
-
 	case channeldb.HTLCFailUnknown:
 		rpcFailure.Code = lnrpc.Failure_UNKNOWN_FAILURE
 
@@ -973,7 +1374,6 @@ func marshallWireError(msg lnwire.FailureMessage,
 	response *lnrpc.Failure) error {
 
 	switch onionErr := msg.(type) {
-
 	case *lnwire.FailIncorrectDetails:
 		response.Code = lnrpc.Failure_INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS
 		response.Height = onionErr.Height()
@@ -1059,6 +1459,9 @@ func marshallWireError(msg lnwire.FailureMessage,
 	case *lnwire.FailMPPTimeout:
 		response.Code = lnrpc.Failure_MPP_TIMEOUT
 
+	case *lnwire.InvalidOnionPayload:
+		response.Code = lnrpc.Failure_INVALID_ONION_PAYLOAD
+
 	case nil:
 		response.Code = lnrpc.Failure_UNKNOWN_FAILURE
 
@@ -1128,7 +1531,7 @@ func (r *RouterBackend) MarshallPayment(payment *channeldb.MPPayment) (
 		htlcs = append(htlcs, htlc)
 	}
 
-	paymentHash := payment.Info.PaymentHash
+	paymentID := payment.Info.PaymentIdentifier
 	creationTimeNS := MarshalTimeNano(payment.Info.CreationTime)
 
 	failureReason, err := marshallPaymentFailureReason(
@@ -1139,7 +1542,8 @@ func (r *RouterBackend) MarshallPayment(payment *channeldb.MPPayment) (
 	}
 
 	return &lnrpc.Payment{
-		PaymentHash:     hex.EncodeToString(paymentHash[:]),
+		// TODO: set this to setID for AMP-payments?
+		PaymentHash:     hex.EncodeToString(paymentID[:]),
 		Value:           satValue,
 		ValueMsat:       msatValue,
 		ValueSat:        satValue,
@@ -1190,7 +1594,6 @@ func marshallPaymentFailureReason(reason *channeldb.FailureReason) (
 	}
 
 	switch *reason {
-
 	case channeldb.FailureReasonTimeout:
 		return lnrpc.PaymentFailureReason_FAILURE_REASON_TIMEOUT, nil
 

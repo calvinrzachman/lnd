@@ -20,12 +20,24 @@ const (
 	// detected in an inactive state. Channels in this state will have a
 	// disabling announcement sent after the ChanInactiveTimeout expires
 	// from the time of the first detection--unless the channel is
-	// explicitly reenabled before the disabling occurs.
+	// explicitly re-enabled before the disabling occurs.
 	ChanStatusPendingDisabled
 
 	// ChanStatusDisabled indicates that the channel's last announcement has
 	// the disabled bit set.
 	ChanStatusDisabled
+
+	// ChanStatusManuallyDisabled indicates that the channel's last
+	// announcement had the disabled bit set, and that a user manually
+	// requested disabling the channel. Channels in this state will ignore
+	// automatic / background attempts to re-enable the channel.
+	//
+	// Note that there's no corresponding ChanStatusManuallyEnabled state
+	// because even if a user manually requests enabling a channel, we still
+	// DO want to allow automatic / background processes to disable it.
+	// Otherwise, the network might be cluttered with channels that are
+	// advertised as enabled, but don't actually work or even exist.
+	ChanStatusManuallyDisabled
 )
 
 // ChannelState describes the ChanStatusManager's view of a channel, and
@@ -60,6 +72,14 @@ func (s *channelStates) markEnabled(outpoint wire.OutPoint) {
 func (s *channelStates) markDisabled(outpoint wire.OutPoint) {
 	(*s)[outpoint] = ChannelState{
 		Status: ChanStatusDisabled,
+	}
+}
+
+// markManuallyDisabled creates a channelState using
+// ChanStatusManuallyDisabled.
+func (s *channelStates) markManuallyDisabled(outpoint wire.OutPoint) {
+	(*s)[outpoint] = ChannelState{
+		Status: ChanStatusManuallyDisabled,
 	}
 }
 

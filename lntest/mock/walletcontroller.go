@@ -5,15 +5,17 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/hdkeychain"
+	"github.com/btcsuite/btcd/btcutil/psbt"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/psbt"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	base "github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wtxmgr"
-
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 )
@@ -51,14 +53,25 @@ func (w *WalletController) FetchInputInfo(
 	return utxo, nil
 }
 
+// ScriptForOutput returns the address, witness program and redeem script for a
+// given UTXO. An error is returned if the UTXO does not belong to our wallet or
+// it is not a managed pubKey address.
+func (w *WalletController) ScriptForOutput(*wire.TxOut) (
+	waddrmgr.ManagedPubKeyAddress, []byte, []byte, error) {
+
+	return nil, nil, nil, nil
+}
+
 // ConfirmedBalance currently returns dummy values.
-func (w *WalletController) ConfirmedBalance(confs int32) (btcutil.Amount, error) {
+func (w *WalletController) ConfirmedBalance(int32, string) (btcutil.Amount,
+	error) {
+
 	return 0, nil
 }
 
 // NewAddress is called to get new addresses for delivery, change etc.
-func (w *WalletController) NewAddress(addrType lnwallet.AddressType,
-	change bool) (btcutil.Address, error) {
+func (w *WalletController) NewAddress(lnwallet.AddressType, bool,
+	string) (btcutil.Address, error) {
 
 	addr, _ := btcutil.NewAddressPubKey(
 		w.RootKey.PubKey().SerializeCompressed(), &chaincfg.MainNetParams,
@@ -67,34 +80,83 @@ func (w *WalletController) NewAddress(addrType lnwallet.AddressType,
 }
 
 // LastUnusedAddress currently returns dummy values.
-func (w *WalletController) LastUnusedAddress(addrType lnwallet.AddressType) (
-	btcutil.Address, error) {
+func (w *WalletController) LastUnusedAddress(lnwallet.AddressType,
+	string) (btcutil.Address, error) {
+
 	return nil, nil
 }
 
 // IsOurAddress currently returns a dummy value.
-func (w *WalletController) IsOurAddress(a btcutil.Address) bool {
+func (w *WalletController) IsOurAddress(btcutil.Address) bool {
 	return false
 }
 
+// AddressInfo currently returns a dummy value.
+func (w *WalletController) AddressInfo(
+	btcutil.Address) (waddrmgr.ManagedAddress, error) {
+
+	return nil, nil
+}
+
+// ListAccounts currently returns a dummy value.
+func (w *WalletController) ListAccounts(string,
+	*waddrmgr.KeyScope) ([]*waddrmgr.AccountProperties, error) {
+
+	return nil, nil
+}
+
+// RequiredReserve currently returns a dummy value.
+func (w *WalletController) RequiredReserve(uint32) btcutil.Amount {
+	return 0
+}
+
+// ListAddresses currently returns a dummy value.
+func (w *WalletController) ListAddresses(string,
+	bool) (lnwallet.AccountAddressMap, error) {
+
+	return nil, nil
+}
+
+// ImportAccount currently returns a dummy value.
+func (w *WalletController) ImportAccount(string, *hdkeychain.ExtendedKey,
+	uint32, *waddrmgr.AddressType, bool) (*waddrmgr.AccountProperties,
+	[]btcutil.Address, []btcutil.Address, error) {
+
+	return nil, nil, nil, nil
+}
+
+// ImportPublicKey currently returns a dummy value.
+func (w *WalletController) ImportPublicKey(*btcec.PublicKey,
+	waddrmgr.AddressType) error {
+
+	return nil
+}
+
+// ImportTaprootScript currently returns a dummy value.
+func (w *WalletController) ImportTaprootScript(waddrmgr.KeyScope,
+	*waddrmgr.Tapscript) (waddrmgr.ManagedAddress, error) {
+
+	return nil, nil
+}
+
 // SendOutputs currently returns dummy values.
-func (w *WalletController) SendOutputs(outputs []*wire.TxOut,
-	_ chainfee.SatPerKWeight, _ int32, _ string) (*wire.MsgTx, error) {
+func (w *WalletController) SendOutputs([]*wire.TxOut,
+	chainfee.SatPerKWeight, int32, string) (*wire.MsgTx, error) {
 
 	return nil, nil
 }
 
 // CreateSimpleTx currently returns dummy values.
-func (w *WalletController) CreateSimpleTx(outputs []*wire.TxOut,
-	_ chainfee.SatPerKWeight, _ bool) (*txauthor.AuthoredTx, error) {
+func (w *WalletController) CreateSimpleTx([]*wire.TxOut,
+	chainfee.SatPerKWeight, int32, bool) (*txauthor.AuthoredTx, error) {
 
 	return nil, nil
 }
 
 // ListUnspentWitness is called by the wallet when doing coin selection. We just
 // need one unspent for the funding transaction.
-func (w *WalletController) ListUnspentWitness(minconfirms,
-	maxconfirms int32) ([]*lnwallet.Utxo, error) {
+func (w *WalletController) ListUnspentWitness(int32, int32,
+	string) ([]*lnwallet.Utxo, error) {
 
 	// If the mock already has a list of utxos, return it.
 	if w.Utxos != nil {
@@ -118,8 +180,8 @@ func (w *WalletController) ListUnspentWitness(minconfirms,
 }
 
 // ListTransactionDetails currently returns dummy values.
-func (w *WalletController) ListTransactionDetails(_,
-	_ int32) ([]*lnwallet.TransactionDetail, error) {
+func (w *WalletController) ListTransactionDetails(int32, int32,
+	string) ([]*lnwallet.TransactionDetail, error) {
 
 	return nil, nil
 }
@@ -131,10 +193,10 @@ func (w *WalletController) LockOutpoint(o wire.OutPoint) {}
 func (w *WalletController) UnlockOutpoint(o wire.OutPoint) {}
 
 // LeaseOutput returns the current time and a nil error.
-func (w *WalletController) LeaseOutput(wtxmgr.LockID, wire.OutPoint) (time.Time,
-	error) {
+func (w *WalletController) LeaseOutput(wtxmgr.LockID, wire.OutPoint,
+	time.Duration) (time.Time, []byte, btcutil.Amount, error) {
 
-	return time.Now(), nil
+	return time.Now(), nil, 0, nil
 }
 
 // ReleaseOutput currently does nothing.
@@ -142,15 +204,26 @@ func (w *WalletController) ReleaseOutput(wtxmgr.LockID, wire.OutPoint) error {
 	return nil
 }
 
+func (w *WalletController) ListLeasedOutputs() ([]*base.ListLeasedOutputResult,
+	error) {
+
+	return nil, nil
+}
+
 // FundPsbt currently does nothing.
-func (w *WalletController) FundPsbt(_ *psbt.Packet,
-	_ chainfee.SatPerKWeight) (int32, error) {
+func (w *WalletController) FundPsbt(*psbt.Packet, int32, chainfee.SatPerKWeight,
+	string) (int32, error) {
 
 	return 0, nil
 }
 
+// SignPsbt currently does nothing.
+func (w *WalletController) SignPsbt(*psbt.Packet) ([]uint32, error) {
+	return nil, nil
+}
+
 // FinalizePsbt currently does nothing.
-func (w *WalletController) FinalizePsbt(_ *psbt.Packet) error {
+func (w *WalletController) FinalizePsbt(_ *psbt.Packet, _ string) error {
 	return nil
 }
 
@@ -161,8 +234,8 @@ func (w *WalletController) PublishTransaction(tx *wire.MsgTx, _ string) error {
 }
 
 // LabelTransaction currently does nothing.
-func (w *WalletController) LabelTransaction(_ chainhash.Hash, _ string,
-	_ bool) error {
+func (w *WalletController) LabelTransaction(chainhash.Hash, string,
+	bool) error {
 
 	return nil
 }
@@ -191,5 +264,13 @@ func (w *WalletController) Start() error {
 
 // Stop currently does nothing.
 func (w *WalletController) Stop() error {
+	return nil
+}
+
+func (w *WalletController) FetchTx(chainhash.Hash) (*wire.MsgTx, error) {
+	return nil, nil
+}
+
+func (w *WalletController) RemoveDescendants(*wire.MsgTx) error {
 	return nil
 }

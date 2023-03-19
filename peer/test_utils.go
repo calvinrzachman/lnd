@@ -5,22 +5,22 @@ import (
 	crand "crypto/rand"
 	"encoding/binary"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"net"
-	"os"
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/channelnotifier"
 	"github.com/lightningnetwork/lnd/htlcswitch"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/keychain"
+	"github.com/lightningnetwork/lnd/lntest/channels"
 	"github.com/lightningnetwork/lnd/lntest/mock"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
@@ -28,7 +28,6 @@ import (
 	"github.com/lightningnetwork/lnd/netann"
 	"github.com/lightningnetwork/lnd/queue"
 	"github.com/lightningnetwork/lnd/shachain"
-	"github.com/lightningnetwork/lnd/ticker"
 	"github.com/stretchr/testify/require"
 )
 
@@ -38,67 +37,14 @@ const (
 	// timeout is a timeout value to use for tests which need to wait for
 	// a return value on a channel.
 	timeout = time.Second * 5
+
+	// testCltvRejectDelta is the minimum delta between expiry and current
+	// height below which htlcs are rejected.
+	testCltvRejectDelta = 13
 )
 
 var (
-	alicesPrivKey = []byte{
-		0x2b, 0xd8, 0x06, 0xc9, 0x7f, 0x0e, 0x00, 0xaf,
-		0x1a, 0x1f, 0xc3, 0x32, 0x8f, 0xa7, 0x63, 0xa9,
-		0x26, 0x97, 0x23, 0xc8, 0xdb, 0x8f, 0xac, 0x4f,
-		0x93, 0xaf, 0x71, 0xdb, 0x18, 0x6d, 0x6e, 0x90,
-	}
-
-	bobsPrivKey = []byte{
-		0x81, 0xb6, 0x37, 0xd8, 0xfc, 0xd2, 0xc6, 0xda,
-		0x63, 0x59, 0xe6, 0x96, 0x31, 0x13, 0xa1, 0x17,
-		0xd, 0xe7, 0x95, 0xe4, 0xb7, 0x25, 0xb8, 0x4d,
-		0x1e, 0xb, 0x4c, 0xfd, 0x9e, 0xc5, 0x8c, 0xe9,
-	}
-
-	// Use a hard-coded HD seed.
-	testHdSeed = [32]byte{
-		0xb7, 0x94, 0x38, 0x5f, 0x2d, 0x1e, 0xf7, 0xab,
-		0x4d, 0x92, 0x73, 0xd1, 0x90, 0x63, 0x81, 0xb4,
-		0x4f, 0x2f, 0x6f, 0x25, 0x88, 0xa3, 0xef, 0xb9,
-		0x6a, 0x49, 0x18, 0x83, 0x31, 0x98, 0x47, 0x53,
-	}
-
-	// Just use some arbitrary bytes as delivery script.
-	dummyDeliveryScript = alicesPrivKey
-
-	// testTx is used as the default funding txn for single-funder channels.
-	testTx = &wire.MsgTx{
-		Version: 1,
-		TxIn: []*wire.TxIn{
-			{
-				PreviousOutPoint: wire.OutPoint{
-					Hash:  chainhash.Hash{},
-					Index: 0xffffffff,
-				},
-				SignatureScript: []byte{0x04, 0x31, 0xdc, 0x00, 0x1b, 0x01, 0x62},
-				Sequence:        0xffffffff,
-			},
-		},
-		TxOut: []*wire.TxOut{
-			{
-				Value: 5000000000,
-				PkScript: []byte{
-					0x41, // OP_DATA_65
-					0x04, 0xd6, 0x4b, 0xdf, 0xd0, 0x9e, 0xb1, 0xc5,
-					0xfe, 0x29, 0x5a, 0xbd, 0xeb, 0x1d, 0xca, 0x42,
-					0x81, 0xbe, 0x98, 0x8e, 0x2d, 0xa0, 0xb6, 0xc1,
-					0xc6, 0xa5, 0x9d, 0xc2, 0x26, 0xc2, 0x86, 0x24,
-					0xe1, 0x81, 0x75, 0xe8, 0x51, 0xc9, 0x6b, 0x97,
-					0x3d, 0x81, 0xb0, 0x1c, 0xc3, 0x1f, 0x04, 0x78,
-					0x34, 0xbc, 0x06, 0xd6, 0xd6, 0xed, 0xf6, 0x20,
-					0xd1, 0x84, 0x24, 0x1a, 0x6a, 0xed, 0x8b, 0x63,
-					0xa6, // 65-byte signature
-					0xac, // OP_CHECKSIG
-				},
-			},
-		},
-		LockTime: 5,
-	}
+	testKeyLoc = keychain.KeyLocator{Family: keychain.KeyFamilyNodeKey}
 )
 
 // noUpdate is a function which can be used as a parameter in createTestPeer to
@@ -109,16 +55,22 @@ var noUpdate = func(a, b *channeldb.OpenChannel) {}
 // one of the nodes, together with the channel seen from both nodes. It takes
 // an updateChan function which can be used to modify the default values on
 // the channel states for each peer.
-func createTestPeer(notifier chainntnfs.ChainNotifier,
-	publTx chan *wire.MsgTx, updateChan func(a, b *channeldb.OpenChannel)) (
-	*Brontide, *lnwallet.LightningChannel, func(), error) {
+func createTestPeer(t *testing.T, notifier chainntnfs.ChainNotifier,
+	publTx chan *wire.MsgTx, updateChan func(a, b *channeldb.OpenChannel),
+	mockSwitch *mockMessageSwitch) (
+	*Brontide, *lnwallet.LightningChannel, error) {
 
+	nodeKeyLocator := keychain.KeyLocator{
+		Family: keychain.KeyFamilyNodeKey,
+	}
 	aliceKeyPriv, aliceKeyPub := btcec.PrivKeyFromBytes(
-		btcec.S256(), alicesPrivKey,
+		channels.AlicesPrivKey,
 	)
-	aliceKeySigner := &keychain.PrivKeyDigestSigner{PrivKey: aliceKeyPriv}
+	aliceKeySigner := keychain.NewPrivKeyMessageSigner(
+		aliceKeyPriv, nodeKeyLocator,
+	)
 	bobKeyPriv, bobKeyPub := btcec.PrivKeyFromBytes(
-		btcec.S256(), bobsPrivKey,
+		channels.BobsPrivKey,
 	)
 
 	channelCapacity := btcutil.Amount(10 * 1e8)
@@ -127,9 +79,10 @@ func createTestPeer(notifier chainntnfs.ChainNotifier,
 	bobDustLimit := btcutil.Amount(1300)
 	csvTimeoutAlice := uint32(5)
 	csvTimeoutBob := uint32(4)
+	isAliceInitiator := true
 
 	prevOut := &wire.OutPoint{
-		Hash:  chainhash.Hash(testHdSeed),
+		Hash:  channels.TestHdSeed,
 		Index: 0,
 	}
 	fundingTxIn := wire.NewTxIn(prevOut, nil, nil)
@@ -187,58 +140,55 @@ func createTestPeer(notifier chainntnfs.ChainNotifier,
 
 	bobRoot, err := chainhash.NewHash(bobKeyPriv.Serialize())
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	bobPreimageProducer := shachain.NewRevocationProducer(*bobRoot)
 	bobFirstRevoke, err := bobPreimageProducer.AtIndex(0)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	bobCommitPoint := input.ComputeCommitmentPoint(bobFirstRevoke[:])
 
 	aliceRoot, err := chainhash.NewHash(aliceKeyPriv.Serialize())
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	alicePreimageProducer := shachain.NewRevocationProducer(*aliceRoot)
 	aliceFirstRevoke, err := alicePreimageProducer.AtIndex(0)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	aliceCommitPoint := input.ComputeCommitmentPoint(aliceFirstRevoke[:])
 
 	aliceCommitTx, bobCommitTx, err := lnwallet.CreateCommitmentTxns(
 		channelBal, channelBal, &aliceCfg, &bobCfg, aliceCommitPoint,
 		bobCommitPoint, *fundingTxIn, channeldb.SingleFunderTweaklessBit,
+		isAliceInitiator, 0,
 	)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
-	alicePath, err := ioutil.TempDir("", "alicedb")
+	dbAlice, err := channeldb.Open(t.TempDir())
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
+	t.Cleanup(func() {
+		require.NoError(t, dbAlice.Close())
+	})
 
-	dbAlice, err := channeldb.Open(alicePath)
+	dbBob, err := channeldb.Open(t.TempDir())
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
-
-	bobPath, err := ioutil.TempDir("", "bobdb")
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	dbBob, err := channeldb.Open(bobPath)
-	if err != nil {
-		return nil, nil, nil, err
-	}
+	t.Cleanup(func() {
+		require.NoError(t, dbBob.Close())
+	})
 
 	estimator := chainfee.NewStaticEstimator(12500, 0)
 	feePerKw, err := estimator.EstimateFeePerKW(1)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
 	// TODO(roasbeef): need to factor in commit fee?
@@ -263,7 +213,7 @@ func createTestPeer(notifier chainntnfs.ChainNotifier,
 
 	var chanIDBytes [8]byte
 	if _, err := io.ReadFull(crand.Reader, chanIDBytes[:]); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
 	shortChanID := lnwire.NewShortChanIDFromInt(
@@ -277,16 +227,16 @@ func createTestPeer(notifier chainntnfs.ChainNotifier,
 		FundingOutpoint:         *prevOut,
 		ShortChannelID:          shortChanID,
 		ChanType:                channeldb.SingleFunderTweaklessBit,
-		IsInitiator:             true,
+		IsInitiator:             isAliceInitiator,
 		Capacity:                channelCapacity,
 		RemoteCurrentRevocation: bobCommitPoint,
 		RevocationProducer:      alicePreimageProducer,
 		RevocationStore:         shachain.NewRevocationStore(),
 		LocalCommitment:         aliceCommit,
 		RemoteCommitment:        aliceCommit,
-		Db:                      dbAlice,
+		Db:                      dbAlice.ChannelStateDB(),
 		Packager:                channeldb.NewChannelPackager(shortChanID),
-		FundingTxn:              testTx,
+		FundingTxn:              channels.TestFundingTx,
 	}
 	bobChannelState := &channeldb.OpenChannel{
 		LocalChanCfg:            bobCfg,
@@ -294,14 +244,14 @@ func createTestPeer(notifier chainntnfs.ChainNotifier,
 		IdentityPub:             bobKeyPub,
 		FundingOutpoint:         *prevOut,
 		ChanType:                channeldb.SingleFunderTweaklessBit,
-		IsInitiator:             false,
+		IsInitiator:             !isAliceInitiator,
 		Capacity:                channelCapacity,
 		RemoteCurrentRevocation: aliceCommitPoint,
 		RevocationProducer:      bobPreimageProducer,
 		RevocationStore:         shachain.NewRevocationStore(),
 		LocalCommitment:         bobCommit,
 		RemoteCommitment:        bobCommit,
-		Db:                      dbBob,
+		Db:                      dbBob.ChannelStateDB(),
 		Packager:                channeldb.NewChannelPackager(shortChanID),
 	}
 
@@ -314,7 +264,7 @@ func createTestPeer(notifier chainntnfs.ChainNotifier,
 	}
 
 	if err := aliceChannelState.SyncPending(aliceAddr, 0); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
 	bobAddr := &net.TCPAddr{
@@ -323,12 +273,7 @@ func createTestPeer(notifier chainntnfs.ChainNotifier,
 	}
 
 	if err := bobChannelState.SyncPending(bobAddr, 0); err != nil {
-		return nil, nil, nil, err
-	}
-
-	cleanUpFunc := func() {
-		os.RemoveAll(bobPath)
-		os.RemoveAll(alicePath)
+		return nil, nil, err
 	}
 
 	aliceSigner := &mock.SingleSigner{Privkey: aliceKeyPriv}
@@ -339,18 +284,24 @@ func createTestPeer(notifier chainntnfs.ChainNotifier,
 		aliceSigner, aliceChannelState, alicePool,
 	)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	_ = alicePool.Start()
+	t.Cleanup(func() {
+		require.NoError(t, alicePool.Stop())
+	})
 
 	bobPool := lnwallet.NewSigPool(1, bobSigner)
 	channelBob, err := lnwallet.NewLightningChannel(
 		bobSigner, bobChannelState, bobPool,
 	)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	_ = bobPool.Start()
+	t.Cleanup(func() {
+		require.NoError(t, bobPool.Stop())
+	})
 
 	chainIO := &mock.ChainIO{
 		BestHeight: broadcastHeight,
@@ -362,27 +313,10 @@ func createTestPeer(notifier chainntnfs.ChainNotifier,
 		},
 	}
 
-	_, currentHeight, err := chainIO.GetBestBlock()
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	htlcSwitch, err := htlcswitch.New(htlcswitch.Config{
-		DB:             dbAlice,
-		SwitchPackager: channeldb.NewSwitchPackager(),
-		Notifier:       notifier,
-		FwdEventTicker: ticker.New(
-			htlcswitch.DefaultFwdEventInterval),
-		LogEventTicker: ticker.New(
-			htlcswitch.DefaultLogInterval),
-		AckEventTicker: ticker.New(
-			htlcswitch.DefaultAckInterval),
-	}, uint32(currentHeight))
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	if err = htlcSwitch.Start(); err != nil {
-		return nil, nil, nil, err
+	// If mockSwitch is not set by the caller, set it to the default as the
+	// caller does not need to control it.
+	if mockSwitch == nil {
+		mockSwitch = &mockMessageSwitch{}
 	}
 
 	nodeSignerAlice := netann.NewNodeSigner(aliceKeySigner)
@@ -393,23 +327,28 @@ func createTestPeer(notifier chainntnfs.ChainNotifier,
 		ChanStatusSampleInterval: 30 * time.Second,
 		ChanEnableTimeout:        chanActiveTimeout,
 		ChanDisableTimeout:       2 * time.Minute,
-		DB:                       dbAlice,
+		DB:                       dbAlice.ChannelStateDB(),
 		Graph:                    dbAlice.ChannelGraph(),
 		MessageSigner:            nodeSignerAlice,
 		OurPubKey:                aliceKeyPub,
-		IsChannelActive:          htlcSwitch.HasActiveLink,
-		ApplyChannelUpdate:       func(*lnwire.ChannelUpdate) error { return nil },
+		OurKeyLoc:                testKeyLoc,
+		IsChannelActive:          func(lnwire.ChannelID) bool { return true },
+		ApplyChannelUpdate: func(*lnwire.ChannelUpdate,
+			*wire.OutPoint, bool) error {
+
+			return nil
+		},
 	})
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	if err = chanStatusMgr.Start(); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
 	errBuffer, err := queue.NewCircularBuffer(ErrorBufferSize)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
 	var pubKey [33]byte
@@ -421,25 +360,52 @@ func createTestPeer(notifier chainntnfs.ChainNotifier,
 		ChainNet:    wire.SimNet,
 	}
 
+	interceptableSwitchNotifier := &mock.ChainNotifier{
+		EpochChan: make(chan *chainntnfs.BlockEpoch, 1),
+	}
+	interceptableSwitchNotifier.EpochChan <- &chainntnfs.BlockEpoch{
+		Height: 1,
+	}
+
+	interceptableSwitch, err := htlcswitch.NewInterceptableSwitch(
+		&htlcswitch.InterceptableSwitchConfig{
+			CltvRejectDelta:    testCltvRejectDelta,
+			CltvInterceptDelta: testCltvRejectDelta + 3,
+			Notifier:           interceptableSwitchNotifier,
+		},
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// TODO(yy): change ChannelNotifier to be an interface.
+	channelNotifier := channelnotifier.New(dbAlice.ChannelStateDB())
+	require.NoError(t, channelNotifier.Start())
+	t.Cleanup(func() {
+		require.NoError(t, channelNotifier.Stop(),
+			"stop channel notifier failed")
+	})
+
 	cfg := &Config{
-		Addr:        cfgAddr,
-		PubKeyBytes: pubKey,
-		ErrorBuffer: errBuffer,
-		ChainIO:     chainIO,
-		Switch:      htlcSwitch,
-
+		Addr:              cfgAddr,
+		PubKeyBytes:       pubKey,
+		ErrorBuffer:       errBuffer,
+		ChainIO:           chainIO,
+		Switch:            mockSwitch,
 		ChanActiveTimeout: chanActiveTimeout,
-		InterceptSwitch:   htlcswitch.NewInterceptableSwitch(htlcSwitch),
-
-		ChannelDB:      dbAlice,
-		FeeEstimator:   estimator,
-		Wallet:         wallet,
-		ChainNotifier:  notifier,
-		ChanStatusMgr:  chanStatusMgr,
-		DisconnectPeer: func(b *btcec.PublicKey) error { return nil },
+		InterceptSwitch:   interceptableSwitch,
+		ChannelDB:         dbAlice.ChannelStateDB(),
+		FeeEstimator:      estimator,
+		Wallet:            wallet,
+		ChainNotifier:     notifier,
+		ChanStatusMgr:     chanStatusMgr,
+		Features:          lnwire.NewFeatureVector(nil, lnwire.Features),
+		DisconnectPeer:    func(b *btcec.PublicKey) error { return nil },
+		ChannelNotifier:   channelNotifier,
 	}
 
 	alicePeer := NewBrontide(*cfg)
+	alicePeer.remoteFeatures = lnwire.NewFeatureVector(nil, lnwire.Features)
 
 	chanID := lnwire.NewChanIDFromOutPoint(channelAlice.ChannelPoint())
 	alicePeer.activeChannels[chanID] = channelAlice
@@ -447,8 +413,72 @@ func createTestPeer(notifier chainntnfs.ChainNotifier,
 	alicePeer.wg.Add(1)
 	go alicePeer.channelManager()
 
-	return alicePeer, channelBob, cleanUpFunc, nil
+	return alicePeer, channelBob, nil
 }
+
+// mockMessageSwitch is a mock implementation of the messageSwitch interface
+// used for testing without relying on a *htlcswitch.Switch in unit tests.
+type mockMessageSwitch struct {
+	links []htlcswitch.ChannelUpdateHandler
+}
+
+// BestHeight currently returns a dummy value.
+func (m *mockMessageSwitch) BestHeight() uint32 {
+	return 0
+}
+
+// CircuitModifier currently returns a dummy value.
+func (m *mockMessageSwitch) CircuitModifier() htlcswitch.CircuitModifier {
+	return nil
+}
+
+// RemoveLink currently does nothing.
+func (m *mockMessageSwitch) RemoveLink(cid lnwire.ChannelID) {}
+
+// CreateAndAddLink currently returns a dummy value.
+func (m *mockMessageSwitch) CreateAndAddLink(cfg htlcswitch.ChannelLinkConfig,
+	lnChan *lnwallet.LightningChannel) error {
+
+	return nil
+}
+
+// GetLinksByInterface returns the active links.
+func (m *mockMessageSwitch) GetLinksByInterface(pub [33]byte) (
+	[]htlcswitch.ChannelUpdateHandler, error) {
+
+	return m.links, nil
+}
+
+// mockUpdateHandler is a mock implementation of the ChannelUpdateHandler
+// interface. It is used in mockMessageSwitch's GetLinksByInterface method.
+type mockUpdateHandler struct {
+	cid lnwire.ChannelID
+}
+
+// newMockUpdateHandler creates a new mockUpdateHandler.
+func newMockUpdateHandler(cid lnwire.ChannelID) *mockUpdateHandler {
+	return &mockUpdateHandler{
+		cid: cid,
+	}
+}
+
+// HandleChannelUpdate currently does nothing.
+func (m *mockUpdateHandler) HandleChannelUpdate(msg lnwire.Message) {}
+
+// ChanID returns the mockUpdateHandler's cid.
+func (m *mockUpdateHandler) ChanID() lnwire.ChannelID { return m.cid }
+
+// Bandwidth currently returns a dummy value.
+func (m *mockUpdateHandler) Bandwidth() lnwire.MilliSatoshi { return 0 }
+
+// EligibleToForward currently returns a dummy value.
+func (m *mockUpdateHandler) EligibleToForward() bool { return false }
+
+// MayAddOutgoingHtlc currently returns nil.
+func (m *mockUpdateHandler) MayAddOutgoingHtlc(lnwire.MilliSatoshi) error { return nil }
+
+// ShutdownIfChannelClean currently returns nil.
+func (m *mockUpdateHandler) ShutdownIfChannelClean() error { return nil }
 
 type mockMessageConn struct {
 	t *testing.T
@@ -460,12 +490,16 @@ type mockMessageConn struct {
 
 	// writtenMessages is a channel that our mock pushes written messages into.
 	writtenMessages chan []byte
+
+	readMessages   chan []byte
+	curReadMessage []byte
 }
 
 func newMockConn(t *testing.T, expectedMessages int) *mockMessageConn {
 	return &mockMessageConn{
 		t:               t,
 		writtenMessages: make(chan []byte, expectedMessages),
+		readMessages:    make(chan []byte, 1),
 	}
 }
 
@@ -501,4 +535,25 @@ func (m *mockMessageConn) assertWrite(expected []byte) {
 	case <-time.After(timeout):
 		m.t.Fatalf("timeout waiting for write: %v", expected)
 	}
+}
+
+func (m *mockMessageConn) SetReadDeadline(t time.Time) error {
+	return nil
+}
+
+func (m *mockMessageConn) ReadNextHeader() (uint32, error) {
+	m.curReadMessage = <-m.readMessages
+	return uint32(len(m.curReadMessage)), nil
+}
+
+func (m *mockMessageConn) ReadNextBody(buf []byte) ([]byte, error) {
+	return m.curReadMessage, nil
+}
+
+func (m *mockMessageConn) RemoteAddr() net.Addr {
+	return nil
+}
+
+func (m *mockMessageConn) LocalAddr() net.Addr {
+	return nil
 }

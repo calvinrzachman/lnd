@@ -1,15 +1,17 @@
 package sweep
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
 	"github.com/lightningnetwork/lnd/input"
+	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 )
 
@@ -37,8 +39,8 @@ type inputSet []input.Input
 // inputs are skipped. No input sets with a total value after fees below the
 // dust limit are returned.
 func generateInputPartitionings(sweepableInputs []txInput,
-	relayFeePerKW, feePerKW chainfee.SatPerKWeight,
-	maxInputsPerTx int, wallet Wallet) ([]inputSet, error) {
+	feePerKW chainfee.SatPerKWeight, maxInputsPerTx int,
+	wallet Wallet) ([]inputSet, error) {
 
 	// Sort input by yield. We will start constructing input sets starting
 	// with the highest yield inputs. This is to prevent the construction
@@ -85,9 +87,7 @@ func generateInputPartitionings(sweepableInputs []txInput,
 		// Start building a set of positive-yield tx inputs under the
 		// condition that the tx will be published with the specified
 		// fee rate.
-		txInputs := newTxInputSet(
-			wallet, feePerKW, relayFeePerKW, maxInputsPerTx,
-		)
+		txInputs := newTxInputSet(wallet, feePerKW, maxInputsPerTx)
 
 		// From the set of sweepable inputs, keep adding inputs to the
 		// input set until the tx output value no longer goes up or the
@@ -111,10 +111,12 @@ func generateInputPartitionings(sweepableInputs []txInput,
 		// continuing with the remaining inputs will only lead to sets
 		// with an even lower output value.
 		if !txInputs.enoughInput() {
+			// The change output is always a p2tr here.
+			dl := lnwallet.DustLimitForSize(input.P2TRSize)
 			log.Debugf("Set value %v (r=%v, c=%v) below dust "+
 				"limit of %v", txInputs.totalOutput(),
 				txInputs.requiredOutput, txInputs.changeOutput,
-				txInputs.dustLimit)
+				dl)
 			return sets, nil
 		}
 
@@ -131,12 +133,20 @@ func generateInputPartitionings(sweepableInputs []txInput,
 	return sets, nil
 }
 
-// createSweepTx builds a signed tx spending the inputs to a the output script.
-func createSweepTx(inputs []input.Input, outputPkScript []byte,
-	currentBlockHeight uint32, feePerKw chainfee.SatPerKWeight,
-	dustLimit btcutil.Amount, signer input.Signer) (*wire.MsgTx, error) {
+// createSweepTx builds a signed tx spending the inputs to the given outputs,
+// sending any leftover change to the change script.
+func createSweepTx(inputs []input.Input, outputs []*wire.TxOut,
+	changePkScript []byte, currentBlockHeight uint32,
+	feePerKw chainfee.SatPerKWeight, signer input.Signer) (*wire.MsgTx,
+	error) {
 
-	inputs, estimator := getWeightEstimate(inputs, feePerKw)
+	inputs, estimator, err := getWeightEstimate(
+		inputs, outputs, feePerKw, changePkScript,
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	txFee := estimator.fee()
 
 	var (
@@ -210,21 +220,37 @@ func createSweepTx(inputs []input.Input, outputPkScript []byte,
 		totalInput += btcutil.Amount(o.SignDesc().Output.Value)
 	}
 
+	// Add the outputs given, if any.
+	for _, o := range outputs {
+		sweepTx.AddTxOut(o)
+		requiredOutput += btcutil.Amount(o.Value)
+	}
+
+	if requiredOutput+txFee > totalInput {
+		return nil, fmt.Errorf("insufficient input to create sweep "+
+			"tx: input_sum=%v, output_sum=%v", totalInput,
+			requiredOutput+txFee)
+	}
+
 	// The value remaining after the required output and fees, go to
 	// change. Not that this fee is what we would have to pay in case the
 	// sweep tx has a change output.
 	changeAmt := totalInput - requiredOutput - txFee
 
+	// We'll calculate the dust limit for the given changePkScript since it
+	// is variable.
+	changeLimit := lnwallet.DustLimitForSize(len(changePkScript))
+
 	// The txn will sweep the amount after fees to the pkscript generated
 	// above.
-	if changeAmt >= dustLimit {
+	if changeAmt >= changeLimit {
 		sweepTx.AddTxOut(&wire.TxOut{
-			PkScript: outputPkScript,
+			PkScript: changePkScript,
 			Value:    int64(changeAmt),
 		})
 	} else {
 		log.Infof("Change amt %v below dustlimit %v, not adding "+
-			"change output", changeAmt, dustLimit)
+			"change output", changeAmt, changeLimit)
 	}
 
 	// We'll default to using the current block height as locktime, if none
@@ -245,13 +271,18 @@ func createSweepTx(inputs []input.Input, outputPkScript []byte,
 		return nil, err
 	}
 
-	hashCache := txscript.NewTxSigHashes(sweepTx)
+	prevInputFetcher, err := input.MultiPrevOutFetcher(inputs)
+	if err != nil {
+		return nil, fmt.Errorf("error creating prev input fetcher "+
+			"for hash cache: %v", err)
+	}
+	hashCache := txscript.NewTxSigHashes(sweepTx, prevInputFetcher)
 
 	// With all the inputs in place, use each output's unique input script
 	// function to generate the final witness required for spending.
 	addInputScript := func(idx int, tso input.Input) error {
 		inputScript, err := tso.CraftInputScript(
-			signer, sweepTx, hashCache, idx,
+			signer, sweepTx, hashCache, prevInputFetcher, idx,
 		)
 		if err != nil {
 			return err
@@ -287,8 +318,9 @@ func createSweepTx(inputs []input.Input, outputPkScript []byte,
 
 // getWeightEstimate returns a weight estimate for the given inputs.
 // Additionally, it returns counts for the number of csv and cltv inputs.
-func getWeightEstimate(inputs []input.Input, feeRate chainfee.SatPerKWeight) (
-	[]input.Input, *weightEstimator) {
+func getWeightEstimate(inputs []input.Input, outputs []*wire.TxOut,
+	feeRate chainfee.SatPerKWeight, outputPkScript []byte) ([]input.Input,
+	*weightEstimator, error) {
 
 	// We initialize a weight estimator so we can accurately asses the
 	// amount of fees we need to pay for this sweep transaction.
@@ -297,14 +329,39 @@ func getWeightEstimate(inputs []input.Input, feeRate chainfee.SatPerKWeight) (
 	// be more efficient on-chain.
 	weightEstimate := newWeightEstimator(feeRate)
 
-	// Our sweep transaction will pay to a single segwit p2wkh address,
-	// ensure it contributes to our weight estimate. If the inputs we add
-	// have required TxOuts, then this will be our change address. Note
-	// that if we have required TxOuts, we might end up creating a sweep tx
-	// without a change output. It is okay to add the change output to the
-	// weight estimate regardless, since the estimated fee will just be
-	// subtracted from this already dust output, and trimmed.
-	weightEstimate.addP2WKHOutput()
+	// Our sweep transaction will always pay to the given set of outputs.
+	for _, o := range outputs {
+		weightEstimate.addOutput(o)
+	}
+
+	// If there is any leftover change after paying to the given outputs
+	// and required outputs, it will go to a single segwit p2wkh or p2tr
+	// address. This will be our change address, so ensure it contributes to
+	// our weight estimate. Note that if we have other outputs, we might end
+	// up creating a sweep tx without a change output. It is okay to add the
+	// change output to the weight estimate regardless, since the estimated
+	// fee will just be subtracted from this already dust output, and
+	// trimmed.
+	switch {
+	case txscript.IsPayToTaproot(outputPkScript):
+		weightEstimate.addP2TROutput()
+
+	case txscript.IsPayToWitnessScriptHash(outputPkScript):
+		weightEstimate.addP2WSHOutput()
+
+	case txscript.IsPayToWitnessPubKeyHash(outputPkScript):
+		weightEstimate.addP2WKHOutput()
+
+	case txscript.IsPayToPubKeyHash(outputPkScript):
+		weightEstimate.estimator.AddP2PKHOutput()
+
+	case txscript.IsPayToScriptHash(outputPkScript):
+		weightEstimate.estimator.AddP2SHOutput()
+
+	default:
+		// Unknown script type.
+		return nil, nil, errors.New("unknown script type")
+	}
 
 	// For each output, use its witness type to determine the estimate
 	// weight of its witness, and add it to the proper set of spendable
@@ -331,7 +388,7 @@ func getWeightEstimate(inputs []input.Input, feeRate chainfee.SatPerKWeight) (
 		sweepInputs = append(sweepInputs, inp)
 	}
 
-	return sweepInputs, weightEstimate
+	return sweepInputs, weightEstimate, nil
 }
 
 // inputSummary returns a string containing a human readable summary about the

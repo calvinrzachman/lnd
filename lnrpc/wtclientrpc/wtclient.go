@@ -7,8 +7,8 @@ import (
 	"net"
 	"strconv"
 
-	"github.com/btcsuite/btcd/btcec"
-	"github.com/grpc-ecosystem/grpc-gateway/runtime"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/lightningnetwork/lnd/lncfg"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnwire"
@@ -64,11 +64,21 @@ var (
 	ErrWtclientNotActive = errors.New("watchtower client not active")
 )
 
+// ServerShell is a shell struct holding a reference to the actual sub-server.
+// It is used to register the gRPC sub-server with the root server before we
+// have the necessary dependencies to populate the actual sub-server.
+type ServerShell struct {
+	WatchtowerClientServer
+}
+
 // WatchtowerClient is the RPC server we'll use to interact with the backing
 // active watchtower client.
 //
 // TODO(wilmer): better name?
 type WatchtowerClient struct {
+	// Required by the grpc-gateway/v2 library for forward compatibility.
+	UnimplementedWatchtowerClientServer
+
 	cfg Config
 }
 
@@ -82,7 +92,7 @@ var _ WatchtowerClientServer = (*WatchtowerClient)(nil)
 // then we'll create them on start up. If we're unable to locate, or create the
 // macaroons we need, then we'll return with an error.
 func New(cfg *Config) (*WatchtowerClient, lnrpc.MacaroonPerms, error) {
-	return &WatchtowerClient{*cfg}, macPermissions, nil
+	return &WatchtowerClient{cfg: *cfg}, macPermissions, nil
 }
 
 // Start launches any helper goroutines required for the WatchtowerClient to
@@ -112,14 +122,11 @@ func (c *WatchtowerClient) Name() string {
 // RPC server to register itself with the main gRPC root server. Until this is
 // called, each sub-server won't be able to have requests routed towards it.
 //
-// NOTE: This is part of the lnrpc.SubServer interface.
-func (c *WatchtowerClient) RegisterWithRootServer(grpcServer *grpc.Server) error {
+// NOTE: This is part of the lnrpc.GrpcHandler interface.
+func (r *ServerShell) RegisterWithRootServer(grpcServer *grpc.Server) error {
 	// We make sure that we register it with the main gRPC server to ensure
 	// all our methods are routed properly.
-	RegisterWatchtowerClientServer(grpcServer, c)
-
-	c.cfg.Log.Debugf("WatchtowerClient RPC server successfully registered " +
-		"with  root gRPC server")
+	RegisterWatchtowerClientServer(grpcServer, r)
 
 	return nil
 }
@@ -128,8 +135,8 @@ func (c *WatchtowerClient) RegisterWithRootServer(grpcServer *grpc.Server) error
 // RPC server to register itself with the main REST mux server. Until this is
 // called, each sub-server won't be able to have requests routed towards it.
 //
-// NOTE: This is part of the lnrpc.SubServer interface.
-func (c *WatchtowerClient) RegisterWithRestServer(ctx context.Context,
+// NOTE: This is part of the lnrpc.GrpcHandler interface.
+func (r *ServerShell) RegisterWithRestServer(ctx context.Context,
 	mux *runtime.ServeMux, dest string, opts []grpc.DialOption) error {
 
 	// We make sure that we register it with the main REST server to ensure
@@ -140,6 +147,25 @@ func (c *WatchtowerClient) RegisterWithRestServer(ctx context.Context,
 	}
 
 	return nil
+}
+
+// CreateSubServer populates the subserver's dependencies using the passed
+// SubServerConfigDispatcher. This method should fully initialize the
+// sub-server instance, making it ready for action. It returns the macaroon
+// permissions that the sub-server wishes to pass on to the root server for all
+// methods routed towards it.
+//
+// NOTE: This is part of the lnrpc.GrpcHandler interface.
+func (r *ServerShell) CreateSubServer(configRegistry lnrpc.SubServerConfigDispatcher) (
+	lnrpc.SubServer, lnrpc.MacaroonPerms, error) {
+
+	subServer, macPermissions, err := createNewSubServer(configRegistry)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	r.WatchtowerClientServer = subServer
+	return subServer, macPermissions, nil
 }
 
 // isActive returns nil if the watchtower client is initialized so that we can
@@ -162,7 +188,7 @@ func (c *WatchtowerClient) AddTower(ctx context.Context,
 		return nil, err
 	}
 
-	pubKey, err := btcec.ParsePubKey(req.Pubkey, btcec.S256())
+	pubKey, err := btcec.ParsePubKey(req.Pubkey)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +227,7 @@ func (c *WatchtowerClient) RemoveTower(ctx context.Context,
 		return nil, err
 	}
 
-	pubKey, err := btcec.ParsePubKey(req.Pubkey, btcec.S256())
+	pubKey, err := btcec.ParsePubKey(req.Pubkey)
 	if err != nil {
 		return nil, err
 	}
@@ -239,12 +265,16 @@ func (c *WatchtowerClient) ListTowers(ctx context.Context,
 		return nil, err
 	}
 
-	anchorTowers, err := c.cfg.AnchorClient.RegisteredTowers()
+	opts, ackCounts, committedUpdateCounts := constructFunctionalOptions(
+		req.IncludeSessions,
+	)
+
+	anchorTowers, err := c.cfg.AnchorClient.RegisteredTowers(opts...)
 	if err != nil {
 		return nil, err
 	}
 
-	legacyTowers, err := c.cfg.Client.RegisteredTowers()
+	legacyTowers, err := c.cfg.Client.RegisteredTowers(opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -260,7 +290,10 @@ func (c *WatchtowerClient) ListTowers(ctx context.Context,
 
 	rpcTowers := make([]*Tower, 0, len(towers))
 	for _, tower := range towers {
-		rpcTower := marshallTower(tower, req.IncludeSessions)
+		rpcTower := marshallTower(
+			tower, req.IncludeSessions, ackCounts,
+			committedUpdateCounts,
+		)
 		rpcTowers = append(rpcTowers, rpcTower)
 	}
 
@@ -275,21 +308,64 @@ func (c *WatchtowerClient) GetTowerInfo(ctx context.Context,
 		return nil, err
 	}
 
-	pubKey, err := btcec.ParsePubKey(req.Pubkey, btcec.S256())
+	pubKey, err := btcec.ParsePubKey(req.Pubkey)
 	if err != nil {
 		return nil, err
 	}
+
+	opts, ackCounts, committedUpdateCounts := constructFunctionalOptions(
+		req.IncludeSessions,
+	)
 
 	var tower *wtclient.RegisteredTower
-	tower, err = c.cfg.Client.LookupTower(pubKey)
+	tower, err = c.cfg.Client.LookupTower(pubKey, opts...)
 	if err == wtdb.ErrTowerNotFound {
-		tower, err = c.cfg.AnchorClient.LookupTower(pubKey)
+		tower, err = c.cfg.AnchorClient.LookupTower(pubKey, opts...)
 	}
 	if err != nil {
 		return nil, err
 	}
 
-	return marshallTower(tower, req.IncludeSessions), nil
+	return marshallTower(
+		tower, req.IncludeSessions, ackCounts, committedUpdateCounts,
+	), nil
+}
+
+// constructFunctionalOptions is a helper function that constructs a list of
+// functional options to be used when fetching a tower from the DB. It also
+// returns a map of acked-update counts and one for un-acked-update counts that
+// will be populated once the db call has been made.
+func constructFunctionalOptions(includeSessions bool) (
+	[]wtdb.ClientSessionListOption, map[wtdb.SessionID]uint16,
+	map[wtdb.SessionID]uint16) {
+
+	var (
+		opts                  []wtdb.ClientSessionListOption
+		committedUpdateCounts = make(map[wtdb.SessionID]uint16)
+		ackCounts             = make(map[wtdb.SessionID]uint16)
+	)
+	if !includeSessions {
+		return opts, ackCounts, committedUpdateCounts
+	}
+
+	perNumAckedUpdates := func(s *wtdb.ClientSession, id lnwire.ChannelID,
+		numUpdates uint16) {
+
+		ackCounts[s.ID] += numUpdates
+	}
+
+	perCommittedUpdate := func(s *wtdb.ClientSession,
+		u *wtdb.CommittedUpdate) {
+
+		committedUpdateCounts[s.ID]++
+	}
+
+	opts = []wtdb.ClientSessionListOption{
+		wtdb.WithPerNumAckedUpdates(perNumAckedUpdates),
+		wtdb.WithPerCommittedUpdate(perCommittedUpdate),
+	}
+
+	return opts, ackCounts, committedUpdateCounts
 }
 
 // Stats returns the in-memory statistics of the client since startup.
@@ -313,7 +389,7 @@ func (c *WatchtowerClient) Stats(ctx context.Context,
 
 		stats.NumTasksAccepted += stat.NumTasksAccepted
 		stats.NumTasksIneligible += stat.NumTasksIneligible
-		stats.NumTasksReceived += stat.NumTasksReceived
+		stats.NumTasksPending += stat.NumTasksPending
 		stats.NumSessionsAcquired += stat.NumSessionsAcquired
 		stats.NumSessionsExhausted += stat.NumSessionsExhausted
 	}
@@ -321,7 +397,7 @@ func (c *WatchtowerClient) Stats(ctx context.Context,
 	return &StatsResponse{
 		NumBackups:           uint32(stats.NumTasksAccepted),
 		NumFailedBackups:     uint32(stats.NumTasksIneligible),
-		NumPendingBackups:    uint32(stats.NumTasksReceived),
+		NumPendingBackups:    uint32(stats.NumTasksPending),
 		NumSessionsAcquired:  uint32(stats.NumSessionsAcquired),
 		NumSessionsExhausted: uint32(stats.NumSessionsExhausted),
 	}, nil
@@ -347,14 +423,24 @@ func (c *WatchtowerClient) Policy(ctx context.Context,
 	}
 
 	return &PolicyResponse{
-		MaxUpdates:      uint32(policy.MaxUpdates),
-		SweepSatPerByte: uint32(policy.SweepFeeRate.FeePerKVByte() / 1000),
+		MaxUpdates: uint32(policy.MaxUpdates),
+		SweepSatPerVbyte: uint32(
+			policy.SweepFeeRate.FeePerKVByte() / 1000,
+		),
+
+		// Deprecated field.
+		SweepSatPerByte: uint32(
+			policy.SweepFeeRate.FeePerKVByte() / 1000,
+		),
 	}, nil
 }
 
 // marshallTower converts a client registered watchtower into its corresponding
 // RPC type.
-func marshallTower(tower *wtclient.RegisteredTower, includeSessions bool) *Tower {
+func marshallTower(tower *wtclient.RegisteredTower, includeSessions bool,
+	ackCounts map[wtdb.SessionID]uint16,
+	pendingCounts map[wtdb.SessionID]uint16) *Tower {
+
 	rpcAddrs := make([]string, 0, len(tower.Addresses))
 	for _, addr := range tower.Addresses {
 		rpcAddrs = append(rpcAddrs, addr.String())
@@ -364,12 +450,15 @@ func marshallTower(tower *wtclient.RegisteredTower, includeSessions bool) *Tower
 	if includeSessions {
 		rpcSessions = make([]*TowerSession, 0, len(tower.Sessions))
 		for _, session := range tower.Sessions {
-			satPerByte := session.Policy.SweepFeeRate.FeePerKVByte() / 1000
+			satPerVByte := session.Policy.SweepFeeRate.FeePerKVByte() / 1000
 			rpcSessions = append(rpcSessions, &TowerSession{
-				NumBackups:        uint32(len(session.AckedUpdates)),
-				NumPendingBackups: uint32(len(session.CommittedUpdates)),
+				NumBackups:        uint32(ackCounts[session.ID]),
+				NumPendingBackups: uint32(pendingCounts[session.ID]),
 				MaxBackups:        uint32(session.Policy.MaxUpdates),
-				SweepSatPerByte:   uint32(satPerByte),
+				SweepSatPerVbyte:  uint32(satPerVByte),
+
+				// Deprecated field.
+				SweepSatPerByte: uint32(satPerVByte),
 			})
 		}
 	}

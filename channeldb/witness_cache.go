@@ -3,7 +3,7 @@ package channeldb
 import (
 	"fmt"
 
-	"github.com/lightningnetwork/lnd/channeldb/kvdb"
+	"github.com/lightningnetwork/lnd/kvdb"
 	"github.com/lightningnetwork/lnd/lntypes"
 )
 
@@ -58,7 +58,7 @@ var (
 // use this cache to detect duplicate witnesses.
 //
 // TODO(roasbeef): need expiry policy?
-//  * encrypt?
+//   - encrypt?
 type WitnessCache struct {
 	db *DB
 }

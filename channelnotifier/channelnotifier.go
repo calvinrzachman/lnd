@@ -17,7 +17,7 @@ type ChannelNotifier struct {
 
 	ntfnServer *subscribe.Server
 
-	chanDB *channeldb.DB
+	chanDB *channeldb.ChannelStateDB
 }
 
 // PendingOpenChannelEvent represents a new event where a new channel has
@@ -47,6 +47,13 @@ type ActiveLinkEvent struct {
 	ChannelPoint *wire.OutPoint
 }
 
+// InactiveLinkEvent represents a new event where the link becomes inactive in
+// the switch.
+type InactiveLinkEvent struct {
+	// ChannelPoint is the channel point for the inactive channel.
+	ChannelPoint *wire.OutPoint
+}
+
 // ActiveChannelEvent represents a new event where a channel becomes active.
 type ActiveChannelEvent struct {
 	// ChannelPoint is the channelpoint for the newly active channel.
@@ -65,10 +72,18 @@ type ClosedChannelEvent struct {
 	CloseSummary *channeldb.ChannelCloseSummary
 }
 
+// FullyResolvedChannelEvent represents a new event where a channel becomes
+// fully resolved.
+type FullyResolvedChannelEvent struct {
+	// ChannelPoint is the channelpoint for the newly fully resolved
+	// channel.
+	ChannelPoint *wire.OutPoint
+}
+
 // New creates a new channel notifier. The ChannelNotifier gets channel
 // events from peers and from the chain arbitrator, and dispatches them to
 // its clients.
-func New(chanDB *channeldb.DB) *ChannelNotifier {
+func New(chanDB *channeldb.ChannelStateDB) *ChannelNotifier {
 	return &ChannelNotifier{
 		ntfnServer: subscribe.NewServer(),
 		chanDB:     chanDB,
@@ -79,17 +94,20 @@ func New(chanDB *channeldb.DB) *ChannelNotifier {
 func (c *ChannelNotifier) Start() error {
 	var err error
 	c.started.Do(func() {
-		log.Trace("ChannelNotifier starting")
+		log.Info("ChannelNotifier starting")
 		err = c.ntfnServer.Start()
 	})
 	return err
 }
 
 // Stop signals the notifier for a graceful shutdown.
-func (c *ChannelNotifier) Stop() {
+func (c *ChannelNotifier) Stop() error {
+	var err error
 	c.stopped.Do(func() {
-		c.ntfnServer.Stop()
+		log.Info("ChannelNotifier shutting down")
+		err = c.ntfnServer.Stop()
 	})
+	return err
 }
 
 // SubscribeChannelEvents returns a subscribe.Client that will receive updates
@@ -123,9 +141,8 @@ func (c *ChannelNotifier) NotifyPendingOpenChannelEvent(chanPoint wire.OutPoint,
 // NotifyOpenChannelEvent notifies the channelEventNotifier goroutine that a
 // channel has gone from pending open to open.
 func (c *ChannelNotifier) NotifyOpenChannelEvent(chanPoint wire.OutPoint) {
-
 	// Fetch the relevant channel from the database.
-	channel, err := c.chanDB.FetchChannel(chanPoint)
+	channel, err := c.chanDB.FetchChannel(nil, chanPoint)
 	if err != nil {
 		log.Warnf("Unable to fetch open channel from the db: %v", err)
 	}
@@ -153,6 +170,18 @@ func (c *ChannelNotifier) NotifyClosedChannelEvent(chanPoint wire.OutPoint) {
 	}
 }
 
+// NotifyFullyResolvedChannelEvent notifies the channelEventNotifier goroutine
+// that a channel was fully resolved on chain.
+func (c *ChannelNotifier) NotifyFullyResolvedChannelEvent(
+	chanPoint wire.OutPoint) {
+
+	// Send the resolved event to all channel event subscribers.
+	event := FullyResolvedChannelEvent{ChannelPoint: &chanPoint}
+	if err := c.ntfnServer.SendUpdate(event); err != nil {
+		log.Warnf("Unable to send resolved channel update: %v", err)
+	}
+}
+
 // NotifyActiveLinkEvent notifies the channelEventNotifier goroutine that a
 // link has been added to the switch.
 func (c *ChannelNotifier) NotifyActiveLinkEvent(chanPoint wire.OutPoint) {
@@ -168,6 +197,15 @@ func (c *ChannelNotifier) NotifyActiveChannelEvent(chanPoint wire.OutPoint) {
 	event := ActiveChannelEvent{ChannelPoint: &chanPoint}
 	if err := c.ntfnServer.SendUpdate(event); err != nil {
 		log.Warnf("Unable to send active channel update: %v", err)
+	}
+}
+
+// NotifyInactiveLinkEvent notifies the channelEventNotifier goroutine that a
+// link has been removed from the switch.
+func (c *ChannelNotifier) NotifyInactiveLinkEvent(chanPoint wire.OutPoint) {
+	event := InactiveLinkEvent{ChannelPoint: &chanPoint}
+	if err := c.ntfnServer.SendUpdate(event); err != nil {
+		log.Warnf("Unable to send inactive link update: %v", err)
 	}
 }
 

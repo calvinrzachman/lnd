@@ -6,12 +6,13 @@ import (
 	"io"
 	"net"
 
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/keychain"
+	"github.com/lightningnetwork/lnd/lnencrypt"
 	"github.com/lightningnetwork/lnd/lnwire"
 )
 
@@ -40,6 +41,13 @@ const (
 	// AnchorsZeroFeeHtlcTxCommitVersion is a version that denotes this
 	// channel is using the zero-fee second-level anchor commitment format.
 	AnchorsZeroFeeHtlcTxCommitVersion = 3
+
+	// ScriptEnforcedLeaseVersion is a version that denotes this channel is
+	// using the zero-fee second-level anchor commitment format along with
+	// an additional CLTV requirement of the channel lease maturity on any
+	// commitment and HTLC outputs that pay directly to the channel
+	// initiator.
+	ScriptEnforcedLeaseVersion = 4
 )
 
 // Single is a static description of an existing channel that can be used for
@@ -116,6 +124,16 @@ type Single struct {
 	// ShaChainRootDesc describes how to derive the private key that was
 	// used as the shachain root for this channel.
 	ShaChainRootDesc keychain.KeyDescriptor
+
+	// LeaseExpiry represents the absolute expiration as a height of the
+	// chain of a channel lease that is applied to every output that pays
+	// directly to the channel initiator in addition to the usual CSV
+	// requirement.
+	//
+	// NOTE: This field will only be present for the following versions:
+	//
+	// - ScriptEnforcedLeaseVersion
+	LeaseExpiry uint32
 }
 
 // NewSingle creates a new static channel backup based on an existing open
@@ -124,19 +142,34 @@ type Single struct {
 func NewSingle(channel *channeldb.OpenChannel,
 	nodeAddrs []net.Addr) Single {
 
-	// TODO(roasbeef): update after we start to store the KeyLoc for
-	// shachain root
+	var shaChainRootDesc keychain.KeyDescriptor
 
-	// We'll need to obtain the shachain root which is derived directly
-	// from a private key in our keychain.
-	var b bytes.Buffer
-	channel.RevocationProducer.Encode(&b) // Can't return an error.
+	// If the channel has a populated RevocationKeyLocator, then we can
+	// just store that instead of the public key.
+	if channel.RevocationKeyLocator.Family == keychain.KeyFamilyRevocationRoot {
+		shaChainRootDesc = keychain.KeyDescriptor{
+			KeyLocator: channel.RevocationKeyLocator,
+		}
+	} else {
+		// If the RevocationKeyLocator is not populated, then we'll need
+		// to obtain a public point for the shachain root and store that.
+		// This is the legacy scheme.
+		var b bytes.Buffer
+		_ = channel.RevocationProducer.Encode(&b) // Can't return an error.
 
-	// Once we have the root, we'll make a public key from it, such that
-	// the backups plaintext don't carry any private information. When we
-	// go to recover, we'll present this in order to derive the private
-	// key.
-	_, shaChainPoint := btcec.PrivKeyFromBytes(btcec.S256(), b.Bytes())
+		// Once we have the root, we'll make a public key from it, such that
+		// the backups plaintext don't carry any private information. When
+		// we go to recover, we'll present this in order to derive the
+		// private key.
+		_, shaChainPoint := btcec.PrivKeyFromBytes(b.Bytes())
+
+		shaChainRootDesc = keychain.KeyDescriptor{
+			PubKey: shaChainPoint,
+			KeyLocator: keychain.KeyLocator{
+				Family: keychain.KeyFamilyRevocationRoot,
+			},
+		}
+	}
 
 	// If a channel is unconfirmed, the block height of the ShortChannelID
 	// is zero. This will lead to problems when trying to restore that
@@ -145,28 +178,45 @@ func NewSingle(channel *channeldb.OpenChannel,
 	// to the channel ID so we can use that as height hint on restore.
 	chanID := channel.ShortChanID()
 	if chanID.BlockHeight == 0 {
-		chanID.BlockHeight = channel.FundingBroadcastHeight
+		chanID.BlockHeight = channel.BroadcastHeight()
+	}
+
+	// If this is a zero-conf channel, we'll need to have separate logic
+	// depending on whether it's confirmed or not. This is because the
+	// ShortChanID is an alias.
+	if channel.IsZeroConf() {
+		// If the channel is confirmed, we'll use the confirmed SCID.
+		if channel.ZeroConfConfirmed() {
+			chanID = channel.ZeroConfRealScid()
+		} else {
+			// Else if the zero-conf channel is unconfirmed, we'll
+			// need to use the broadcast height and zero out the
+			// TxIndex and TxPosition fields. This is so
+			// openChannelShell works properly.
+			chanID.BlockHeight = channel.BroadcastHeight()
+			chanID.TxIndex = 0
+			chanID.TxPosition = 0
+		}
 	}
 
 	single := Single{
-		IsInitiator:     channel.IsInitiator,
-		ChainHash:       channel.ChainHash,
-		FundingOutpoint: channel.FundingOutpoint,
-		ShortChannelID:  chanID,
-		RemoteNodePub:   channel.IdentityPub,
-		Addresses:       nodeAddrs,
-		Capacity:        channel.Capacity,
-		LocalChanCfg:    channel.LocalChanCfg,
-		RemoteChanCfg:   channel.RemoteChanCfg,
-		ShaChainRootDesc: keychain.KeyDescriptor{
-			PubKey: shaChainPoint,
-			KeyLocator: keychain.KeyLocator{
-				Family: keychain.KeyFamilyRevocationRoot,
-			},
-		},
+		IsInitiator:      channel.IsInitiator,
+		ChainHash:        channel.ChainHash,
+		FundingOutpoint:  channel.FundingOutpoint,
+		ShortChannelID:   chanID,
+		RemoteNodePub:    channel.IdentityPub,
+		Addresses:        nodeAddrs,
+		Capacity:         channel.Capacity,
+		LocalChanCfg:     channel.LocalChanCfg,
+		RemoteChanCfg:    channel.RemoteChanCfg,
+		ShaChainRootDesc: shaChainRootDesc,
 	}
 
 	switch {
+	case channel.ChanType.HasLeaseExpiration():
+		single.Version = ScriptEnforcedLeaseVersion
+		single.LeaseExpiry = channel.ThawHeight
+
 	case channel.ChanType.ZeroHtlcTxFee():
 		single.Version = AnchorsZeroFeeHtlcTxCommitVersion
 
@@ -193,6 +243,7 @@ func (s *Single) Serialize(w io.Writer) error {
 	case TweaklessCommitVersion:
 	case AnchorsCommitVersion:
 	case AnchorsZeroFeeHtlcTxCommitVersion:
+	case ScriptEnforcedLeaseVersion:
 	default:
 		return fmt.Errorf("unable to serialize w/ unknown "+
 			"version: %v", s.Version)
@@ -254,9 +305,22 @@ func (s *Single) Serialize(w io.Writer) error {
 	); err != nil {
 		return err
 	}
+	if s.Version == ScriptEnforcedLeaseVersion {
+		err := lnwire.WriteElements(&singleBytes, s.LeaseExpiry)
+		if err != nil {
+			return err
+		}
+	}
+
+	// TODO(yy): remove the type assertion when we finished refactoring db
+	// into using write buffer.
+	buf, ok := w.(*bytes.Buffer)
+	if !ok {
+		return fmt.Errorf("expect io.Writer to be *bytes.Buffer")
+	}
 
 	return lnwire.WriteElements(
-		w,
+		buf,
 		byte(s.Version),
 		uint16(len(singleBytes.Bytes())),
 		singleBytes.Bytes(),
@@ -270,10 +334,10 @@ func (s *Single) Serialize(w io.Writer) error {
 // global counter to use as a sequence number for nonces, and want to ensure
 // that we're able to decrypt these blobs without any additional context. We
 // derive the key that we use for encryption via a SHA2 operation of the with
-// the golden keychain.KeyFamilyStaticBackup base encryption key.  We then take
-// the serialized resulting shared secret point, and hash it using sha256 to
-// obtain the key that we'll use for encryption. When using the AEAD, we pass
-// the nonce as associated data such that we'll be able to package the two
+// the golden keychain.KeyFamilyBaseEncryption base encryption key.  We then
+// take the serialized resulting shared secret point, and hash it using sha256
+// to obtain the key that we'll use for encryption. When using the AEAD, we
+// pass the nonce as associated data such that we'll be able to package the two
 // together for storage. Before writing out the encrypted payload, we prepend
 // the nonce to the final blob.
 func (s *Single) PackToWriter(w io.Writer, keyRing keychain.KeyRing) error {
@@ -288,7 +352,11 @@ func (s *Single) PackToWriter(w io.Writer, keyRing keychain.KeyRing) error {
 	// Finally, we'll encrypt the raw serialized SCB (using the nonce as
 	// associated data), and write out the ciphertext prepend with the
 	// nonce that we used to the passed io.Reader.
-	return encryptPayloadToWriter(rawBytes, w, keyRing)
+	e, err := lnencrypt.KeyRingEncrypter(keyRing)
+	if err != nil {
+		return fmt.Errorf("unable to generate encrypt key %v", err)
+	}
+	return e.EncryptPayloadToWriter(rawBytes.Bytes(), w)
 }
 
 // readLocalKeyDesc reads a KeyDescriptor encoded within an unpacked Single.
@@ -324,12 +392,10 @@ func readRemoteKeyDesc(r io.Reader) (keychain.KeyDescriptor, error) {
 		return keychain.KeyDescriptor{}, err
 	}
 
-	keyDesc.PubKey, err = btcec.ParsePubKey(pub[:], btcec.S256())
+	keyDesc.PubKey, err = btcec.ParsePubKey(pub[:])
 	if err != nil {
 		return keychain.KeyDescriptor{}, err
 	}
-
-	keyDesc.PubKey.Curve = nil
 
 	return keyDesc, nil
 }
@@ -353,6 +419,7 @@ func (s *Single) Deserialize(r io.Reader) error {
 	case TweaklessCommitVersion:
 	case AnchorsCommitVersion:
 	case AnchorsZeroFeeHtlcTxCommitVersion:
+	case ScriptEnforcedLeaseVersion:
 	default:
 		return fmt.Errorf("unable to de-serialize w/ unknown "+
 			"version: %v", s.Version)
@@ -434,7 +501,7 @@ func (s *Single) Deserialize(r io.Reader) error {
 	// been specified or not.
 	if !bytes.Equal(shaChainPub[:], zeroPub[:]) {
 		s.ShaChainRootDesc.PubKey, err = btcec.ParsePubKey(
-			shaChainPub[:], btcec.S256(),
+			shaChainPub[:],
 		)
 		if err != nil {
 			return err
@@ -446,8 +513,18 @@ func (s *Single) Deserialize(r io.Reader) error {
 		return err
 	}
 	s.ShaChainRootDesc.KeyLocator.Family = keychain.KeyFamily(shaKeyFam)
+	err = lnwire.ReadElements(r, &s.ShaChainRootDesc.KeyLocator.Index)
+	if err != nil {
+		return err
+	}
 
-	return lnwire.ReadElements(r, &s.ShaChainRootDesc.KeyLocator.Index)
+	if s.Version == ScriptEnforcedLeaseVersion {
+		if err := lnwire.ReadElement(r, &s.LeaseExpiry); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // UnpackFromReader is similar to Deserialize method, but it expects the passed
@@ -456,7 +533,11 @@ func (s *Single) Deserialize(r io.Reader) error {
 // payload for whatever reason (wrong key, wrong nonce, etc), then this method
 // will return an error.
 func (s *Single) UnpackFromReader(r io.Reader, keyRing keychain.KeyRing) error {
-	plaintext, err := decryptPayloadFromReader(r, keyRing)
+	e, err := lnencrypt.KeyRingEncrypter(keyRing)
+	if err != nil {
+		return fmt.Errorf("unable to generate key decrypter %v", err)
+	}
+	plaintext, err := e.DecryptPayloadFromReader(r)
 	if err != nil {
 		return err
 	}

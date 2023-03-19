@@ -6,10 +6,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
 	"github.com/lightningnetwork/lnd/chainntnfs"
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -223,17 +224,13 @@ func TestTxNotifierFutureConfDispatch(t *testing.T) {
 	tx1.AddTxOut(&wire.TxOut{PkScript: testRawScript})
 	tx1Hash := tx1.TxHash()
 	ntfn1, err := n.RegisterConf(&tx1Hash, testRawScript, tx1NumConfs, 1)
-	if err != nil {
-		t.Fatalf("unable to register ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register ntfn")
 
 	tx2 := wire.MsgTx{Version: 2}
 	tx2.AddTxOut(&wire.TxOut{PkScript: testRawScript})
 	tx2Hash := tx2.TxHash()
 	ntfn2, err := n.RegisterConf(&tx2Hash, testRawScript, tx2NumConfs, 1)
-	if err != nil {
-		t.Fatalf("unable to register ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register ntfn")
 
 	// We should not receive any notifications from both transactions
 	// since they have not been included in a block yet.
@@ -259,10 +256,8 @@ func TestTxNotifierFutureConfDispatch(t *testing.T) {
 		Transactions: []*wire.MsgTx{&tx1, &tx2},
 	})
 
-	err = n.ConnectTip(block1.Hash(), 11, block1.Transactions())
-	if err != nil {
-		t.Fatalf("Failed to connect block: %v", err)
-	}
+	err = n.ConnectTip(block1, 11)
+	require.NoError(t, err, "Failed to connect block")
 	if err := n.NotifyHeight(11); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
@@ -281,7 +276,7 @@ func TestTxNotifierFutureConfDispatch(t *testing.T) {
 		t.Fatal("Expected confirmation update for tx1")
 	}
 
-	// A confirmation notification for this tranaction should be dispatched,
+	// A confirmation notification for this transaction should be dispatched,
 	// as it only required one confirmation.
 	select {
 	case txConf := <-ntfn1.Event.Confirmed:
@@ -321,10 +316,8 @@ func TestTxNotifierFutureConfDispatch(t *testing.T) {
 	// Create a new block and add it to the TxNotifier at the next height.
 	// This should confirm tx2.
 	block2 := btcutil.NewBlock(&wire.MsgBlock{})
-	err = n.ConnectTip(block2.Hash(), 12, block2.Transactions())
-	if err != nil {
-		t.Fatalf("Failed to connect block: %v", err)
-	}
+	err = n.ConnectTip(block2, 12)
+	require.NoError(t, err, "Failed to connect block")
 	if err := n.NotifyHeight(12); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
@@ -395,15 +388,11 @@ func TestTxNotifierHistoricalConfDispatch(t *testing.T) {
 	// starting height so that they are confirmed once registering them.
 	tx1Hash := tx1.TxHash()
 	ntfn1, err := n.RegisterConf(&tx1Hash, testRawScript, tx1NumConfs, 1)
-	if err != nil {
-		t.Fatalf("unable to register ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register ntfn")
 
 	tx2Hash := tx2.TxHash()
 	ntfn2, err := n.RegisterConf(&tx2Hash, testRawScript, tx2NumConfs, 1)
-	if err != nil {
-		t.Fatalf("unable to register ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register ntfn")
 
 	// Update tx1 with its confirmation details. We should only receive one
 	// update since it only requires one confirmation and it already met it.
@@ -414,9 +403,7 @@ func TestTxNotifierHistoricalConfDispatch(t *testing.T) {
 		Tx:          &tx1,
 	}
 	err = n.UpdateConfDetails(ntfn1.HistoricalDispatch.ConfRequest, &txConf1)
-	if err != nil {
-		t.Fatalf("unable to update conf details: %v", err)
-	}
+	require.NoError(t, err, "unable to update conf details")
 	select {
 	case numConfsLeft := <-ntfn1.Event.Updates:
 		const expected = 0
@@ -448,9 +435,7 @@ func TestTxNotifierHistoricalConfDispatch(t *testing.T) {
 		Tx:          &tx2,
 	}
 	err = n.UpdateConfDetails(ntfn2.HistoricalDispatch.ConfRequest, &txConf2)
-	if err != nil {
-		t.Fatalf("unable to update conf details: %v", err)
-	}
+	require.NoError(t, err, "unable to update conf details")
 	select {
 	case numConfsLeft := <-ntfn2.Event.Updates:
 		const expected = 1
@@ -475,10 +460,8 @@ func TestTxNotifierHistoricalConfDispatch(t *testing.T) {
 		Transactions: []*wire.MsgTx{&tx3},
 	})
 
-	err = n.ConnectTip(block.Hash(), 11, block.Transactions())
-	if err != nil {
-		t.Fatalf("Failed to connect block: %v", err)
-	}
+	err = n.ConnectTip(block, 11)
+	require.NoError(t, err, "Failed to connect block")
 	if err := n.NotifyHeight(11); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
@@ -531,9 +514,7 @@ func TestTxNotifierFutureSpendDispatch(t *testing.T) {
 	// outpoint.
 	op := wire.OutPoint{Index: 1}
 	ntfn, err := n.RegisterSpend(&op, testRawScript, 1)
-	if err != nil {
-		t.Fatalf("unable to register spend ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register spend ntfn")
 
 	// We should not receive a notification as the outpoint has not been
 	// spent yet.
@@ -555,10 +536,8 @@ func TestTxNotifierFutureSpendDispatch(t *testing.T) {
 	block := btcutil.NewBlock(&wire.MsgBlock{
 		Transactions: []*wire.MsgTx{spendTx},
 	})
-	err = n.ConnectTip(block.Hash(), 11, block.Transactions())
-	if err != nil {
-		t.Fatalf("unable to connect block: %v", err)
-	}
+	err = n.ConnectTip(block, 11)
+	require.NoError(t, err, "unable to connect block")
 	if err := n.NotifyHeight(11); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
@@ -590,10 +569,8 @@ func TestTxNotifierFutureSpendDispatch(t *testing.T) {
 	block = btcutil.NewBlock(&wire.MsgBlock{
 		Transactions: []*wire.MsgTx{spendOfSpend},
 	})
-	err = n.ConnectTip(block.Hash(), 12, block.Transactions())
-	if err != nil {
-		t.Fatalf("unable to connect block: %v", err)
-	}
+	err = n.ConnectTip(block, 12)
+	require.NoError(t, err, "unable to connect block")
 	if err := n.NotifyHeight(12); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
@@ -625,21 +602,15 @@ func TestTxNotifierFutureConfDispatchReuseSafe(t *testing.T) {
 	tx1.AddTxOut(&wire.TxOut{PkScript: testRawScript})
 	tx1Hash := tx1.TxHash()
 	ntfn1, err := n.RegisterConf(&tx1Hash, testRawScript, 1, 1)
-	if err != nil {
-		t.Fatalf("unable to register ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register ntfn")
 	scriptNtfn1, err := n.RegisterConf(nil, testRawScript, 1, 1)
-	if err != nil {
-		t.Fatalf("unable to register ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register ntfn")
 	block := btcutil.NewBlock(&wire.MsgBlock{
 		Transactions: []*wire.MsgTx{&tx1},
 	})
 	currentBlock++
-	err = n.ConnectTip(block.Hash(), currentBlock, block.Transactions())
-	if err != nil {
-		t.Fatalf("unable to connect block: %v", err)
-	}
+	err = n.ConnectTip(block, currentBlock)
+	require.NoError(t, err, "unable to connect block")
 	if err := n.NotifyHeight(currentBlock); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
@@ -684,21 +655,15 @@ func TestTxNotifierFutureConfDispatchReuseSafe(t *testing.T) {
 	tx2.AddTxOut(&wire.TxOut{PkScript: testRawScript})
 	tx2Hash := tx2.TxHash()
 	ntfn2, err := n.RegisterConf(&tx2Hash, testRawScript, 1, 1)
-	if err != nil {
-		t.Fatalf("unable to register ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register ntfn")
 	scriptNtfn2, err := n.RegisterConf(nil, testRawScript, 1, 1)
-	if err != nil {
-		t.Fatalf("unable to register ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register ntfn")
 	block2 := btcutil.NewBlock(&wire.MsgBlock{
 		Transactions: []*wire.MsgTx{&tx2},
 	})
 	currentBlock++
-	err = n.ConnectTip(block2.Hash(), currentBlock, block2.Transactions())
-	if err != nil {
-		t.Fatalf("unable to connect block: %v", err)
-	}
+	err = n.ConnectTip(block2, currentBlock)
+	require.NoError(t, err, "unable to connect block")
 	if err := n.NotifyHeight(currentBlock); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
@@ -741,9 +706,7 @@ func TestTxNotifierFutureConfDispatchReuseSafe(t *testing.T) {
 	for currentBlock < 15 {
 		block := btcutil.NewBlock(&wire.MsgBlock{})
 		currentBlock++
-		err = n.ConnectTip(
-			block.Hash(), currentBlock, block.Transactions(),
-		)
+		err = n.ConnectTip(block, currentBlock)
 		if err != nil {
 			t.Fatalf("unable to connect block: %v", err)
 		}
@@ -799,9 +762,7 @@ func TestTxNotifierHistoricalSpendDispatch(t *testing.T) {
 	// We'll register for a spend notification of the outpoint and ensure
 	// that a notification isn't dispatched.
 	ntfn, err := n.RegisterSpend(&spentOutpoint, testRawScript, 1)
-	if err != nil {
-		t.Fatalf("unable to register spend ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register spend ntfn")
 
 	select {
 	case <-ntfn.Event.Spend:
@@ -816,9 +777,7 @@ func TestTxNotifierHistoricalSpendDispatch(t *testing.T) {
 	err = n.UpdateSpendDetails(
 		ntfn.HistoricalDispatch.SpendRequest, expectedSpendDetails,
 	)
-	if err != nil {
-		t.Fatalf("unable to update spend details: %v", err)
-	}
+	require.NoError(t, err, "unable to update spend details")
 
 	// Now that we have the spending details, we should receive a spend
 	// notification. We'll ensure that the details match as intended.
@@ -840,10 +799,8 @@ func TestTxNotifierHistoricalSpendDispatch(t *testing.T) {
 	block := btcutil.NewBlock(&wire.MsgBlock{
 		Transactions: []*wire.MsgTx{spendOfSpend},
 	})
-	err = n.ConnectTip(block.Hash(), startingHeight+1, block.Transactions())
-	if err != nil {
-		t.Fatalf("unable to connect block: %v", err)
-	}
+	err = n.ConnectTip(block, startingHeight+1)
+	require.NoError(t, err, "unable to connect block")
 	if err := n.NotifyHeight(startingHeight + 1); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
@@ -871,9 +828,7 @@ func TestTxNotifierMultipleHistoricalConfRescans(t *testing.T) {
 	// request a historical confirmation rescan as it does not have a
 	// historical view of the chain.
 	ntfn1, err := n.RegisterConf(&chainntnfs.ZeroHash, testRawScript, 1, 1)
-	if err != nil {
-		t.Fatalf("unable to register spend ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register spend ntfn")
 	if ntfn1.HistoricalDispatch == nil {
 		t.Fatal("expected to receive historical dispatch request")
 	}
@@ -882,9 +837,7 @@ func TestTxNotifierMultipleHistoricalConfRescans(t *testing.T) {
 	// transaction. This should not request a historical confirmation rescan
 	// since the first one is still pending.
 	ntfn2, err := n.RegisterConf(&chainntnfs.ZeroHash, testRawScript, 1, 1)
-	if err != nil {
-		t.Fatalf("unable to register spend ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register spend ntfn")
 	if ntfn2.HistoricalDispatch != nil {
 		t.Fatal("received unexpected historical rescan request")
 	}
@@ -897,14 +850,10 @@ func TestTxNotifierMultipleHistoricalConfRescans(t *testing.T) {
 		BlockHeight: startingHeight - 1,
 	}
 	err = n.UpdateConfDetails(ntfn1.HistoricalDispatch.ConfRequest, confDetails)
-	if err != nil {
-		t.Fatalf("unable to update conf details: %v", err)
-	}
+	require.NoError(t, err, "unable to update conf details")
 
 	ntfn3, err := n.RegisterConf(&chainntnfs.ZeroHash, testRawScript, 1, 1)
-	if err != nil {
-		t.Fatalf("unable to register spend ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register spend ntfn")
 	if ntfn3.HistoricalDispatch != nil {
 		t.Fatal("received unexpected historical rescan request")
 	}
@@ -927,9 +876,7 @@ func TestTxNotifierMultipleHistoricalSpendRescans(t *testing.T) {
 	// the chain.
 	op := wire.OutPoint{Index: 1}
 	ntfn1, err := n.RegisterSpend(&op, testRawScript, 1)
-	if err != nil {
-		t.Fatalf("unable to register spend ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register spend ntfn")
 	if ntfn1.HistoricalDispatch == nil {
 		t.Fatal("expected to receive historical dispatch request")
 	}
@@ -938,9 +885,7 @@ func TestTxNotifierMultipleHistoricalSpendRescans(t *testing.T) {
 	// should not request a historical spend rescan since the first one is
 	// still pending.
 	ntfn2, err := n.RegisterSpend(&op, testRawScript, 1)
-	if err != nil {
-		t.Fatalf("unable to register spend ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register spend ntfn")
 	if ntfn2.HistoricalDispatch != nil {
 		t.Fatal("received unexpected historical rescan request")
 	}
@@ -959,14 +904,10 @@ func TestTxNotifierMultipleHistoricalSpendRescans(t *testing.T) {
 	err = n.UpdateSpendDetails(
 		ntfn1.HistoricalDispatch.SpendRequest, spendDetails,
 	)
-	if err != nil {
-		t.Fatalf("unable to update spend details: %v", err)
-	}
+	require.NoError(t, err, "unable to update spend details")
 
 	ntfn3, err := n.RegisterSpend(&op, testRawScript, 1)
-	if err != nil {
-		t.Fatalf("unable to register spend ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register spend ntfn")
 	if ntfn3.HistoricalDispatch != nil {
 		t.Fatal("received unexpected historical rescan request")
 	}
@@ -1025,9 +966,7 @@ func TestTxNotifierMultipleHistoricalNtfns(t *testing.T) {
 	err := n.UpdateConfDetails(
 		confNtfns[0].HistoricalDispatch.ConfRequest, expectedConfDetails,
 	)
-	if err != nil {
-		t.Fatalf("unable to update conf details: %v", err)
-	}
+	require.NoError(t, err, "unable to update conf details")
 
 	// With the confirmation details retrieved, each client should now have
 	// been notified of the confirmation.
@@ -1046,9 +985,7 @@ func TestTxNotifierMultipleHistoricalNtfns(t *testing.T) {
 	// see a historical rescan request and the confirmation notification
 	// should come through immediately.
 	extraConfNtfn, err := n.RegisterConf(&txid, testRawScript, 1, 1)
-	if err != nil {
-		t.Fatalf("unable to register conf ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register conf ntfn")
 	if extraConfNtfn.HistoricalDispatch != nil {
 		t.Fatal("received unexpected historical rescan request")
 	}
@@ -1094,9 +1031,7 @@ func TestTxNotifierMultipleHistoricalNtfns(t *testing.T) {
 	err = n.UpdateSpendDetails(
 		spendNtfns[0].HistoricalDispatch.SpendRequest, expectedSpendDetails,
 	)
-	if err != nil {
-		t.Fatalf("unable to update spend details: %v", err)
-	}
+	require.NoError(t, err, "unable to update spend details")
 
 	// With the spend details retrieved, each client should now have been
 	// notified of the spend.
@@ -1115,9 +1050,7 @@ func TestTxNotifierMultipleHistoricalNtfns(t *testing.T) {
 	// should not see a historical rescan request and the spend notification
 	// should come through immediately.
 	extraSpendNtfn, err := n.RegisterSpend(&op, testRawScript, 1)
-	if err != nil {
-		t.Fatalf("unable to register spend ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register spend ntfn")
 	if extraSpendNtfn.HistoricalDispatch != nil {
 		t.Fatal("received unexpected historical rescan request")
 	}
@@ -1145,27 +1078,19 @@ func TestTxNotifierCancelConf(t *testing.T) {
 	tx1.AddTxOut(&wire.TxOut{PkScript: testRawScript})
 	tx1Hash := tx1.TxHash()
 	ntfn1, err := n.RegisterConf(&tx1Hash, testRawScript, 1, 1)
-	if err != nil {
-		t.Fatalf("unable to register spend ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register spend ntfn")
 
 	tx2 := wire.NewMsgTx(2)
 	tx2.AddTxOut(&wire.TxOut{PkScript: testRawScript})
 	tx2Hash := tx2.TxHash()
 	ntfn2, err := n.RegisterConf(&tx2Hash, testRawScript, 1, 1)
-	if err != nil {
-		t.Fatalf("unable to register spend ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register spend ntfn")
 	ntfn3, err := n.RegisterConf(&tx2Hash, testRawScript, 1, 1)
-	if err != nil {
-		t.Fatalf("unable to register spend ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register spend ntfn")
 
 	// This request will have a three block num confs.
 	ntfn4, err := n.RegisterConf(&tx2Hash, testRawScript, 3, 1)
-	if err != nil {
-		t.Fatalf("unable to register spend ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register spend ntfn")
 
 	// Extend the chain with a block that will confirm both transactions.
 	// This will queue confirmation notifications to dispatch once their
@@ -1183,10 +1108,8 @@ func TestTxNotifierCancelConf(t *testing.T) {
 	// Cancel the second notification before connecting the block.
 	ntfn2.Event.Cancel()
 
-	err = n.ConnectTip(block.Hash(), startingHeight+1, block.Transactions())
-	if err != nil {
-		t.Fatalf("unable to connect block: %v", err)
-	}
+	err = n.ConnectTip(block, startingHeight+1)
+	require.NoError(t, err, "unable to connect block")
 
 	// Cancel the third notification before notifying to ensure its queued
 	// confirmation notification gets removed as well.
@@ -1230,10 +1153,8 @@ func TestTxNotifierCancelConf(t *testing.T) {
 		Transactions: []*wire.MsgTx{},
 	})
 
-	err = n.ConnectTip(block1.Hash(), startingHeight+2, block1.Transactions())
-	if err != nil {
-		t.Fatalf("unable to connect block: %v", err)
-	}
+	err = n.ConnectTip(block1, startingHeight+2)
+	require.NoError(t, err, "unable to connect block")
 
 	if err := n.NotifyHeight(startingHeight + 2); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
@@ -1264,10 +1185,8 @@ func TestTxNotifierCancelConf(t *testing.T) {
 		Transactions: []*wire.MsgTx{},
 	})
 
-	err = n.ConnectTip(block2.Hash(), startingHeight+3, block2.Transactions())
-	if err != nil {
-		t.Fatalf("unable to connect block: %v", err)
-	}
+	err = n.ConnectTip(block2, startingHeight+3)
+	require.NoError(t, err, "unable to connect block")
 
 	if err := n.NotifyHeight(startingHeight + 3); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
@@ -1290,15 +1209,11 @@ func TestTxNotifierCancelSpend(t *testing.T) {
 	// canceled.
 	op1 := wire.OutPoint{Index: 1}
 	ntfn1, err := n.RegisterSpend(&op1, testRawScript, 1)
-	if err != nil {
-		t.Fatalf("unable to register spend ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register spend ntfn")
 
 	op2 := wire.OutPoint{Index: 2}
 	ntfn2, err := n.RegisterSpend(&op2, testRawScript, 1)
-	if err != nil {
-		t.Fatalf("unable to register spend ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register spend ntfn")
 
 	// Construct the spending details of the outpoint and create a dummy
 	// block containing it.
@@ -1324,10 +1239,8 @@ func TestTxNotifierCancelSpend(t *testing.T) {
 	// cancel the second request.
 	n.CancelSpend(ntfn2.HistoricalDispatch.SpendRequest, 2)
 
-	err = n.ConnectTip(block.Hash(), startingHeight+1, block.Transactions())
-	if err != nil {
-		t.Fatalf("unable to connect block: %v", err)
-	}
+	err = n.ConnectTip(block, startingHeight+1)
+	require.NoError(t, err, "unable to connect block")
 	if err := n.NotifyHeight(startingHeight + 1); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
@@ -1376,54 +1289,42 @@ func TestTxNotifierConfReorg(t *testing.T) {
 	tx1.AddTxOut(&wire.TxOut{PkScript: testRawScript})
 	tx1Hash := tx1.TxHash()
 	ntfn1, err := n.RegisterConf(&tx1Hash, testRawScript, tx1NumConfs, 1)
-	if err != nil {
-		t.Fatalf("unable to register ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register ntfn")
 
 	err = n.UpdateConfDetails(ntfn1.HistoricalDispatch.ConfRequest, nil)
-	if err != nil {
-		t.Fatalf("unable to deliver conf details: %v", err)
-	}
+	require.NoError(t, err, "unable to deliver conf details")
 
 	// Tx 2 will be confirmed in block 10 and requires 1 conf.
 	tx2 := wire.MsgTx{Version: 2}
 	tx2.AddTxOut(&wire.TxOut{PkScript: testRawScript})
 	tx2Hash := tx2.TxHash()
 	ntfn2, err := n.RegisterConf(&tx2Hash, testRawScript, tx2NumConfs, 1)
-	if err != nil {
-		t.Fatalf("unable to register ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register ntfn")
 
 	err = n.UpdateConfDetails(ntfn2.HistoricalDispatch.ConfRequest, nil)
-	if err != nil {
-		t.Fatalf("unable to deliver conf details: %v", err)
-	}
+	require.NoError(t, err, "unable to deliver conf details")
 
 	// Tx 3 will be confirmed in block 10 and requires 2 confs.
 	tx3 := wire.MsgTx{Version: 3}
 	tx3.AddTxOut(&wire.TxOut{PkScript: testRawScript})
 	tx3Hash := tx3.TxHash()
 	ntfn3, err := n.RegisterConf(&tx3Hash, testRawScript, tx3NumConfs, 1)
-	if err != nil {
-		t.Fatalf("unable to register ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register ntfn")
 
 	err = n.UpdateConfDetails(ntfn3.HistoricalDispatch.ConfRequest, nil)
-	if err != nil {
-		t.Fatalf("unable to deliver conf details: %v", err)
-	}
+	require.NoError(t, err, "unable to deliver conf details")
 
 	// Sync chain to block 10. Txs 1 & 2 should be confirmed.
 	block1 := btcutil.NewBlock(&wire.MsgBlock{
 		Transactions: []*wire.MsgTx{&tx1},
 	})
-	if err := n.ConnectTip(nil, 8, block1.Transactions()); err != nil {
+	if err := n.ConnectTip(block1, 8); err != nil {
 		t.Fatalf("Failed to connect block: %v", err)
 	}
 	if err := n.NotifyHeight(8); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
-	if err := n.ConnectTip(nil, 9, nil); err != nil {
+	if err := n.ConnectTip(nil, 9); err != nil {
 		t.Fatalf("Failed to connect block: %v", err)
 	}
 	if err := n.NotifyHeight(9); err != nil {
@@ -1433,7 +1334,7 @@ func TestTxNotifierConfReorg(t *testing.T) {
 	block2 := btcutil.NewBlock(&wire.MsgBlock{
 		Transactions: []*wire.MsgTx{&tx2, &tx3},
 	})
-	if err := n.ConnectTip(nil, 10, block2.Transactions()); err != nil {
+	if err := n.ConnectTip(block2, 10); err != nil {
 		t.Fatalf("Failed to connect block: %v", err)
 	}
 	if err := n.NotifyHeight(10); err != nil {
@@ -1496,14 +1397,14 @@ func TestTxNotifierConfReorg(t *testing.T) {
 		t.Fatalf("Failed to connect block: %v", err)
 	}
 
-	if err := n.ConnectTip(nil, 10, nil); err != nil {
+	if err := n.ConnectTip(nil, 10); err != nil {
 		t.Fatalf("Failed to connect block: %v", err)
 	}
 	if err := n.NotifyHeight(10); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
 
-	if err := n.ConnectTip(nil, 11, nil); err != nil {
+	if err := n.ConnectTip(nil, 11); err != nil {
 		t.Fatalf("Failed to connect block: %v", err)
 	}
 	if err := n.NotifyHeight(11); err != nil {
@@ -1553,18 +1454,14 @@ func TestTxNotifierConfReorg(t *testing.T) {
 	})
 	block4 := btcutil.NewBlock(&wire.MsgBlock{})
 
-	err = n.ConnectTip(block3.Hash(), 12, block3.Transactions())
-	if err != nil {
-		t.Fatalf("Failed to connect block: %v", err)
-	}
+	err = n.ConnectTip(block3, 12)
+	require.NoError(t, err, "Failed to connect block")
 	if err := n.NotifyHeight(12); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
 
-	err = n.ConnectTip(block4.Hash(), 13, block4.Transactions())
-	if err != nil {
-		t.Fatalf("Failed to connect block: %v", err)
-	}
+	err = n.ConnectTip(block4, 13)
+	require.NoError(t, err, "Failed to connect block")
 	if err := n.NotifyHeight(13); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
@@ -1691,24 +1588,18 @@ func TestTxNotifierSpendReorg(t *testing.T) {
 
 	// We'll register for a spend notification for each outpoint above.
 	ntfn1, err := n.RegisterSpend(&op1, testRawScript, 1)
-	if err != nil {
-		t.Fatalf("unable to register spend ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register spend ntfn")
 
 	ntfn2, err := n.RegisterSpend(&op2, testRawScript, 1)
-	if err != nil {
-		t.Fatalf("unable to register spend ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register spend ntfn")
 
 	// We'll extend the chain by connecting a new block at tip. This block
 	// will only contain the spending transaction of the first outpoint.
 	block1 := btcutil.NewBlock(&wire.MsgBlock{
 		Transactions: []*wire.MsgTx{spendTx1},
 	})
-	err = n.ConnectTip(block1.Hash(), startingHeight+1, block1.Transactions())
-	if err != nil {
-		t.Fatalf("unable to connect block: %v", err)
-	}
+	err = n.ConnectTip(block1, startingHeight+1)
+	require.NoError(t, err, "unable to connect block")
 	if err := n.NotifyHeight(startingHeight + 1); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
@@ -1735,10 +1626,8 @@ func TestTxNotifierSpendReorg(t *testing.T) {
 	block2 := btcutil.NewBlock(&wire.MsgBlock{
 		Transactions: []*wire.MsgTx{spendTx2},
 	})
-	err = n.ConnectTip(block2.Hash(), startingHeight+2, block2.Transactions())
-	if err != nil {
-		t.Fatalf("unable to connect block: %v", err)
-	}
+	err = n.ConnectTip(block2, startingHeight+2)
+	require.NoError(t, err, "unable to connect block")
 	if err := n.NotifyHeight(startingHeight + 2); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
@@ -1789,12 +1678,8 @@ func TestTxNotifierSpendReorg(t *testing.T) {
 	// We'll now extend the chain with an empty block, to ensure that we can
 	// properly detect when an outpoint has been re-spent at a later height.
 	emptyBlock := btcutil.NewBlock(&wire.MsgBlock{})
-	err = n.ConnectTip(
-		emptyBlock.Hash(), startingHeight+2, emptyBlock.Transactions(),
-	)
-	if err != nil {
-		t.Fatalf("unable to disconnect block: %v", err)
-	}
+	err = n.ConnectTip(emptyBlock, startingHeight+2)
+	require.NoError(t, err, "unable to disconnect block")
 	if err := n.NotifyHeight(startingHeight + 2); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
@@ -1814,12 +1699,8 @@ func TestTxNotifierSpendReorg(t *testing.T) {
 
 	// Finally, extend the chain with another block containing the same
 	// spending transaction of the second outpoint.
-	err = n.ConnectTip(
-		block2.Hash(), startingHeight+3, block2.Transactions(),
-	)
-	if err != nil {
-		t.Fatalf("unable to connect block: %v", err)
-	}
+	err = n.ConnectTip(block2, startingHeight+3)
+	require.NoError(t, err, "unable to connect block")
 	if err := n.NotifyHeight(startingHeight + 3); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
@@ -1840,6 +1721,93 @@ func TestTxNotifierSpendReorg(t *testing.T) {
 	case <-ntfn1.Event.Spend:
 		t.Fatal("received unexpected spend notification")
 	default:
+	}
+}
+
+// TestTxNotifierUpdateSpendReorg tests that a call to RegisterSpend after the
+// spend has been confirmed, and then UpdateSpendDetails (called by historical
+// dispatch), followed by a chain re-org will notify on the Reorg channel. This
+// was not always the case and has since been fixed.
+func TestTxNotifierSpendReorgMissed(t *testing.T) {
+	t.Parallel()
+
+	const startingHeight = 10
+	hintCache := newMockHintCache()
+	n := chainntnfs.NewTxNotifier(
+		startingHeight, chainntnfs.ReorgSafetyLimit, hintCache,
+		hintCache,
+	)
+
+	// We'll create a spending transaction that spends the outpoint we'll
+	// watch.
+	op := wire.OutPoint{Index: 1}
+	spendTx := wire.NewMsgTx(2)
+	spendTx.AddTxIn(&wire.TxIn{
+		PreviousOutPoint: op,
+		SignatureScript:  testSigScript,
+	})
+	spendTxHash := spendTx.TxHash()
+
+	// Create the spend details that we'll call UpdateSpendDetails with.
+	spendDetails := &chainntnfs.SpendDetail{
+		SpentOutPoint:     &op,
+		SpenderTxHash:     &spendTxHash,
+		SpendingTx:        spendTx,
+		SpenderInputIndex: 0,
+		SpendingHeight:    startingHeight + 1,
+	}
+
+	// Now confirm the spending transaction.
+	block := btcutil.NewBlock(&wire.MsgBlock{
+		Transactions: []*wire.MsgTx{spendTx},
+	})
+	err := n.ConnectTip(block, startingHeight+1)
+	require.NoError(t, err, "unable to connect block")
+	if err := n.NotifyHeight(startingHeight + 1); err != nil {
+		t.Fatalf("unable to dispatch notifications: %v", err)
+	}
+
+	// We register for the spend now and will not get a spend notification
+	// until we call UpdateSpendDetails.
+	ntfn, err := n.RegisterSpend(&op, testRawScript, 1)
+	require.NoError(t, err, "unable to register spend")
+
+	// Assert that the HistoricalDispatch variable is non-nil. We'll use
+	// the SpendRequest member to update the spend details.
+	require.NotEmpty(t, ntfn.HistoricalDispatch)
+
+	select {
+	case <-ntfn.Event.Spend:
+		t.Fatalf("did not expect to receive spend ntfn")
+	default:
+	}
+
+	// We now call UpdateSpendDetails with our generated spend details to
+	// simulate a historical spend dispatch being performed. This should
+	// result in a notification being received on the Spend channel.
+	err = n.UpdateSpendDetails(
+		ntfn.HistoricalDispatch.SpendRequest, spendDetails,
+	)
+	require.Empty(t, err)
+
+	// Assert that we receive a Spend notification.
+	select {
+	case <-ntfn.Event.Spend:
+	default:
+		t.Fatalf("expected to receive spend ntfn")
+	}
+
+	// We will now re-org the spending transaction out of the chain, and we
+	// should receive a notification on the Reorg channel.
+	err = n.DisconnectTip(startingHeight + 1)
+	require.Empty(t, err)
+
+	select {
+	case <-ntfn.Event.Spend:
+		t.Fatalf("received unexpected spend ntfn")
+	case <-ntfn.Event.Reorg:
+	default:
+		t.Fatalf("expected spend reorg ntfn")
 	}
 }
 
@@ -1870,17 +1838,13 @@ func TestTxNotifierConfirmHintCache(t *testing.T) {
 	tx1.AddTxOut(&wire.TxOut{PkScript: testRawScript})
 	tx1Hash := tx1.TxHash()
 	ntfn1, err := n.RegisterConf(&tx1Hash, testRawScript, 1, 1)
-	if err != nil {
-		t.Fatalf("unable to register tx1: %v", err)
-	}
+	require.NoError(t, err, "unable to register tx1")
 
 	tx2 := wire.MsgTx{Version: 2}
 	tx2.AddTxOut(&wire.TxOut{PkScript: testRawScript})
 	tx2Hash := tx2.TxHash()
 	ntfn2, err := n.RegisterConf(&tx2Hash, testRawScript, 2, 1)
-	if err != nil {
-		t.Fatalf("unable to register tx2: %v", err)
-	}
+	require.NoError(t, err, "unable to register tx2")
 
 	// Both transactions should not have a height hint set, as RegisterConf
 	// should not alter the cache state.
@@ -1905,10 +1869,8 @@ func TestTxNotifierConfirmHintCache(t *testing.T) {
 		Transactions: []*wire.MsgTx{&txDummy},
 	})
 
-	err = n.ConnectTip(block1.Hash(), txDummyHeight, block1.Transactions())
-	if err != nil {
-		t.Fatalf("Failed to connect block: %v", err)
-	}
+	err = n.ConnectTip(block1, txDummyHeight)
+	require.NoError(t, err, "Failed to connect block")
 	if err := n.NotifyHeight(txDummyHeight); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
@@ -1934,13 +1896,9 @@ func TestTxNotifierConfirmHintCache(t *testing.T) {
 	// Now, update the conf details reporting that the neither txn was found
 	// in the historical dispatch.
 	err = n.UpdateConfDetails(ntfn1.HistoricalDispatch.ConfRequest, nil)
-	if err != nil {
-		t.Fatalf("unable to update conf details: %v", err)
-	}
+	require.NoError(t, err, "unable to update conf details")
 	err = n.UpdateConfDetails(ntfn2.HistoricalDispatch.ConfRequest, nil)
-	if err != nil {
-		t.Fatalf("unable to update conf details: %v", err)
-	}
+	require.NoError(t, err, "unable to update conf details")
 
 	// We'll create another block that will include the first transaction
 	// and extend the chain.
@@ -1948,10 +1906,8 @@ func TestTxNotifierConfirmHintCache(t *testing.T) {
 		Transactions: []*wire.MsgTx{&tx1},
 	})
 
-	err = n.ConnectTip(block2.Hash(), tx1Height, block2.Transactions())
-	if err != nil {
-		t.Fatalf("Failed to connect block: %v", err)
-	}
+	err = n.ConnectTip(block2, tx1Height)
+	require.NoError(t, err, "Failed to connect block")
 	if err := n.NotifyHeight(tx1Height); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
@@ -1960,18 +1916,14 @@ func TestTxNotifierConfirmHintCache(t *testing.T) {
 	// they should have their height hints updated to the latest block
 	// height.
 	hint, err = hintCache.QueryConfirmHint(ntfn1.HistoricalDispatch.ConfRequest)
-	if err != nil {
-		t.Fatalf("unable to query for hint: %v", err)
-	}
+	require.NoError(t, err, "unable to query for hint")
 	if hint != tx1Height {
 		t.Fatalf("expected hint %d, got %d",
 			tx1Height, hint)
 	}
 
 	hint, err = hintCache.QueryConfirmHint(ntfn2.HistoricalDispatch.ConfRequest)
-	if err != nil {
-		t.Fatalf("unable to query for hint: %v", err)
-	}
+	require.NoError(t, err, "unable to query for hint")
 	if hint != tx1Height {
 		t.Fatalf("expected hint %d, got %d",
 			tx2Height, hint)
@@ -1983,19 +1935,15 @@ func TestTxNotifierConfirmHintCache(t *testing.T) {
 		Transactions: []*wire.MsgTx{&tx2},
 	})
 
-	err = n.ConnectTip(block3.Hash(), tx2Height, block3.Transactions())
-	if err != nil {
-		t.Fatalf("Failed to connect block: %v", err)
-	}
+	err = n.ConnectTip(block3, tx2Height)
+	require.NoError(t, err, "Failed to connect block")
 	if err := n.NotifyHeight(tx2Height); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
 
 	// The height hint for the first transaction should remain the same.
 	hint, err = hintCache.QueryConfirmHint(ntfn1.HistoricalDispatch.ConfRequest)
-	if err != nil {
-		t.Fatalf("unable to query for hint: %v", err)
-	}
+	require.NoError(t, err, "unable to query for hint")
 	if hint != tx1Height {
 		t.Fatalf("expected hint %d, got %d",
 			tx1Height, hint)
@@ -2004,9 +1952,7 @@ func TestTxNotifierConfirmHintCache(t *testing.T) {
 	// The height hint for the second transaction should now be updated to
 	// reflect its confirmation.
 	hint, err = hintCache.QueryConfirmHint(ntfn2.HistoricalDispatch.ConfRequest)
-	if err != nil {
-		t.Fatalf("unable to query for hint: %v", err)
-	}
+	require.NoError(t, err, "unable to query for hint")
 	if hint != tx2Height {
 		t.Fatalf("expected hint %d, got %d",
 			tx2Height, hint)
@@ -2021,9 +1967,7 @@ func TestTxNotifierConfirmHintCache(t *testing.T) {
 	// This should update the second transaction's height hint within the
 	// cache to the previous height.
 	hint, err = hintCache.QueryConfirmHint(ntfn2.HistoricalDispatch.ConfRequest)
-	if err != nil {
-		t.Fatalf("unable to query for hint: %v", err)
-	}
+	require.NoError(t, err, "unable to query for hint")
 	if hint != tx1Height {
 		t.Fatalf("expected hint %d, got %d",
 			tx1Height, hint)
@@ -2032,9 +1976,7 @@ func TestTxNotifierConfirmHintCache(t *testing.T) {
 	// The first transaction's height hint should remain at the original
 	// confirmation height.
 	hint, err = hintCache.QueryConfirmHint(ntfn2.HistoricalDispatch.ConfRequest)
-	if err != nil {
-		t.Fatalf("unable to query for hint: %v", err)
-	}
+	require.NoError(t, err, "unable to query for hint")
 	if hint != tx1Height {
 		t.Fatalf("expected hint %d, got %d",
 			tx1Height, hint)
@@ -2056,7 +1998,7 @@ func TestTxNotifierSpendHintCache(t *testing.T) {
 		op2Height      = 203
 	)
 
-	// Intiialize our TxNotifier instance backed by a height hint cache.
+	// Initialize our TxNotifier instance backed by a height hint cache.
 	hintCache := newMockHintCache()
 	n := chainntnfs.NewTxNotifier(
 		startingHeight, chainntnfs.ReorgSafetyLimit, hintCache,
@@ -2066,14 +2008,10 @@ func TestTxNotifierSpendHintCache(t *testing.T) {
 	// Create two test outpoints and register them for spend notifications.
 	op1 := wire.OutPoint{Index: 1}
 	ntfn1, err := n.RegisterSpend(&op1, testRawScript, 1)
-	if err != nil {
-		t.Fatalf("unable to register spend for op1: %v", err)
-	}
+	require.NoError(t, err, "unable to register spend for op1")
 	op2 := wire.OutPoint{Index: 2}
 	ntfn2, err := n.RegisterSpend(&op2, testRawScript, 1)
-	if err != nil {
-		t.Fatalf("unable to register spend for op2: %v", err)
-	}
+	require.NoError(t, err, "unable to register spend for op2")
 
 	// Both outpoints should not have a spend hint set upon registration, as
 	// we must first determine whether they have already been spent in the
@@ -2093,12 +2031,8 @@ func TestTxNotifierSpendHintCache(t *testing.T) {
 
 	// Create a new empty block and extend the chain.
 	emptyBlock := btcutil.NewBlock(&wire.MsgBlock{})
-	err = n.ConnectTip(
-		emptyBlock.Hash(), dummyHeight, emptyBlock.Transactions(),
-	)
-	if err != nil {
-		t.Fatalf("unable to connect block: %v", err)
-	}
+	err = n.ConnectTip(emptyBlock, dummyHeight)
+	require.NoError(t, err, "unable to connect block")
 	if err := n.NotifyHeight(dummyHeight); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
@@ -2123,13 +2057,9 @@ func TestTxNotifierSpendHintCache(t *testing.T) {
 	// calling UpdateSpendDetails. This should allow their spend hints to be
 	// updated upon every block connected/disconnected.
 	err = n.UpdateSpendDetails(ntfn1.HistoricalDispatch.SpendRequest, nil)
-	if err != nil {
-		t.Fatalf("unable to update spend details: %v", err)
-	}
+	require.NoError(t, err, "unable to update spend details")
 	err = n.UpdateSpendDetails(ntfn2.HistoricalDispatch.SpendRequest, nil)
-	if err != nil {
-		t.Fatalf("unable to update spend details: %v", err)
-	}
+	require.NoError(t, err, "unable to update spend details")
 
 	// We'll create a new block that only contains the spending transaction
 	// of the first outpoint.
@@ -2141,10 +2071,8 @@ func TestTxNotifierSpendHintCache(t *testing.T) {
 	block1 := btcutil.NewBlock(&wire.MsgBlock{
 		Transactions: []*wire.MsgTx{spendTx1},
 	})
-	err = n.ConnectTip(block1.Hash(), op1Height, block1.Transactions())
-	if err != nil {
-		t.Fatalf("unable to connect block: %v", err)
-	}
+	err = n.ConnectTip(block1, op1Height)
+	require.NoError(t, err, "unable to connect block")
 	if err := n.NotifyHeight(op1Height); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
@@ -2153,16 +2081,12 @@ func TestTxNotifierSpendHintCache(t *testing.T) {
 	// the new block being connected due to the first outpoint being spent
 	// at this height, and the second outpoint still being unspent.
 	op1Hint, err := hintCache.QuerySpendHint(ntfn1.HistoricalDispatch.SpendRequest)
-	if err != nil {
-		t.Fatalf("unable to query for spend hint of op1: %v", err)
-	}
+	require.NoError(t, err, "unable to query for spend hint of op1")
 	if op1Hint != op1Height {
 		t.Fatalf("expected hint %d, got %d", op1Height, op1Hint)
 	}
 	op2Hint, err := hintCache.QuerySpendHint(ntfn2.HistoricalDispatch.SpendRequest)
-	if err != nil {
-		t.Fatalf("unable to query for spend hint of op2: %v", err)
-	}
+	require.NoError(t, err, "unable to query for spend hint of op2")
 	if op2Hint != op1Height {
 		t.Fatalf("expected hint %d, got %d", op1Height, op2Hint)
 	}
@@ -2176,10 +2100,8 @@ func TestTxNotifierSpendHintCache(t *testing.T) {
 	block2 := btcutil.NewBlock(&wire.MsgBlock{
 		Transactions: []*wire.MsgTx{spendTx2},
 	})
-	err = n.ConnectTip(block2.Hash(), op2Height, block2.Transactions())
-	if err != nil {
-		t.Fatalf("unable to connect block: %v", err)
-	}
+	err = n.ConnectTip(block2, op2Height)
+	require.NoError(t, err, "unable to connect block")
 	if err := n.NotifyHeight(op2Height); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
@@ -2188,16 +2110,12 @@ func TestTxNotifierSpendHintCache(t *testing.T) {
 	// being spent within the new block. The first outpoint's spend hint
 	// should remain the same as it's already been spent before.
 	op1Hint, err = hintCache.QuerySpendHint(ntfn1.HistoricalDispatch.SpendRequest)
-	if err != nil {
-		t.Fatalf("unable to query for spend hint of op1: %v", err)
-	}
+	require.NoError(t, err, "unable to query for spend hint of op1")
 	if op1Hint != op1Height {
 		t.Fatalf("expected hint %d, got %d", op1Height, op1Hint)
 	}
 	op2Hint, err = hintCache.QuerySpendHint(ntfn2.HistoricalDispatch.SpendRequest)
-	if err != nil {
-		t.Fatalf("unable to query for spend hint of op2: %v", err)
-	}
+	require.NoError(t, err, "unable to query for spend hint of op2")
 	if op2Hint != op2Height {
 		t.Fatalf("expected hint %d, got %d", op2Height, op2Hint)
 	}
@@ -2213,16 +2131,12 @@ func TestTxNotifierSpendHintCache(t *testing.T) {
 	// included in within the chain. The first outpoint's spend hint should
 	// remain the same.
 	op1Hint, err = hintCache.QuerySpendHint(ntfn1.HistoricalDispatch.SpendRequest)
-	if err != nil {
-		t.Fatalf("unable to query for spend hint of op1: %v", err)
-	}
+	require.NoError(t, err, "unable to query for spend hint of op1")
 	if op1Hint != op1Height {
 		t.Fatalf("expected hint %d, got %d", op1Height, op1Hint)
 	}
 	op2Hint, err = hintCache.QuerySpendHint(ntfn2.HistoricalDispatch.SpendRequest)
-	if err != nil {
-		t.Fatalf("unable to query for spend hint of op2: %v", err)
-	}
+	require.NoError(t, err, "unable to query for spend hint of op2")
 	if op2Hint != op1Height {
 		t.Fatalf("expected hint %d, got %d", op1Height, op2Hint)
 	}
@@ -2239,7 +2153,7 @@ func TestTxNotifierSpendDuringHistoricalRescan(t *testing.T) {
 		reorgSafety    = 10
 	)
 
-	// Intiialize our TxNotifier instance backed by a height hint cache.
+	// Initialize our TxNotifier instance backed by a height hint cache.
 	hintCache := newMockHintCache()
 	n := chainntnfs.NewTxNotifier(
 		startingHeight, reorgSafety, hintCache, hintCache,
@@ -2248,9 +2162,7 @@ func TestTxNotifierSpendDuringHistoricalRescan(t *testing.T) {
 	// Create a test outpoint and register it for spend notifications.
 	op1 := wire.OutPoint{Index: 1}
 	ntfn1, err := n.RegisterSpend(&op1, testRawScript, 1)
-	if err != nil {
-		t.Fatalf("unable to register spend for op1: %v", err)
-	}
+	require.NoError(t, err, "unable to register spend for op1")
 
 	// A historical rescan should be initiated from the height hint to the
 	// current height.
@@ -2274,12 +2186,8 @@ func TestTxNotifierSpendDuringHistoricalRescan(t *testing.T) {
 	// Create a new empty block and extend the chain.
 	height := uint32(startingHeight) + 1
 	emptyBlock := btcutil.NewBlock(&wire.MsgBlock{})
-	err = n.ConnectTip(
-		emptyBlock.Hash(), height, emptyBlock.Transactions(),
-	)
-	if err != nil {
-		t.Fatalf("unable to connect block: %v", err)
-	}
+	err = n.ConnectTip(emptyBlock, height)
+	require.NoError(t, err, "unable to connect block")
 	if err := n.NotifyHeight(height); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
@@ -2319,9 +2227,7 @@ func TestTxNotifierSpendDuringHistoricalRescan(t *testing.T) {
 			block = btcutil.NewBlock(&wire.MsgBlock{})
 		}
 
-		err = n.ConnectTip(
-			block.Hash(), height, block.Transactions(),
-		)
+		err = n.ConnectTip(block, height)
 		if err != nil {
 			t.Fatalf("unable to connect block: %v", err)
 		}
@@ -2334,9 +2240,7 @@ func TestTxNotifierSpendDuringHistoricalRescan(t *testing.T) {
 	op1Hint, err := hintCache.QuerySpendHint(
 		ntfn1.HistoricalDispatch.SpendRequest,
 	)
-	if err != nil {
-		t.Fatalf("unable to query for spend hint of op1: %v", err)
-	}
+	require.NoError(t, err, "unable to query for spend hint of op1")
 	if op1Hint != spendHeight {
 		t.Fatalf("expected hint %d, got %d", spendHeight, op1Hint)
 	}
@@ -2353,16 +2257,12 @@ func TestTxNotifierSpendDuringHistoricalRescan(t *testing.T) {
 	// tip while the rescan was in progress, the height hint should not be
 	// updated to the latest height, but stay at the spend height.
 	err = n.UpdateSpendDetails(ntfn1.HistoricalDispatch.SpendRequest, nil)
-	if err != nil {
-		t.Fatalf("unable to update spend details: %v", err)
-	}
+	require.NoError(t, err, "unable to update spend details")
 
 	op1Hint, err = hintCache.QuerySpendHint(
 		ntfn1.HistoricalDispatch.SpendRequest,
 	)
-	if err != nil {
-		t.Fatalf("unable to query for spend hint of op1: %v", err)
-	}
+	require.NoError(t, err, "unable to query for spend hint of op1")
 	if op1Hint != spendHeight {
 		t.Fatalf("expected hint %d, got %d", spendHeight, op1Hint)
 	}
@@ -2378,10 +2278,8 @@ func TestTxNotifierSpendDuringHistoricalRescan(t *testing.T) {
 	block2 := btcutil.NewBlock(&wire.MsgBlock{
 		Transactions: []*wire.MsgTx{spendTx2},
 	})
-	err = n.ConnectTip(block2.Hash(), height, block2.Transactions())
-	if err != nil {
-		t.Fatalf("unable to connect block: %v", err)
-	}
+	err = n.ConnectTip(block2, height)
+	require.NoError(t, err, "unable to connect block")
 	if err := n.NotifyHeight(height); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
@@ -2389,9 +2287,7 @@ func TestTxNotifierSpendDuringHistoricalRescan(t *testing.T) {
 	// The outpoint's spend hint should remain the same as it's already
 	// been spent before.
 	op1Hint, err = hintCache.QuerySpendHint(ntfn1.HistoricalDispatch.SpendRequest)
-	if err != nil {
-		t.Fatalf("unable to query for spend hint of op1: %v", err)
-	}
+	require.NoError(t, err, "unable to query for spend hint of op1")
 	if op1Hint != spendHeight {
 		t.Fatalf("expected hint %d, got %d", spendHeight, op1Hint)
 	}
@@ -2401,9 +2297,7 @@ func TestTxNotifierSpendDuringHistoricalRescan(t *testing.T) {
 		height++
 		block := btcutil.NewBlock(&wire.MsgBlock{})
 
-		err := n.ConnectTip(
-			block.Hash(), height, block.Transactions(),
-		)
+		err := n.ConnectTip(block, height)
 		if err != nil {
 			t.Fatalf("unable to connect block: %v", err)
 		}
@@ -2419,14 +2313,12 @@ func TestTxNotifierSpendDuringHistoricalRescan(t *testing.T) {
 	// matured.
 	err = n.UpdateSpendDetails(ntfn1.HistoricalDispatch.SpendRequest, nil)
 	if err == nil {
-		t.Fatalf("expcted updating spend details to fail")
+		t.Fatalf("expected updating spend details to fail")
 	}
 
 	// Finally, check that the height hint is still there, unchanged.
 	op1Hint, err = hintCache.QuerySpendHint(ntfn1.HistoricalDispatch.SpendRequest)
-	if err != nil {
-		t.Fatalf("unable to query for spend hint of op1: %v", err)
-	}
+	require.NoError(t, err, "unable to query for spend hint of op1")
 	if op1Hint != spendHeight {
 		t.Fatalf("expected hint %d, got %d", spendHeight, op1Hint)
 	}
@@ -2445,13 +2337,9 @@ func TestTxNotifierNtfnDone(t *testing.T) {
 	// We'll start by creating two notification requests: one confirmation
 	// and one spend.
 	confNtfn, err := n.RegisterConf(&chainntnfs.ZeroHash, testRawScript, 1, 1)
-	if err != nil {
-		t.Fatalf("unable to register conf ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register conf ntfn")
 	spendNtfn, err := n.RegisterSpend(&chainntnfs.ZeroOutPoint, testRawScript, 1)
-	if err != nil {
-		t.Fatalf("unable to register spend: %v", err)
-	}
+	require.NoError(t, err, "unable to register spend")
 
 	// We'll create two transactions that will satisfy the notification
 	// requests above and include them in the next block of the chain.
@@ -2466,10 +2354,8 @@ func TestTxNotifierNtfnDone(t *testing.T) {
 		Transactions: []*wire.MsgTx{tx, spendTx},
 	})
 
-	err = n.ConnectTip(block.Hash(), 11, block.Transactions())
-	if err != nil {
-		t.Fatalf("unable to connect block: %v", err)
-	}
+	err = n.ConnectTip(block, 11)
+	require.NoError(t, err, "unable to connect block")
 	if err := n.NotifyHeight(11); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
@@ -2518,10 +2404,8 @@ func TestTxNotifierNtfnDone(t *testing.T) {
 
 	// We'll reconnect the block that satisfies both of these requests.
 	// We should see notifications dispatched for both once again.
-	err = n.ConnectTip(block.Hash(), 11, block.Transactions())
-	if err != nil {
-		t.Fatalf("unable to connect block: %v", err)
-	}
+	err = n.ConnectTip(block, 11)
+	require.NoError(t, err, "unable to connect block")
 	if err := n.NotifyHeight(11); err != nil {
 		t.Fatalf("unable to dispatch notifications: %v", err)
 	}
@@ -2544,7 +2428,7 @@ func TestTxNotifierNtfnDone(t *testing.T) {
 	nextHeight := uint32(12)
 	for i := nextHeight; i < nextHeight+reorgSafetyLimit; i++ {
 		dummyBlock := btcutil.NewBlock(&wire.MsgBlock{})
-		if err := n.ConnectTip(dummyBlock.Hash(), i, nil); err != nil {
+		if err := n.ConnectTip(dummyBlock, i); err != nil {
 			t.Fatalf("unable to connect block: %v", err)
 		}
 	}
@@ -2575,13 +2459,9 @@ func TestTxNotifierTearDown(t *testing.T) {
 	// To begin the test, we'll register for a confirmation and spend
 	// notification.
 	confNtfn, err := n.RegisterConf(&chainntnfs.ZeroHash, testRawScript, 1, 1)
-	if err != nil {
-		t.Fatalf("unable to register conf ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register conf ntfn")
 	spendNtfn, err := n.RegisterSpend(&chainntnfs.ZeroOutPoint, testRawScript, 1)
-	if err != nil {
-		t.Fatalf("unable to register spend ntfn: %v", err)
-	}
+	require.NoError(t, err, "unable to register spend ntfn")
 
 	// With the notifications registered, we'll now tear down the notifier.
 	// The notification channels should be closed for notifications, whether

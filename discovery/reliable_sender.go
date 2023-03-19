@@ -84,6 +84,9 @@ func (s *reliableSender) Start() error {
 // Stop halts the reliable sender from sending messages to peers.
 func (s *reliableSender) Stop() {
 	s.stop.Do(func() {
+		log.Debugf("reliableSender is stopping")
+		defer log.Debugf("reliableSender stopped")
+
 		close(s.quit)
 		s.wg.Wait()
 	})
@@ -131,10 +134,10 @@ spawnHandler:
 // spawnPeerMsgHandler spawns a peerHandler for the given peer if there isn't
 // one already active. The boolean returned signals whether there was already
 // one active or not.
-func (s *reliableSender) spawnPeerHandler(peerPubKey [33]byte) (peerManager, bool) {
-	s.activePeersMtx.Lock()
-	defer s.activePeersMtx.Unlock()
+func (s *reliableSender) spawnPeerHandler(
+	peerPubKey [33]byte) (peerManager, bool) {
 
+	s.activePeersMtx.Lock()
 	msgHandler, ok := s.activePeers[peerPubKey]
 	if !ok {
 		msgHandler = peerManager{
@@ -142,7 +145,12 @@ func (s *reliableSender) spawnPeerHandler(peerPubKey [33]byte) (peerManager, boo
 			done: make(chan struct{}),
 		}
 		s.activePeers[peerPubKey] = msgHandler
+	}
+	s.activePeersMtx.Unlock()
 
+	// If this is a newly initiated peerManager, we will create a
+	// peerHandler.
+	if !ok {
 		s.wg.Add(1)
 		go s.peerHandler(msgHandler, peerPubKey)
 	}

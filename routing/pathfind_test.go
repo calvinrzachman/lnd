@@ -10,22 +10,25 @@ import (
 	"fmt"
 	"io/ioutil"
 	"math"
-	"math/big"
 	"net"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
+	sphinx "github.com/lightningnetwork/lightning-onion"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/htlcswitch"
+	"github.com/lightningnetwork/lnd/kvdb"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/record"
 	"github.com/lightningnetwork/lnd/routing/route"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -85,12 +88,13 @@ var (
 )
 
 var (
-	testSig = &btcec.Signature{
-		R: new(big.Int),
-		S: new(big.Int),
-	}
-	_, _ = testSig.R.SetString("63724406601629180062774974542967536251589935445068131219452686511677818569431", 10)
-	_, _ = testSig.S.SetString("18801056069249825825291287104931333862866033135609736119018462340006816851118", 10)
+	testRBytes, _ = hex.DecodeString("8ce2bc69281ce27da07e6683571319d18e949ddfa2965fb6caa1bf0314f882d7")
+	testSBytes, _ = hex.DecodeString("299105481d63e0f4bc2a88121167221b6700d72a0ead154c03be696a292d24ae")
+	testRScalar   = new(btcec.ModNScalar)
+	testSScalar   = new(btcec.ModNScalar)
+	_             = testRScalar.SetByteSlice(testRBytes)
+	_             = testSScalar.SetByteSlice(testSBytes)
+	testSig       = ecdsa.NewSignature(testRScalar, testSScalar)
 
 	testAuthProof = channeldb.ChannelAuthProof{
 		NodeSig1Bytes:    testSig.Serialize(),
@@ -102,7 +106,9 @@ var (
 
 // noProbabilitySource is used in testing to return the same probability 1 for
 // all edges.
-func noProbabilitySource(route.Vertex, route.Vertex, lnwire.MilliSatoshi) float64 {
+func noProbabilitySource(route.Vertex, route.Vertex, lnwire.MilliSatoshi,
+	btcutil.Amount) float64 {
+
 	return 1
 }
 
@@ -118,11 +124,14 @@ type testGraph struct {
 
 // testNode represents a node within the test graph above. We skip certain
 // information such as the node's IP address as that information isn't needed
-// for our tests.
+// for our tests. Private keys are optional. If set, they should be consistent
+// with the public key. The private key is used to sign error messages
+// sent from the node.
 type testNode struct {
-	Source bool   `json:"source"`
-	PubKey string `json:"pubkey"`
-	Alias  string `json:"alias"`
+	Source  bool   `json:"source"`
+	PubKey  string `json:"pubkey"`
+	PrivKey string `json:"privkey"`
+	Alias   string `json:"alias"`
 }
 
 // testChan represents the JSON version of a payment channel. This struct
@@ -143,33 +152,36 @@ type testChan struct {
 }
 
 // makeTestGraph creates a new instance of a channeldb.ChannelGraph for testing
-// purposes. A callback which cleans up the created temporary directories is
-// also returned and intended to be executed after the test completes.
-func makeTestGraph() (*channeldb.ChannelGraph, func(), error) {
-	// First, create a temporary directory to be used for the duration of
-	// this test.
-	tempDirName, err := ioutil.TempDir("", "channeldb")
+// purposes.
+func makeTestGraph(t *testing.T, useCache bool) (*channeldb.ChannelGraph,
+	kvdb.Backend, error) {
+
+	// Create channelgraph for the first time.
+	backend, backendCleanup, err := kvdb.GetTestBackend(t.TempDir(), "cgr")
 	if err != nil {
 		return nil, nil, err
 	}
 
-	// Next, create channeldb for the first time.
-	cdb, err := channeldb.Open(tempDirName)
+	t.Cleanup(backendCleanup)
+
+	opts := channeldb.DefaultOptions()
+	graph, err := channeldb.NewChannelGraph(
+		backend, opts.RejectCacheSize, opts.ChannelCacheSize,
+		opts.BatchCommitInterval, opts.PreAllocCacheNumNodes,
+		useCache, false,
+	)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	cleanUp := func() {
-		cdb.Close()
-		os.RemoveAll(tempDirName)
-	}
-
-	return cdb.ChannelGraph(), cleanUp, nil
+	return graph, backend, nil
 }
 
 // parseTestGraph returns a fully populated ChannelGraph given a path to a JSON
 // file which encodes a test graph.
-func parseTestGraph(path string) (*testGraphInstance, error) {
+func parseTestGraph(t *testing.T, useCache bool, path string) (
+	*testGraphInstance, error) {
+
 	graphJSON, err := ioutil.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -194,12 +206,15 @@ func parseTestGraph(path string) (*testGraphInstance, error) {
 	testAddrs = append(testAddrs, testAddr)
 
 	// Next, create a temporary graph database for usage within the test.
-	graph, cleanUp, err := makeTestGraph()
+	graph, graphBackend, err := makeTestGraph(t, useCache)
 	if err != nil {
 		return nil, err
 	}
 
 	aliasMap := make(map[string]route.Vertex)
+	privKeyMap := make(map[string]*btcec.PrivateKey)
+	channelIDs := make(map[route.Vertex]map[route.Vertex]uint64)
+	links := make(map[lnwire.ShortChannelID]htlcswitch.ChannelLink)
 	var source *channeldb.LightningNode
 
 	// First we insert all the nodes within the graph as vertexes.
@@ -230,6 +245,33 @@ func parseTestGraph(path string) (*testGraphInstance, error) {
 		// alias map for easy lookup.
 		aliasMap[node.Alias] = dbNode.PubKeyBytes
 
+		// private keys are needed for signing error messages. If set
+		// check the consistency with the public key.
+		privBytes, err := hex.DecodeString(node.PrivKey)
+		if err != nil {
+			return nil, err
+		}
+		if len(privBytes) > 0 {
+			key, derivedPub := btcec.PrivKeyFromBytes(
+				privBytes,
+			)
+
+			if !bytes.Equal(
+				pubBytes, derivedPub.SerializeCompressed(),
+			) {
+
+				return nil, fmt.Errorf("%s public key and "+
+					"private key are inconsistent\n"+
+					"got  %x\nwant %x\n",
+					node.Alias,
+					derivedPub.SerializeCompressed(),
+					pubBytes,
+				)
+			}
+
+			privKeyMap[node.Alias] = key
+		}
+
 		// If the node is tagged as the source, then we create a
 		// pointer to is so we can mark the source in the graph
 		// properly.
@@ -240,7 +282,8 @@ func parseTestGraph(path string) (*testGraphInstance, error) {
 			// node can be the source in the graph.
 			if source != nil {
 				return nil, errors.New("JSON is invalid " +
-					"multiple nodes are tagged as the source")
+					"multiple nodes are tagged as the " +
+					"source")
 			}
 
 			source = dbNode
@@ -258,6 +301,16 @@ func parseTestGraph(path string) (*testGraphInstance, error) {
 		if err := graph.SetSourceNode(source); err != nil {
 			return nil, err
 		}
+	}
+
+	aliasForNode := func(node route.Vertex) string {
+		for alias, pubKey := range aliasMap {
+			if pubKey == node {
+				return alias
+			}
+		}
+
+		return ""
 	}
 
 	// With all the vertexes inserted, we can now insert the edges into the
@@ -304,15 +357,29 @@ func parseTestGraph(path string) (*testGraphInstance, error) {
 		copy(edgeInfo.BitcoinKey1Bytes[:], node1Bytes)
 		copy(edgeInfo.BitcoinKey2Bytes[:], node2Bytes)
 
+		shortID := lnwire.NewShortChanIDFromInt(edge.ChannelID)
+		links[shortID] = &mockLink{
+			bandwidth: lnwire.MilliSatoshi(
+				edgeInfo.Capacity * 1000,
+			),
+		}
+
 		err = graph.AddChannelEdge(&edgeInfo)
 		if err != nil && err != channeldb.ErrEdgeAlreadyExist {
 			return nil, err
 		}
 
+		channelFlags := lnwire.ChanUpdateChanFlags(edge.ChannelFlags)
+		isUpdate1 := channelFlags&lnwire.ChanUpdateDirection == 0
+		targetNode := edgeInfo.NodeKey1Bytes
+		if isUpdate1 {
+			targetNode = edgeInfo.NodeKey2Bytes
+		}
+
 		edgePolicy := &channeldb.ChannelEdgePolicy{
 			SigBytes:                  testSig.Serialize(),
 			MessageFlags:              lnwire.ChanUpdateMsgFlags(edge.MessageFlags),
-			ChannelFlags:              lnwire.ChanUpdateChanFlags(edge.ChannelFlags),
+			ChannelFlags:              channelFlags,
 			ChannelID:                 edge.ChannelID,
 			LastUpdate:                testTime,
 			TimeLockDelta:             edge.Expiry,
@@ -320,16 +387,44 @@ func parseTestGraph(path string) (*testGraphInstance, error) {
 			MaxHTLC:                   lnwire.MilliSatoshi(edge.MaxHTLC),
 			FeeBaseMSat:               lnwire.MilliSatoshi(edge.FeeBaseMsat),
 			FeeProportionalMillionths: lnwire.MilliSatoshi(edge.FeeRate),
+			Node: &channeldb.LightningNode{
+				Alias:       aliasForNode(targetNode),
+				PubKeyBytes: targetNode,
+			},
 		}
 		if err := graph.UpdateEdgePolicy(edgePolicy); err != nil {
 			return nil, err
 		}
+
+		// We also store the channel IDs info for each of the node.
+		node1Vertex, err := route.NewVertexFromBytes(node1Bytes)
+		if err != nil {
+			return nil, err
+		}
+
+		node2Vertex, err := route.NewVertexFromBytes(node2Bytes)
+		if err != nil {
+			return nil, err
+		}
+
+		if _, ok := channelIDs[node1Vertex]; !ok {
+			channelIDs[node1Vertex] = map[route.Vertex]uint64{}
+		}
+		channelIDs[node1Vertex][node2Vertex] = edge.ChannelID
+
+		if _, ok := channelIDs[node2Vertex]; !ok {
+			channelIDs[node2Vertex] = map[route.Vertex]uint64{}
+		}
+		channelIDs[node2Vertex][node1Vertex] = edge.ChannelID
 	}
 
 	return &testGraphInstance{
-		graph:    graph,
-		cleanUp:  cleanUp,
-		aliasMap: aliasMap,
+		graph:        graph,
+		graphBackend: graphBackend,
+		aliasMap:     aliasMap,
+		privKeyMap:   privKeyMap,
+		channelIDs:   channelIDs,
+		links:        links,
 	}, nil
 }
 
@@ -391,8 +486,8 @@ type testChannel struct {
 }
 
 type testGraphInstance struct {
-	graph   *channeldb.ChannelGraph
-	cleanUp func()
+	graph        *channeldb.ChannelGraph
+	graphBackend kvdb.Backend
 
 	// aliasMap is a map from a node's alias to its public key. This type is
 	// provided in order to allow easily look up from the human memorable alias
@@ -402,6 +497,25 @@ type testGraphInstance struct {
 	// privKeyMap maps a node alias to its private key. This is used to be
 	// able to mock a remote node's signing behaviour.
 	privKeyMap map[string]*btcec.PrivateKey
+
+	// channelIDs stores the channel ID for each node.
+	channelIDs map[route.Vertex]map[route.Vertex]uint64
+
+	// links maps channel ids to a mock channel update handler.
+	links map[lnwire.ShortChannelID]htlcswitch.ChannelLink
+}
+
+// getLink is a mocked link lookup function which looks up links in our test
+// graph.
+func (g *testGraphInstance) getLink(chanID lnwire.ShortChannelID) (
+	htlcswitch.ChannelLink, error) {
+
+	link, ok := g.links[chanID]
+	if !ok {
+		return nil, fmt.Errorf("link not found in mock: %v", chanID)
+	}
+
+	return link, nil
 }
 
 // createTestGraphFromChannels returns a fully populated ChannelGraph based on a set of
@@ -409,8 +523,8 @@ type testGraphInstance struct {
 // a deterministical way and added to the channel graph. A list of nodes is
 // not required and derived from the channel data. The goal is to keep
 // instantiating a test channel graph as light weight as possible.
-func createTestGraphFromChannels(testChannels []*testChannel, source string) (
-	*testGraphInstance, error) {
+func createTestGraphFromChannels(t *testing.T, useCache bool,
+	testChannels []*testChannel, source string) (*testGraphInstance, error) {
 
 	// We'll use this fake address for the IP address of all the nodes in
 	// our tests. This value isn't needed for path finding so it doesn't
@@ -423,7 +537,7 @@ func createTestGraphFromChannels(testChannels []*testChannel, source string) (
 	testAddrs = append(testAddrs, testAddr)
 
 	// Next, create a temporary graph database for usage within the test.
-	graph, cleanUp, err := makeTestGraph()
+	graph, graphBackend, err := makeTestGraph(t, useCache)
 	if err != nil {
 		return nil, err
 	}
@@ -442,8 +556,7 @@ func createTestGraphFromChannels(testChannels []*testChannel, source string) (
 			0, 0, 0, 0, 0, 0, 0, nodeIndex + 1,
 		}
 
-		privKey, pubKey := btcec.PrivKeyFromBytes(btcec.S256(),
-			keyBytes)
+		privKey, pubKey := btcec.PrivKeyFromBytes(keyBytes)
 
 		if features == nil {
 			features = lnwire.EmptyFeatureVector()
@@ -488,10 +601,12 @@ func createTestGraphFromChannels(testChannels []*testChannel, source string) (
 	// if none is specified.
 	nextUnassignedChannelID := uint64(100000)
 
+	links := make(map[lnwire.ShortChannelID]htlcswitch.ChannelLink)
+
 	for _, testChannel := range testChannels {
 		for _, node := range []*testChannelEnd{
-			testChannel.Node1, testChannel.Node2} {
-
+			testChannel.Node1, testChannel.Node2,
+		} {
 			_, exists := aliasMap[node.Alias]
 			if !exists {
 				var features *lnwire.FeatureVector
@@ -522,6 +637,12 @@ func createTestGraphFromChannels(testChannels []*testChannel, source string) (
 		fundingPoint := &wire.OutPoint{
 			Hash:  chainhash.Hash(hash),
 			Index: 0,
+		}
+
+		capacity := lnwire.MilliSatoshi(testChannel.Capacity * 1000)
+		shortID := lnwire.NewShortChanIDFromInt(channelID)
+		links[shortID] = &mockLink{
+			bandwidth: capacity,
 		}
 
 		// Sort nodes
@@ -563,6 +684,11 @@ func createTestGraphFromChannels(testChannels []*testChannel, source string) (
 				channelFlags |= lnwire.ChanUpdateDisabled
 			}
 
+			node2Features := lnwire.EmptyFeatureVector()
+			if node2.testChannelPolicy != nil {
+				node2Features = node2.Features
+			}
+
 			edgePolicy := &channeldb.ChannelEdgePolicy{
 				SigBytes:                  testSig.Serialize(),
 				MessageFlags:              msgFlags,
@@ -574,6 +700,11 @@ func createTestGraphFromChannels(testChannels []*testChannel, source string) (
 				MaxHTLC:                   node1.MaxHTLC,
 				FeeBaseMSat:               node1.FeeBaseMsat,
 				FeeProportionalMillionths: node1.FeeRate,
+				Node: &channeldb.LightningNode{
+					Alias:       node2.Alias,
+					PubKeyBytes: node2Vertex,
+					Features:    node2Features,
+				},
 			}
 			if err := graph.UpdateEdgePolicy(edgePolicy); err != nil {
 				return nil, err
@@ -591,6 +722,11 @@ func createTestGraphFromChannels(testChannels []*testChannel, source string) (
 			}
 			channelFlags |= lnwire.ChanUpdateDirection
 
+			node1Features := lnwire.EmptyFeatureVector()
+			if node1.testChannelPolicy != nil {
+				node1Features = node1.Features
+			}
+
 			edgePolicy := &channeldb.ChannelEdgePolicy{
 				SigBytes:                  testSig.Serialize(),
 				MessageFlags:              msgFlags,
@@ -602,6 +738,11 @@ func createTestGraphFromChannels(testChannels []*testChannel, source string) (
 				MaxHTLC:                   node2.MaxHTLC,
 				FeeBaseMSat:               node2.FeeBaseMsat,
 				FeeProportionalMillionths: node2.FeeRate,
+				Node: &channeldb.LightningNode{
+					Alias:       node1.Alias,
+					PubKeyBytes: node1Vertex,
+					Features:    node1Features,
+				},
 			}
 			if err := graph.UpdateEdgePolicy(edgePolicy); err != nil {
 				return nil, err
@@ -612,20 +753,159 @@ func createTestGraphFromChannels(testChannels []*testChannel, source string) (
 	}
 
 	return &testGraphInstance{
-		graph:      graph,
-		cleanUp:    cleanUp,
-		aliasMap:   aliasMap,
-		privKeyMap: privKeyMap,
+		graph:        graph,
+		graphBackend: graphBackend,
+		aliasMap:     aliasMap,
+		privKeyMap:   privKeyMap,
+		links:        links,
 	}, nil
 }
 
-// TestFindLowestFeePath tests that out of two routes with identical total
+// TestPathFinding tests all path finding related cases both with the in-memory
+// graph cached turned on and off.
+func TestPathFinding(t *testing.T) {
+	testCases := []struct {
+		name string
+		fn   func(t *testing.T, useCache bool)
+	}{{
+		name: "lowest fee path",
+		fn:   runFindLowestFeePath,
+	}, {
+		name: "basic graph path finding",
+		fn:   runBasicGraphPathFinding,
+	}, {
+		name: "path finding with additional edges",
+		fn:   runPathFindingWithAdditionalEdges,
+	}, {
+		name: "path finding with redundant additional edges",
+		fn:   runPathFindingWithRedundantAdditionalEdges,
+	}, {
+		name: "new route path too long",
+		fn:   runNewRoutePathTooLong,
+	}, {
+		name: "path not available",
+		fn:   runPathNotAvailable,
+	}, {
+		name: "destination tlv graph fallback",
+		fn:   runDestTLVGraphFallback,
+	}, {
+		name: "missing feature dependency",
+		fn:   runMissingFeatureDep,
+	}, {
+		name: "unknown required features",
+		fn:   runUnknownRequiredFeatures,
+	}, {
+		name: "destination payment address",
+		fn:   runDestPaymentAddr,
+	}, {
+		name: "path insufficient capacity",
+		fn:   runPathInsufficientCapacity,
+	}, {
+		name: "route fail min HTLC",
+		fn:   runRouteFailMinHTLC,
+	}, {
+		name: "route fail max HTLC",
+		fn:   runRouteFailMaxHTLC,
+	}, {
+		name: "route fail disabled edge",
+		fn:   runRouteFailDisabledEdge,
+	}, {
+		name: "path source edges bandwidth",
+		fn:   runPathSourceEdgesBandwidth,
+	}, {
+		name: "restrict outgoing channel",
+		fn:   runRestrictOutgoingChannel,
+	}, {
+		name: "restrict last hop",
+		fn:   runRestrictLastHop,
+	}, {
+		name: "CLTV limit",
+		fn:   runCltvLimit,
+	}, {
+		name: "probability routing",
+		fn:   runProbabilityRouting,
+	}, {
+		name: "equal cost route selection",
+		fn:   runEqualCostRouteSelection,
+	}, {
+		name: "no cycle",
+		fn:   runNoCycle,
+	}, {
+		name: "route to self",
+		fn:   runRouteToSelf,
+	}, {
+		name: "with metadata",
+		fn:   runFindPathWithMetadata,
+	}}
+
+	// Run with graph cache enabled.
+	for _, tc := range testCases {
+		tc := tc
+
+		t.Run("cache=true/"+tc.name, func(tt *testing.T) {
+			tt.Parallel()
+
+			tc.fn(tt, true)
+		})
+	}
+
+	// And with the DB fallback to make sure everything works the same
+	// still.
+	for _, tc := range testCases {
+		tc := tc
+
+		t.Run("cache=false/"+tc.name, func(tt *testing.T) {
+			tt.Parallel()
+
+			tc.fn(tt, false)
+		})
+	}
+}
+
+// runFindPathWithMetadata tests that metadata is taken into account during
+// pathfinding.
+func runFindPathWithMetadata(t *testing.T, useCache bool) {
+	testChannels := []*testChannel{
+		symmetricTestChannel("alice", "bob", 100000, &testChannelPolicy{
+			Expiry:  144,
+			FeeRate: 400,
+			MinHTLC: 1,
+			MaxHTLC: 100000000,
+		}),
+	}
+
+	ctx := newPathFindingTestContext(t, useCache, testChannels, "alice")
+
+	paymentAmt := lnwire.NewMSatFromSatoshis(100)
+	target := ctx.keyFromAlias("bob")
+
+	// Assert that a path is found when metadata is specified.
+	ctx.restrictParams.Metadata = []byte{1, 2, 3}
+	ctx.restrictParams.DestFeatures = tlvFeatures
+
+	path, err := ctx.findPath(target, paymentAmt)
+	require.NoError(t, err)
+	require.Len(t, path, 1)
+
+	// Assert that no path is found when metadata is too large.
+	ctx.restrictParams.Metadata = make([]byte, 2000)
+
+	_, err = ctx.findPath(target, paymentAmt)
+	require.ErrorIs(t, errNoPathFound, err)
+
+	// Assert that tlv payload support takes precedence over metadata
+	// issues.
+	ctx.restrictParams.DestFeatures = lnwire.EmptyFeatureVector()
+
+	_, err = ctx.findPath(target, paymentAmt)
+	require.ErrorIs(t, errNoTlvPayload, err)
+}
+
+// runFindLowestFeePath tests that out of two routes with identical total
 // time lock values, the route with the lowest total fee should be returned.
 // The fee rates are chosen such that the test failed on the previous edge
 // weight function where one of the terms was fee squared.
-func TestFindLowestFeePath(t *testing.T) {
-	t.Parallel()
-
+func runFindLowestFeePath(t *testing.T, useCache bool) {
 	// Set up a test graph with two paths from roasbeef to target. Both
 	// paths have equal total time locks, but the path through b has lower
 	// fees (700 compared to 800 for the path through a).
@@ -662,8 +942,7 @@ func TestFindLowestFeePath(t *testing.T) {
 		}),
 	}
 
-	ctx := newPathFindingTestContext(t, testChannels, "roasbeef")
-	defer ctx.cleanup()
+	ctx := newPathFindingTestContext(t, useCache, testChannels, "roasbeef")
 
 	const (
 		startingHeight = 100
@@ -673,20 +952,16 @@ func TestFindLowestFeePath(t *testing.T) {
 	paymentAmt := lnwire.NewMSatFromSatoshis(100)
 	target := ctx.keyFromAlias("target")
 	path, err := ctx.findPath(target, paymentAmt)
-	if err != nil {
-		t.Fatalf("unable to find path: %v", err)
-	}
+	require.NoError(t, err, "unable to find path")
 	route, err := newRoute(
 		ctx.source, path, startingHeight,
 		finalHopParams{
 			amt:       paymentAmt,
 			cltvDelta: finalHopCLTV,
 			records:   nil,
-		},
+		}, nil,
 	)
-	if err != nil {
-		t.Fatalf("unable to create path: %v", err)
-	}
+	require.NoError(t, err, "unable to create path")
 
 	// Assert that the lowest fee route is returned.
 	if route.Hops[1].PubKeyBytes != ctx.keyFromAlias("b") {
@@ -767,14 +1042,9 @@ var basicGraphPathFindingTests = []basicGraphPathFindingTestCase{
 		expectFailureNoPath: true,
 	}}
 
-func TestBasicGraphPathFinding(t *testing.T) {
-	t.Parallel()
-
-	testGraphInstance, err := parseTestGraph(basicGraphFilePath)
-	if err != nil {
-		t.Fatalf("unable to create graph: %v", err)
-	}
-	defer testGraphInstance.cleanUp()
+func runBasicGraphPathFinding(t *testing.T, useCache bool) {
+	testGraphInstance, err := parseTestGraph(t, useCache, basicGraphFilePath)
+	require.NoError(t, err, "unable to create graph")
 
 	// With the test graph loaded, we'll test some basic path finding using
 	// the pre-generated graph. Consult the testdata/basic_graph.json file
@@ -796,9 +1066,7 @@ func testBasicGraphPathFindingCase(t *testing.T, graphInstance *testGraphInstanc
 	expectedHopCount := len(expectedHops)
 
 	sourceNode, err := graphInstance.graph.SourceNode()
-	if err != nil {
-		t.Fatalf("unable to fetch source node: %v", err)
-	}
+	require.NoError(t, err, "unable to fetch source node")
 	sourceVertex := route.Vertex(sourceNode.PubKeyBytes)
 
 	const (
@@ -809,14 +1077,14 @@ func testBasicGraphPathFindingCase(t *testing.T, graphInstance *testGraphInstanc
 	paymentAmt := lnwire.NewMSatFromSatoshis(test.paymentAmt)
 	target := graphInstance.aliasMap[test.target]
 	path, err := dbFindPath(
-		graphInstance.graph, nil, nil,
+		graphInstance.graph, nil, &mockBandwidthHints{},
 		&RestrictParams{
 			FeeLimit:          test.feeLimit,
 			ProbabilitySource: noProbabilitySource,
 			CltvLimit:         math.MaxUint32,
 		},
 		testPathFindingConfig,
-		sourceNode.PubKeyBytes, target, paymentAmt,
+		sourceNode.PubKeyBytes, target, paymentAmt, 0,
 		startingHeight+finalHopCLTV,
 	)
 	if test.expectFailureNoPath {
@@ -825,9 +1093,7 @@ func testBasicGraphPathFindingCase(t *testing.T, graphInstance *testGraphInstanc
 		}
 		return
 	}
-	if err != nil {
-		t.Fatalf("unable to find path: %v", err)
-	}
+	require.NoError(t, err, "unable to find path")
 
 	route, err := newRoute(
 		sourceVertex, path, startingHeight,
@@ -835,11 +1101,9 @@ func testBasicGraphPathFindingCase(t *testing.T, graphInstance *testGraphInstanc
 			amt:       paymentAmt,
 			cltvDelta: finalHopCLTV,
 			records:   nil,
-		},
+		}, nil,
 	)
-	if err != nil {
-		t.Fatalf("unable to create path: %v", err)
-	}
+	require.NoError(t, err, "unable to create path")
 
 	if len(route.Hops) != len(expectedHops) {
 		t.Fatalf("route is of incorrect length, expected %v got %v",
@@ -861,9 +1125,7 @@ func testBasicGraphPathFindingCase(t *testing.T, graphInstance *testGraphInstanc
 	// properly points to the channel ID that the HTLC should be forwarded
 	// along.
 	sphinxPath, err := route.ToSphinxPath()
-	if err != nil {
-		t.Fatalf("unable to make sphinx path: %v", err)
-	}
+	require.NoError(t, err, "unable to make sphinx path")
 	if sphinxPath.TrueRouteLength() != expectedHopCount {
 		t.Fatalf("incorrect number of hop payloads: expected %v, got %v",
 			expectedHopCount, sphinxPath.TrueRouteLength())
@@ -891,9 +1153,7 @@ func testBasicGraphPathFindingCase(t *testing.T, graphInstance *testGraphInstanc
 	lastHopIndex := len(expectedHops) - 1
 
 	hopData, err := sphinxPath[lastHopIndex].HopPayload.HopData()
-	if err != nil {
-		t.Fatalf("unable to create hop data: %v", err)
-	}
+	require.NoError(t, err, "unable to create hop data")
 
 	if !bytes.Equal(hopData.NextAddress[:], exitHop[:]) {
 		t.Fatalf("first hop has incorrect next hop: expected %x, got %x",
@@ -942,23 +1202,16 @@ func testBasicGraphPathFindingCase(t *testing.T, graphInstance *testGraphInstanc
 	}
 }
 
-// TestPathFindingWithAdditionalEdges asserts that we are able to find paths to
+// runPathFindingWithAdditionalEdges asserts that we are able to find paths to
 // nodes that do not exist in the graph by way of hop hints. We also test that
 // the path can support custom TLV records for the receiver under the
 // appropriate circumstances.
-func TestPathFindingWithAdditionalEdges(t *testing.T) {
-	t.Parallel()
-
-	graph, err := parseTestGraph(basicGraphFilePath)
-	if err != nil {
-		t.Fatalf("unable to create graph: %v", err)
-	}
-	defer graph.cleanUp()
+func runPathFindingWithAdditionalEdges(t *testing.T, useCache bool) {
+	graph, err := parseTestGraph(t, useCache, basicGraphFilePath)
+	require.NoError(t, err, "unable to create graph")
 
 	sourceNode, err := graph.graph.SourceNode()
-	if err != nil {
-		t.Fatalf("unable to fetch source node: %v", err)
-	}
+	require.NoError(t, err, "unable to fetch source node")
 
 	paymentAmt := lnwire.NewMSatFromSatoshis(100)
 
@@ -969,13 +1222,9 @@ func TestPathFindingWithAdditionalEdges(t *testing.T) {
 	// to find a path from our source node, roasbeef, to doge.
 	dogePubKeyHex := "03dd46ff29a6941b4a2607525b043ec9b020b3f318a1bf281536fd7011ec59c882"
 	dogePubKeyBytes, err := hex.DecodeString(dogePubKeyHex)
-	if err != nil {
-		t.Fatalf("unable to decode public key: %v", err)
-	}
-	dogePubKey, err := btcec.ParsePubKey(dogePubKeyBytes, btcec.S256())
-	if err != nil {
-		t.Fatalf("unable to parse public key from bytes: %v", err)
-	}
+	require.NoError(t, err, "unable to decode public key")
+	dogePubKey, err := btcec.ParsePubKey(dogePubKeyBytes)
+	require.NoError(t, err, "unable to parse public key from bytes")
 
 	doge := &channeldb.LightningNode{}
 	doge.AddPubKey(dogePubKey)
@@ -985,34 +1234,35 @@ func TestPathFindingWithAdditionalEdges(t *testing.T) {
 
 	// Create the channel edge going from songoku to doge and include it in
 	// our map of additional edges.
-	songokuToDoge := &channeldb.ChannelEdgePolicy{
-		Node:                      doge,
+	songokuToDoge := &channeldb.CachedEdgePolicy{
+		ToNodePubKey: func() route.Vertex {
+			return doge.PubKeyBytes
+		},
+		ToNodeFeatures:            lnwire.EmptyFeatureVector(),
 		ChannelID:                 1337,
 		FeeBaseMSat:               1,
 		FeeProportionalMillionths: 1000,
 		TimeLockDelta:             9,
 	}
 
-	additionalEdges := map[route.Vertex][]*channeldb.ChannelEdgePolicy{
+	additionalEdges := map[route.Vertex][]*channeldb.CachedEdgePolicy{
 		graph.aliasMap["songoku"]: {songokuToDoge},
 	}
 
 	find := func(r *RestrictParams) (
-		[]*channeldb.ChannelEdgePolicy, error) {
+		[]*channeldb.CachedEdgePolicy, error) {
 
 		return dbFindPath(
-			graph.graph, additionalEdges, nil,
+			graph.graph, additionalEdges, &mockBandwidthHints{},
 			r, testPathFindingConfig,
 			sourceNode.PubKeyBytes, doge.PubKeyBytes, paymentAmt,
-			0,
+			0, 0,
 		)
 	}
 
 	// We should now be able to find a path from roasbeef to doge.
 	path, err := find(noRestrictions)
-	if err != nil {
-		t.Fatalf("unable to find private path to doge: %v", err)
-	}
+	require.NoError(t, err, "unable to find private path to doge")
 
 	// The path should represent the following hops:
 	//	roasbeef -> songoku -> doge
@@ -1042,10 +1292,60 @@ func TestPathFindingWithAdditionalEdges(t *testing.T) {
 	restrictions.DestFeatures = tlvFeatures
 
 	path, err = find(&restrictions)
-	if err != nil {
-		t.Fatalf("path should have been found: %v", err)
-	}
+	require.NoError(t, err, "path should have been found")
 	assertExpectedPath(t, graph.aliasMap, path, "songoku", "doge")
+}
+
+// runPathFindingWithRedundantAdditionalEdges asserts that we are able to find
+// paths to nodes ignoring additional edges that are already known by self node.
+func runPathFindingWithRedundantAdditionalEdges(t *testing.T, useCache bool) {
+	t.Helper()
+
+	var realChannelID uint64 = 3145
+	var hintChannelID uint64 = 1618
+
+	testChannels := []*testChannel{
+		symmetricTestChannel("alice", "bob", 100000, &testChannelPolicy{
+			Expiry:  144,
+			FeeRate: 400,
+			MinHTLC: 1,
+			MaxHTLC: 100000000,
+		}, realChannelID),
+	}
+
+	ctx := newPathFindingTestContext(t, useCache, testChannels, "alice")
+
+	target := ctx.keyFromAlias("bob")
+	paymentAmt := lnwire.NewMSatFromSatoshis(100)
+
+	// Create the channel edge going from alice to bob and include it in
+	// our map of additional edges.
+	aliceToBob := &channeldb.CachedEdgePolicy{
+		ToNodePubKey: func() route.Vertex {
+			return target
+		},
+		ToNodeFeatures:            lnwire.EmptyFeatureVector(),
+		ChannelID:                 hintChannelID,
+		FeeBaseMSat:               1,
+		FeeProportionalMillionths: 1000,
+		TimeLockDelta:             9,
+	}
+
+	additionalEdges := map[route.Vertex][]*channeldb.CachedEdgePolicy{
+		ctx.source: {aliceToBob},
+	}
+
+	path, err := dbFindPath(
+		ctx.graph, additionalEdges, ctx.bandwidthHints,
+		&ctx.restrictParams, &ctx.pathFindingConfig, ctx.source, target,
+		paymentAmt, ctx.timePref, 0,
+	)
+
+	require.NoError(t, err, "unable to find path to bob")
+	require.Len(t, path, 1)
+
+	require.Equal(t, realChannelID, path[0].ChannelID,
+		"additional edge for known edge wasn't ignored")
 }
 
 // TestNewRoute tests whether the construction of hop payloads by newRoute
@@ -1065,14 +1365,13 @@ func TestNewRoute(t *testing.T) {
 	createHop := func(baseFee lnwire.MilliSatoshi,
 		feeRate lnwire.MilliSatoshi,
 		bandwidth lnwire.MilliSatoshi,
-		timeLockDelta uint16) *channeldb.ChannelEdgePolicy {
+		timeLockDelta uint16) *channeldb.CachedEdgePolicy {
 
-		return &channeldb.ChannelEdgePolicy{
-			Node: &channeldb.LightningNode{
-				Features: lnwire.NewFeatureVector(
-					nil, nil,
-				),
+		return &channeldb.CachedEdgePolicy{
+			ToNodePubKey: func() route.Vertex {
+				return route.Vertex{}
 			},
+			ToNodeFeatures:            lnwire.NewFeatureVector(nil, nil),
 			FeeProportionalMillionths: feeRate,
 			FeeBaseMSat:               baseFee,
 			TimeLockDelta:             timeLockDelta,
@@ -1085,7 +1384,7 @@ func TestNewRoute(t *testing.T) {
 
 		// hops is the list of hops (the route) that gets passed into
 		// the call to newRoute.
-		hops []*channeldb.ChannelEdgePolicy
+		hops []*channeldb.CachedEdgePolicy
 
 		// paymentAmount is the amount that is send into the route
 		// indicated by hops.
@@ -1096,6 +1395,9 @@ func TestNewRoute(t *testing.T) {
 		destFeatures *lnwire.FeatureVector
 
 		paymentAddr *[32]byte
+
+		// metadata is the payment metadata to attach to the route.
+		metadata []byte
 
 		// expectedFees is a list of fees that every hop is expected
 		// to charge for forwarding.
@@ -1134,9 +1436,10 @@ func TestNewRoute(t *testing.T) {
 			// For a single hop payment, no fees are expected to be paid.
 			name:          "single hop",
 			paymentAmount: 100000,
-			hops: []*channeldb.ChannelEdgePolicy{
+			hops: []*channeldb.CachedEdgePolicy{
 				createHop(100, 1000, 1000000, 10),
 			},
+			metadata:              []byte{1, 2, 3},
 			expectedFees:          []lnwire.MilliSatoshi{0},
 			expectedTimeLocks:     []uint32{1},
 			expectedTotalAmount:   100000,
@@ -1147,7 +1450,7 @@ func TestNewRoute(t *testing.T) {
 			// a fee to receive the payment.
 			name:          "two hop",
 			paymentAmount: 100000,
-			hops: []*channeldb.ChannelEdgePolicy{
+			hops: []*channeldb.CachedEdgePolicy{
 				createHop(0, 1000, 1000000, 10),
 				createHop(30, 1000, 1000000, 5),
 			},
@@ -1162,7 +1465,7 @@ func TestNewRoute(t *testing.T) {
 			name:          "two hop tlv onion feature",
 			destFeatures:  tlvFeatures,
 			paymentAmount: 100000,
-			hops: []*channeldb.ChannelEdgePolicy{
+			hops: []*channeldb.CachedEdgePolicy{
 				createHop(0, 1000, 1000000, 10),
 				createHop(30, 1000, 1000000, 5),
 			},
@@ -1179,7 +1482,7 @@ func TestNewRoute(t *testing.T) {
 			destFeatures:  tlvPayAddrFeatures,
 			paymentAddr:   &testPaymentAddr,
 			paymentAmount: 100000,
-			hops: []*channeldb.ChannelEdgePolicy{
+			hops: []*channeldb.CachedEdgePolicy{
 				createHop(0, 1000, 1000000, 10),
 				createHop(30, 1000, 1000000, 5),
 			},
@@ -1199,7 +1502,7 @@ func TestNewRoute(t *testing.T) {
 			// gets rounded down to 1.
 			name:          "three hop",
 			paymentAmount: 100000,
-			hops: []*channeldb.ChannelEdgePolicy{
+			hops: []*channeldb.CachedEdgePolicy{
 				createHop(0, 10, 1000000, 10),
 				createHop(0, 10, 1000000, 5),
 				createHop(0, 10, 1000000, 3),
@@ -1214,7 +1517,7 @@ func TestNewRoute(t *testing.T) {
 			// because of the increase amount to forward.
 			name:          "three hop with fee carry over",
 			paymentAmount: 100000,
-			hops: []*channeldb.ChannelEdgePolicy{
+			hops: []*channeldb.CachedEdgePolicy{
 				createHop(0, 10000, 1000000, 10),
 				createHop(0, 10000, 1000000, 5),
 				createHop(0, 10000, 1000000, 3),
@@ -1229,7 +1532,7 @@ func TestNewRoute(t *testing.T) {
 			// effect.
 			name:          "three hop with minimal fees for carry over",
 			paymentAmount: 100000,
-			hops: []*channeldb.ChannelEdgePolicy{
+			hops: []*channeldb.CachedEdgePolicy{
 				createHop(0, 10000, 1000000, 10),
 
 				// First hop charges 0.1% so the second hop fee
@@ -1253,7 +1556,7 @@ func TestNewRoute(t *testing.T) {
 		// custom feature vector.
 		if testCase.destFeatures != nil {
 			finalHop := testCase.hops[len(testCase.hops)-1]
-			finalHop.Node.Features = testCase.destFeatures
+			finalHop.ToNodeFeatures = testCase.destFeatures
 		}
 
 		assertRoute := func(t *testing.T, route *route.Route) {
@@ -1313,9 +1616,16 @@ func TestNewRoute(t *testing.T) {
 			if !reflect.DeepEqual(
 				finalHop.MPP, testCase.expectedMPP,
 			) {
+
 				t.Errorf("Expected final hop mpp field: %v, "+
 					" but got: %v instead",
 					testCase.expectedMPP, finalHop.MPP)
+			}
+
+			if !bytes.Equal(finalHop.Metadata, testCase.metadata) {
+				t.Errorf("Expected final metadata field: %v, "+
+					" but got: %v instead",
+					testCase.metadata, finalHop.Metadata)
 			}
 		}
 
@@ -1328,7 +1638,8 @@ func TestNewRoute(t *testing.T) {
 					cltvDelta:   finalHopCLTV,
 					records:     nil,
 					paymentAddr: testCase.paymentAddr,
-				},
+					metadata:    testCase.metadata,
+				}, nil,
 			)
 
 			if testCase.expectError {
@@ -1351,9 +1662,7 @@ func TestNewRoute(t *testing.T) {
 	}
 }
 
-func TestNewRoutePathTooLong(t *testing.T) {
-	t.Parallel()
-
+func runNewRoutePathTooLong(t *testing.T, useCache bool) {
 	var testChannels []*testChannel
 
 	// Setup a linear network of 21 hops.
@@ -1371,16 +1680,13 @@ func TestNewRoutePathTooLong(t *testing.T) {
 		fromNode = toNode
 	}
 
-	ctx := newPathFindingTestContext(t, testChannels, "start")
-	defer ctx.cleanup()
+	ctx := newPathFindingTestContext(t, useCache, testChannels, "start")
 
 	// Assert that we can find 20 hop routes.
 	node20 := ctx.keyFromAlias("node-20")
 	payAmt := lnwire.MilliSatoshi(100001)
 	_, err := ctx.findPath(node20, payAmt)
-	if err != nil {
-		t.Fatalf("unexpected pathfinding failure: %v", err)
-	}
+	require.NoError(t, err, "unexpected pathfinding failure")
 
 	// Assert that finding a 21 hop route fails.
 	node21 := ctx.keyFromAlias("node-21")
@@ -1401,47 +1707,36 @@ func TestNewRoutePathTooLong(t *testing.T) {
 	}
 }
 
-func TestPathNotAvailable(t *testing.T) {
-	t.Parallel()
-
-	graph, err := parseTestGraph(basicGraphFilePath)
-	if err != nil {
-		t.Fatalf("unable to create graph: %v", err)
-	}
-	defer graph.cleanUp()
+func runPathNotAvailable(t *testing.T, useCache bool) {
+	graph, err := parseTestGraph(t, useCache, basicGraphFilePath)
+	require.NoError(t, err, "unable to create graph")
 
 	sourceNode, err := graph.graph.SourceNode()
-	if err != nil {
-		t.Fatalf("unable to fetch source node: %v", err)
-	}
+	require.NoError(t, err, "unable to fetch source node")
 
 	// With the test graph loaded, we'll test that queries for target that
 	// are either unreachable within the graph, or unknown result in an
 	// error.
 	unknownNodeStr := "03dd46ff29a6941b4a2607525b043ec9b020b3f318a1bf281536fd7011ec59c882"
 	unknownNodeBytes, err := hex.DecodeString(unknownNodeStr)
-	if err != nil {
-		t.Fatalf("unable to parse bytes: %v", err)
-	}
+	require.NoError(t, err, "unable to parse bytes")
 	var unknownNode route.Vertex
 	copy(unknownNode[:], unknownNodeBytes)
 
 	_, err = dbFindPath(
-		graph.graph, nil, nil,
+		graph.graph, nil, &mockBandwidthHints{},
 		noRestrictions, testPathFindingConfig,
-		sourceNode.PubKeyBytes, unknownNode, 100, 0,
+		sourceNode.PubKeyBytes, unknownNode, 100, 0, 0,
 	)
 	if err != errNoPathFound {
 		t.Fatalf("path shouldn't have been found: %v", err)
 	}
 }
 
-// TestDestTLVGraphFallback asserts that we properly detect when we can send TLV
+// runDestTLVGraphFallback asserts that we properly detect when we can send TLV
 // records to a receiver, and also that we fallback to the receiver's node
 // announcement if we don't have an invoice features.
-func TestDestTLVGraphFallback(t *testing.T) {
-	t.Parallel()
-
+func runDestTLVGraphFallback(t *testing.T, useCache bool) {
 	testChannels := []*testChannel{
 		asymmetricTestChannel("roasbeef", "luoji", 100000,
 			&testChannelPolicy{
@@ -1470,22 +1765,18 @@ func TestDestTLVGraphFallback(t *testing.T) {
 			}, 0),
 	}
 
-	ctx := newPathFindingTestContext(t, testChannels, "roasbeef")
-	defer ctx.cleanup()
+	ctx := newPathFindingTestContext(t, useCache, testChannels, "roasbeef")
 
 	sourceNode, err := ctx.graph.SourceNode()
-	if err != nil {
-		t.Fatalf("unable to fetch source node: %v", err)
-
-	}
+	require.NoError(t, err, "unable to fetch source node")
 
 	find := func(r *RestrictParams,
-		target route.Vertex) ([]*channeldb.ChannelEdgePolicy, error) {
+		target route.Vertex) ([]*channeldb.CachedEdgePolicy, error) {
 
 		return dbFindPath(
-			ctx.graph, nil, nil,
+			ctx.graph, nil, &mockBandwidthHints{},
 			r, testPathFindingConfig,
-			sourceNode.PubKeyBytes, target, 100, 0,
+			sourceNode.PubKeyBytes, target, 100, 0, 0,
 		)
 	}
 
@@ -1509,9 +1800,7 @@ func TestDestTLVGraphFallback(t *testing.T) {
 	// However, path to satoshi should succeed via the fallback because his
 	// node ann features have the TLV bit.
 	path, err := find(&restrictions, satoshi)
-	if err != nil {
-		t.Fatalf("path should have been found: %v", err)
-	}
+	require.NoError(t, err, "path should have been found")
 	assertExpectedPath(t, ctx.testGraphInstance.aliasMap, path, "satoshi")
 
 	// Add empty destination features. This should cause both paths to fail,
@@ -1532,18 +1821,14 @@ func TestDestTLVGraphFallback(t *testing.T) {
 	restrictions.DestFeatures = tlvFeatures
 
 	path, err = find(&restrictions, luoji)
-	if err != nil {
-		t.Fatalf("path should have been found: %v", err)
-	}
+	require.NoError(t, err, "path should have been found")
 	assertExpectedPath(t, ctx.testGraphInstance.aliasMap, path, "luoji")
 }
 
-// TestMissingFeatureDep asserts that we fail path finding when the
+// runMissingFeatureDep asserts that we fail path finding when the
 // destination's features are broken, in that the feature vector doesn't signal
 // all transitive dependencies.
-func TestMissingFeatureDep(t *testing.T) {
-	t.Parallel()
-
+func runMissingFeatureDep(t *testing.T, useCache bool) {
 	testChannels := []*testChannel{
 		asymmetricTestChannel("roasbeef", "conner", 100000,
 			&testChannelPolicy{
@@ -1577,8 +1862,7 @@ func TestMissingFeatureDep(t *testing.T) {
 		),
 	}
 
-	ctx := newPathFindingTestContext(t, testChannels, "roasbeef")
-	defer ctx.cleanup()
+	ctx := newPathFindingTestContext(t, useCache, testChannels, "roasbeef")
 
 	// Conner's node in the graph has a broken feature vector, since it
 	// signals payment addresses without signaling tlv onions. Pathfinding
@@ -1598,9 +1882,7 @@ func TestMissingFeatureDep(t *testing.T) {
 	ctx.restrictParams.DestFeatures = tlvPayAddrFeatures
 
 	path, err := ctx.findPath(conner, 100)
-	if err != nil {
-		t.Fatalf("path should have been found: %v", err)
-	}
+	require.NoError(t, err, "path should have been found")
 	assertExpectedPath(t, ctx.testGraphInstance.aliasMap, path, "conner")
 
 	// Finally, try to find a route to joost through conner. The
@@ -1615,12 +1897,10 @@ func TestMissingFeatureDep(t *testing.T) {
 	}
 }
 
-// TestUnknownRequiredFeatures asserts that we fail path finding when the
+// runUnknownRequiredFeatures asserts that we fail path finding when the
 // destination requires an unknown required feature, and that we skip
 // intermediaries that signal unknown required features.
-func TestUnknownRequiredFeatures(t *testing.T) {
-	t.Parallel()
-
+func runUnknownRequiredFeatures(t *testing.T, useCache bool) {
 	testChannels := []*testChannel{
 		asymmetricTestChannel("roasbeef", "conner", 100000,
 			&testChannelPolicy{
@@ -1654,8 +1934,7 @@ func TestUnknownRequiredFeatures(t *testing.T) {
 		),
 	}
 
-	ctx := newPathFindingTestContext(t, testChannels, "roasbeef")
-	defer ctx.cleanup()
+	ctx := newPathFindingTestContext(t, useCache, testChannels, "roasbeef")
 
 	conner := ctx.keyFromAlias("conner")
 	joost := ctx.keyFromAlias("joost")
@@ -1681,12 +1960,10 @@ func TestUnknownRequiredFeatures(t *testing.T) {
 	}
 }
 
-// TestDestPaymentAddr asserts that we properly detect when we can send a
+// runDestPaymentAddr asserts that we properly detect when we can send a
 // payment address to a receiver, and also that we fallback to the receiver's
 // node announcement if we don't have an invoice features.
-func TestDestPaymentAddr(t *testing.T) {
-	t.Parallel()
-
+func runDestPaymentAddr(t *testing.T, useCache bool) {
 	testChannels := []*testChannel{
 		symmetricTestChannel("roasbeef", "luoji", 100000,
 			&testChannelPolicy{
@@ -1698,8 +1975,7 @@ func TestDestPaymentAddr(t *testing.T) {
 		),
 	}
 
-	ctx := newPathFindingTestContext(t, testChannels, "roasbeef")
-	defer ctx.cleanup()
+	ctx := newPathFindingTestContext(t, useCache, testChannels, "roasbeef")
 
 	luoji := ctx.keyFromAlias("luoji")
 
@@ -1720,25 +1996,16 @@ func TestDestPaymentAddr(t *testing.T) {
 	ctx.restrictParams.DestFeatures = tlvPayAddrFeatures
 
 	path, err := ctx.findPath(luoji, 100)
-	if err != nil {
-		t.Fatalf("path should have been found: %v", err)
-	}
+	require.NoError(t, err, "path should have been found")
 	assertExpectedPath(t, ctx.testGraphInstance.aliasMap, path, "luoji")
 }
 
-func TestPathInsufficientCapacity(t *testing.T) {
-	t.Parallel()
-
-	graph, err := parseTestGraph(basicGraphFilePath)
-	if err != nil {
-		t.Fatalf("unable to create graph: %v", err)
-	}
-	defer graph.cleanUp()
+func runPathInsufficientCapacity(t *testing.T, useCache bool) {
+	graph, err := parseTestGraph(t, useCache, basicGraphFilePath)
+	require.NoError(t, err, "unable to create graph")
 
 	sourceNode, err := graph.graph.SourceNode()
-	if err != nil {
-		t.Fatalf("unable to fetch source node: %v", err)
-	}
+	require.NoError(t, err, "unable to fetch source node")
 
 	// Next, test that attempting to find a path in which the current
 	// channel graph cannot support due to insufficient capacity triggers
@@ -1752,30 +2019,23 @@ func TestPathInsufficientCapacity(t *testing.T) {
 
 	payAmt := lnwire.NewMSatFromSatoshis(btcutil.SatoshiPerBitcoin)
 	_, err = dbFindPath(
-		graph.graph, nil, nil,
+		graph.graph, nil, &mockBandwidthHints{},
 		noRestrictions, testPathFindingConfig,
-		sourceNode.PubKeyBytes, target, payAmt, 0,
+		sourceNode.PubKeyBytes, target, payAmt, 0, 0,
 	)
 	if err != errInsufficientBalance {
 		t.Fatalf("graph shouldn't be able to support payment: %v", err)
 	}
 }
 
-// TestRouteFailMinHTLC tests that if we attempt to route an HTLC which is
+// runRouteFailMinHTLC tests that if we attempt to route an HTLC which is
 // smaller than the advertised minHTLC of an edge, then path finding fails.
-func TestRouteFailMinHTLC(t *testing.T) {
-	t.Parallel()
-
-	graph, err := parseTestGraph(basicGraphFilePath)
-	if err != nil {
-		t.Fatalf("unable to create graph: %v", err)
-	}
-	defer graph.cleanUp()
+func runRouteFailMinHTLC(t *testing.T, useCache bool) {
+	graph, err := parseTestGraph(t, useCache, basicGraphFilePath)
+	require.NoError(t, err, "unable to create graph")
 
 	sourceNode, err := graph.graph.SourceNode()
-	if err != nil {
-		t.Fatalf("unable to fetch source node: %v", err)
-	}
+	require.NoError(t, err, "unable to fetch source node")
 
 	// We'll not attempt to route an HTLC of 10 SAT from roasbeef to Son
 	// Goku. However, the min HTLC of Son Goku is 1k SAT, as a result, this
@@ -1783,20 +2043,18 @@ func TestRouteFailMinHTLC(t *testing.T) {
 	target := graph.aliasMap["songoku"]
 	payAmt := lnwire.MilliSatoshi(10)
 	_, err = dbFindPath(
-		graph.graph, nil, nil,
+		graph.graph, nil, &mockBandwidthHints{},
 		noRestrictions, testPathFindingConfig,
-		sourceNode.PubKeyBytes, target, payAmt, 0,
+		sourceNode.PubKeyBytes, target, payAmt, 0, 0,
 	)
 	if err != errNoPathFound {
 		t.Fatalf("graph shouldn't be able to support payment: %v", err)
 	}
 }
 
-// TestRouteFailMaxHTLC tests that if we attempt to route an HTLC which is
+// runRouteFailMaxHTLC tests that if we attempt to route an HTLC which is
 // larger than the advertised max HTLC of an edge, then path finding fails.
-func TestRouteFailMaxHTLC(t *testing.T) {
-	t.Parallel()
-
+func runRouteFailMaxHTLC(t *testing.T, useCache bool) {
 	// Set up a test graph:
 	// roasbeef <--> firstHop <--> secondHop <--> target
 	// We will be adjusting the max HTLC of the edge between the first and
@@ -1823,25 +2081,20 @@ func TestRouteFailMaxHTLC(t *testing.T) {
 		}),
 	}
 
-	ctx := newPathFindingTestContext(t, testChannels, "roasbeef")
-	defer ctx.cleanup()
+	ctx := newPathFindingTestContext(t, useCache, testChannels, "roasbeef")
 
 	// First, attempt to send a payment greater than the max HTLC we are
 	// about to set, which should succeed.
 	target := ctx.keyFromAlias("target")
 	payAmt := lnwire.MilliSatoshi(100001)
 	_, err := ctx.findPath(target, payAmt)
-	if err != nil {
-		t.Fatalf("graph should've been able to support payment: %v", err)
-	}
+	require.NoError(t, err, "graph should've been able to support payment")
 
 	// Next, update the middle edge policy to only allow payments up to 100k
 	// msat.
 	graph := ctx.testGraphInstance.graph
 	_, midEdge, _, err := graph.FetchChannelEdgesByID(firstToSecondID)
-	if err != nil {
-		t.Fatalf("unable to fetch channel edges by ID: %v", err)
-	}
+	require.NoError(t, err, "unable to fetch channel edges by ID")
 	midEdge.MessageFlags = 1
 	midEdge.MaxHTLC = payAmt - 1
 	if err := graph.UpdateEdgePolicy(midEdge); err != nil {
@@ -1856,46 +2109,35 @@ func TestRouteFailMaxHTLC(t *testing.T) {
 	}
 }
 
-// TestRouteFailDisabledEdge tests that if we attempt to route to an edge
+// runRouteFailDisabledEdge tests that if we attempt to route to an edge
 // that's disabled, then that edge is disqualified, and the routing attempt
 // will fail. We also test that this is true only for non-local edges, as we'll
 // ignore the disable flags, with the assumption that the correct bandwidth is
 // found among the bandwidth hints.
-func TestRouteFailDisabledEdge(t *testing.T) {
-	t.Parallel()
-
-	graph, err := parseTestGraph(basicGraphFilePath)
-	if err != nil {
-		t.Fatalf("unable to create graph: %v", err)
-	}
-	defer graph.cleanUp()
+func runRouteFailDisabledEdge(t *testing.T, useCache bool) {
+	graph, err := parseTestGraph(t, useCache, basicGraphFilePath)
+	require.NoError(t, err, "unable to create graph")
 
 	sourceNode, err := graph.graph.SourceNode()
-	if err != nil {
-		t.Fatalf("unable to fetch source node: %v", err)
-	}
+	require.NoError(t, err, "unable to fetch source node")
 
 	// First, we'll try to route from roasbeef -> sophon. This should
 	// succeed without issue, and return a single path via phamnuwen
 	target := graph.aliasMap["sophon"]
 	payAmt := lnwire.NewMSatFromSatoshis(105000)
 	_, err = dbFindPath(
-		graph.graph, nil, nil,
+		graph.graph, nil, &mockBandwidthHints{},
 		noRestrictions, testPathFindingConfig,
-		sourceNode.PubKeyBytes, target, payAmt, 0,
+		sourceNode.PubKeyBytes, target, payAmt, 0, 0,
 	)
-	if err != nil {
-		t.Fatalf("unable to find path: %v", err)
-	}
+	require.NoError(t, err, "unable to find path")
 
 	// Disable the edge roasbeef->phamnuwen. This should not impact the
 	// path finding, as we don't consider the disable flag for local
 	// channels (and roasbeef is the source).
 	roasToPham := uint64(999991)
 	_, e1, e2, err := graph.graph.FetchChannelEdgesByID(roasToPham)
-	if err != nil {
-		t.Fatalf("unable to fetch edge: %v", err)
-	}
+	require.NoError(t, err, "unable to fetch edge")
 	e1.ChannelFlags |= lnwire.ChanUpdateDisabled
 	if err := graph.graph.UpdateEdgePolicy(e1); err != nil {
 		t.Fatalf("unable to update edge: %v", err)
@@ -1906,21 +2148,17 @@ func TestRouteFailDisabledEdge(t *testing.T) {
 	}
 
 	_, err = dbFindPath(
-		graph.graph, nil, nil,
+		graph.graph, nil, &mockBandwidthHints{},
 		noRestrictions, testPathFindingConfig,
-		sourceNode.PubKeyBytes, target, payAmt, 0,
+		sourceNode.PubKeyBytes, target, payAmt, 0, 0,
 	)
-	if err != nil {
-		t.Fatalf("unable to find path: %v", err)
-	}
+	require.NoError(t, err, "unable to find path")
 
 	// Now, we'll modify the edge from phamnuwen -> sophon, to read that
 	// it's disabled.
 	phamToSophon := uint64(99999)
 	_, e, _, err := graph.graph.FetchChannelEdgesByID(phamToSophon)
-	if err != nil {
-		t.Fatalf("unable to fetch edge: %v", err)
-	}
+	require.NoError(t, err, "unable to fetch edge")
 	e.ChannelFlags |= lnwire.ChanUpdateDisabled
 	if err := graph.graph.UpdateEdgePolicy(e); err != nil {
 		t.Fatalf("unable to update edge: %v", err)
@@ -1929,31 +2167,24 @@ func TestRouteFailDisabledEdge(t *testing.T) {
 	// If we attempt to route through that edge, we should get a failure as
 	// it is no longer eligible.
 	_, err = dbFindPath(
-		graph.graph, nil, nil,
+		graph.graph, nil, &mockBandwidthHints{},
 		noRestrictions, testPathFindingConfig,
-		sourceNode.PubKeyBytes, target, payAmt, 0,
+		sourceNode.PubKeyBytes, target, payAmt, 0, 0,
 	)
 	if err != errNoPathFound {
 		t.Fatalf("graph shouldn't be able to support payment: %v", err)
 	}
 }
 
-// TestPathSourceEdgesBandwidth tests that explicitly passing in a set of
+// runPathSourceEdgesBandwidth tests that explicitly passing in a set of
 // bandwidth hints is used by the path finding algorithm to consider whether to
 // use a local channel.
-func TestPathSourceEdgesBandwidth(t *testing.T) {
-	t.Parallel()
-
-	graph, err := parseTestGraph(basicGraphFilePath)
-	if err != nil {
-		t.Fatalf("unable to create graph: %v", err)
-	}
-	defer graph.cleanUp()
+func runPathSourceEdgesBandwidth(t *testing.T, useCache bool) {
+	graph, err := parseTestGraph(t, useCache, basicGraphFilePath)
+	require.NoError(t, err, "unable to create graph")
 
 	sourceNode, err := graph.graph.SourceNode()
-	if err != nil {
-		t.Fatalf("unable to fetch source node: %v", err)
-	}
+	require.NoError(t, err, "unable to fetch source node")
 
 	// First, we'll try to route from roasbeef -> sophon. This should
 	// succeed without issue, and return a path via songoku, as that's the
@@ -1961,22 +2192,22 @@ func TestPathSourceEdgesBandwidth(t *testing.T) {
 	target := graph.aliasMap["sophon"]
 	payAmt := lnwire.NewMSatFromSatoshis(50000)
 	path, err := dbFindPath(
-		graph.graph, nil, nil,
+		graph.graph, nil, &mockBandwidthHints{},
 		noRestrictions, testPathFindingConfig,
-		sourceNode.PubKeyBytes, target, payAmt, 0,
+		sourceNode.PubKeyBytes, target, payAmt, 0, 0,
 	)
-	if err != nil {
-		t.Fatalf("unable to find path: %v", err)
-	}
+	require.NoError(t, err, "unable to find path")
 	assertExpectedPath(t, graph.aliasMap, path, "songoku", "sophon")
 
 	// Now we'll set the bandwidth of the edge roasbeef->songoku and
 	// roasbeef->phamnuwen to 0.
 	roasToSongoku := uint64(12345)
 	roasToPham := uint64(999991)
-	bandwidths := map[uint64]lnwire.MilliSatoshi{
-		roasToSongoku: 0,
-		roasToPham:    0,
+	bandwidths := &mockBandwidthHints{
+		hints: map[uint64]lnwire.MilliSatoshi{
+			roasToSongoku: 0,
+			roasToPham:    0,
+		},
 	}
 
 	// Since both these edges has a bandwidth of zero, no path should be
@@ -1984,7 +2215,7 @@ func TestPathSourceEdgesBandwidth(t *testing.T) {
 	_, err = dbFindPath(
 		graph.graph, nil, bandwidths,
 		noRestrictions, testPathFindingConfig,
-		sourceNode.PubKeyBytes, target, payAmt, 0,
+		sourceNode.PubKeyBytes, target, payAmt, 0, 0,
 	)
 	if err != errNoPathFound {
 		t.Fatalf("graph shouldn't be able to support payment: %v", err)
@@ -1992,27 +2223,23 @@ func TestPathSourceEdgesBandwidth(t *testing.T) {
 
 	// Set the bandwidth of roasbeef->phamnuwen high enough to carry the
 	// payment.
-	bandwidths[roasToPham] = 2 * payAmt
+	bandwidths.hints[roasToPham] = 2 * payAmt
 
 	// Now, if we attempt to route again, we should find the path via
 	// phamnuven, as the other source edge won't be considered.
 	path, err = dbFindPath(
 		graph.graph, nil, bandwidths,
 		noRestrictions, testPathFindingConfig,
-		sourceNode.PubKeyBytes, target, payAmt, 0,
+		sourceNode.PubKeyBytes, target, payAmt, 0, 0,
 	)
-	if err != nil {
-		t.Fatalf("unable to find path: %v", err)
-	}
+	require.NoError(t, err, "unable to find path")
 	assertExpectedPath(t, graph.aliasMap, path, "phamnuwen", "sophon")
 
 	// Finally, set the roasbeef->songoku bandwidth, but also set its
 	// disable flag.
-	bandwidths[roasToSongoku] = 2 * payAmt
+	bandwidths.hints[roasToSongoku] = 2 * payAmt
 	_, e1, e2, err := graph.graph.FetchChannelEdgesByID(roasToSongoku)
-	if err != nil {
-		t.Fatalf("unable to fetch edge: %v", err)
-	}
+	require.NoError(t, err, "unable to fetch edge")
 	e1.ChannelFlags |= lnwire.ChanUpdateDisabled
 	if err := graph.graph.UpdateEdgePolicy(e1); err != nil {
 		t.Fatalf("unable to update edge: %v", err)
@@ -2027,11 +2254,9 @@ func TestPathSourceEdgesBandwidth(t *testing.T) {
 	path, err = dbFindPath(
 		graph.graph, nil, bandwidths,
 		noRestrictions, testPathFindingConfig,
-		sourceNode.PubKeyBytes, target, payAmt, 0,
+		sourceNode.PubKeyBytes, target, payAmt, 0, 0,
 	)
-	if err != nil {
-		t.Fatalf("unable to find path: %v", err)
-	}
+	require.NoError(t, err, "unable to find path")
 	assertExpectedPath(t, graph.aliasMap, path, "songoku", "sophon")
 }
 
@@ -2052,20 +2277,14 @@ func TestPathFindSpecExample(t *testing.T) {
 	// we'll pass that in to ensure that the router uses 100 as the current
 	// height.
 	const startingHeight = 100
-	ctx, cleanUp, err := createTestCtxFromFile(startingHeight, specExampleFilePath)
-	if err != nil {
-		t.Fatalf("unable to create router: %v", err)
-	}
-	defer cleanUp()
+	ctx := createTestCtxFromFile(t, startingHeight, specExampleFilePath)
 
 	// We'll first exercise the scenario of a direct payment from Bob to
 	// Carol, so we set "B" as the source node so path finding starts from
 	// Bob.
 	bob := ctx.aliases["B"]
-	bobNode, err := ctx.graph.FetchLightningNode(nil, bob)
-	if err != nil {
-		t.Fatalf("unable to find bob: %v", err)
-	}
+	bobNode, err := ctx.graph.FetchLightningNode(bob)
+	require.NoError(t, err, "unable to find bob")
 	if err := ctx.graph.SetSourceNode(bobNode); err != nil {
 		t.Fatalf("unable to set source node: %v", err)
 	}
@@ -2073,13 +2292,12 @@ func TestPathFindSpecExample(t *testing.T) {
 	// Query for a route of 4,999,999 mSAT to carol.
 	carol := ctx.aliases["C"]
 	const amt lnwire.MilliSatoshi = 4999999
-	route, err := ctx.router.FindRoute(
-		bobNode.PubKeyBytes, carol, amt, noRestrictions, nil, nil,
-		MinCLTVDelta,
+	req := NewRouteRequest(
+		bobNode.PubKeyBytes, &carol, amt, 0, noRestrictions, nil, nil,
+		nil, MinCLTVDelta,
 	)
-	if err != nil {
-		t.Fatalf("unable to find route: %v", err)
-	}
+	route, _, err := ctx.router.FindRoute(req)
+	require.NoError(t, err, "unable to find route")
 
 	// Now we'll examine the route returned for correctness.
 	//
@@ -2112,30 +2330,25 @@ func TestPathFindSpecExample(t *testing.T) {
 	// Next, we'll set A as the source node so we can assert that we create
 	// the proper route for any queries starting with Alice.
 	alice := ctx.aliases["A"]
-	aliceNode, err := ctx.graph.FetchLightningNode(nil, alice)
-	if err != nil {
-		t.Fatalf("unable to find alice: %v", err)
-	}
+	aliceNode, err := ctx.graph.FetchLightningNode(alice)
+	require.NoError(t, err, "unable to find alice")
 	if err := ctx.graph.SetSourceNode(aliceNode); err != nil {
 		t.Fatalf("unable to set source node: %v", err)
 	}
 	ctx.router.selfNode = aliceNode
 	source, err := ctx.graph.SourceNode()
-	if err != nil {
-		t.Fatalf("unable to retrieve source node: %v", err)
-	}
+	require.NoError(t, err, "unable to retrieve source node")
 	if source.PubKeyBytes != alice {
 		t.Fatalf("source node not set")
 	}
 
 	// We'll now request a route from A -> B -> C.
-	route, err = ctx.router.FindRoute(
-		source.PubKeyBytes, carol, amt, noRestrictions, nil, nil,
-		MinCLTVDelta,
+	req = NewRouteRequest(
+		source.PubKeyBytes, &carol, amt, 0, noRestrictions, nil, nil,
+		nil, MinCLTVDelta,
 	)
-	if err != nil {
-		t.Fatalf("unable to find routes: %v", err)
-	}
+	route, _, err = ctx.router.FindRoute(req)
+	require.NoError(t, err, "unable to find routes")
 
 	// The route should be two hops.
 	if len(route.Hops) != 2 {
@@ -2212,16 +2425,16 @@ func TestPathFindSpecExample(t *testing.T) {
 }
 
 func assertExpectedPath(t *testing.T, aliasMap map[string]route.Vertex,
-	path []*channeldb.ChannelEdgePolicy, nodeAliases ...string) {
+	path []*channeldb.CachedEdgePolicy, nodeAliases ...string) {
 
 	if len(path) != len(nodeAliases) {
 		t.Fatal("number of hops and number of aliases do not match")
 	}
 
 	for i, hop := range path {
-		if hop.Node.PubKeyBytes != aliasMap[nodeAliases[i]] {
+		if hop.ToNodePubKey() != aliasMap[nodeAliases[i]] {
 			t.Fatalf("expected %v to be pos #%v in hop, instead "+
-				"%v was", nodeAliases[i], i, hop.Node.Alias)
+				"%v was", nodeAliases[i], i, hop.ToNodePubKey())
 		}
 	}
 }
@@ -2238,11 +2451,9 @@ func TestNewRouteFromEmptyHops(t *testing.T) {
 	}
 }
 
-// TestRestrictOutgoingChannel asserts that a outgoing channel restriction is
+// runRestrictOutgoingChannel asserts that a outgoing channel restriction is
 // obeyed by the path finding algorithm.
-func TestRestrictOutgoingChannel(t *testing.T) {
-	t.Parallel()
-
+func runRestrictOutgoingChannel(t *testing.T, useCache bool) {
 	// Define channel id constants
 	const (
 		chanSourceA      = 1
@@ -2278,8 +2489,7 @@ func TestRestrictOutgoingChannel(t *testing.T) {
 		}, chanSourceTarget),
 	}
 
-	ctx := newPathFindingTestContext(t, testChannels, "roasbeef")
-	defer ctx.cleanup()
+	ctx := newPathFindingTestContext(t, useCache, testChannels, "roasbeef")
 
 	const (
 		startingHeight = 100
@@ -2294,9 +2504,7 @@ func TestRestrictOutgoingChannel(t *testing.T) {
 	// outgoing channel.
 	ctx.restrictParams.OutgoingChannelIDs = []uint64{outgoingChannelID}
 	path, err := ctx.findPath(target, paymentAmt)
-	if err != nil {
-		t.Fatalf("unable to find path: %v", err)
-	}
+	require.NoError(t, err, "unable to find path")
 
 	// Assert that the route starts with channel chanSourceB1, in line with
 	// the specified restriction.
@@ -2312,20 +2520,16 @@ func TestRestrictOutgoingChannel(t *testing.T) {
 		chanSourceB1, chanSourceTarget,
 	}
 	path, err = ctx.findPath(target, paymentAmt)
-	if err != nil {
-		t.Fatalf("unable to find path: %v", err)
-	}
+	require.NoError(t, err, "unable to find path")
 	if path[0].ChannelID != chanSourceTarget {
 		t.Fatalf("expected route to pass through channel %v",
 			chanSourceTarget)
 	}
 }
 
-// TestRestrictLastHop asserts that a last hop restriction is obeyed by the path
+// runRestrictLastHop asserts that a last hop restriction is obeyed by the path
 // finding algorithm.
-func TestRestrictLastHop(t *testing.T) {
-	t.Parallel()
-
+func runRestrictLastHop(t *testing.T, useCache bool) {
 	// Set up a test graph with three possible paths from roasbeef to
 	// target. The path via channel 1 and 2 is the lowest cost path.
 	testChannels := []*testChannel{
@@ -2345,8 +2549,7 @@ func TestRestrictLastHop(t *testing.T) {
 		}, 4),
 	}
 
-	ctx := newPathFindingTestContext(t, testChannels, "source")
-	defer ctx.cleanup()
+	ctx := newPathFindingTestContext(t, useCache, testChannels, "source")
 
 	paymentAmt := lnwire.NewMSatFromSatoshis(100)
 	target := ctx.keyFromAlias("target")
@@ -2356,9 +2559,7 @@ func TestRestrictLastHop(t *testing.T) {
 	// This should force pathfinding to not take the lowest cost option.
 	ctx.restrictParams.LastHop = &lastHop
 	path, err := ctx.findPath(target, paymentAmt)
-	if err != nil {
-		t.Fatalf("unable to find path: %v", err)
-	}
+	require.NoError(t, err, "unable to find path")
 	if path[0].ChannelID != 3 {
 		t.Fatalf("expected route to pass through channel 3, "+
 			"but channel %v was selected instead",
@@ -2366,15 +2567,23 @@ func TestRestrictLastHop(t *testing.T) {
 	}
 }
 
-// TestCltvLimit asserts that a cltv limit is obeyed by the path finding
+// runCltvLimit asserts that a cltv limit is obeyed by the path finding
 // algorithm.
-func TestCltvLimit(t *testing.T) {
-	t.Run("no limit", func(t *testing.T) { testCltvLimit(t, 2016, 1) })
-	t.Run("no path", func(t *testing.T) { testCltvLimit(t, 50, 0) })
-	t.Run("force high cost", func(t *testing.T) { testCltvLimit(t, 80, 3) })
+func runCltvLimit(t *testing.T, useCache bool) {
+	t.Run("no limit", func(t *testing.T) {
+		testCltvLimit(t, useCache, 2016, 1)
+	})
+	t.Run("no path", func(t *testing.T) {
+		testCltvLimit(t, useCache, 50, 0)
+	})
+	t.Run("force high cost", func(t *testing.T) {
+		testCltvLimit(t, useCache, 80, 3)
+	})
 }
 
-func testCltvLimit(t *testing.T, limit uint32, expectedChannel uint64) {
+func testCltvLimit(t *testing.T, useCache bool, limit uint32,
+	expectedChannel uint64) {
+
 	t.Parallel()
 
 	// Set up a test graph with three possible paths to the target. The path
@@ -2408,8 +2617,7 @@ func testCltvLimit(t *testing.T, limit uint32, expectedChannel uint64) {
 		}),
 	}
 
-	ctx := newPathFindingTestContext(t, testChannels, "roasbeef")
-	defer ctx.cleanup()
+	ctx := newPathFindingTestContext(t, useCache, testChannels, "roasbeef")
 
 	paymentAmt := lnwire.NewMSatFromSatoshis(100)
 	target := ctx.keyFromAlias("target")
@@ -2423,9 +2631,7 @@ func testCltvLimit(t *testing.T, limit uint32, expectedChannel uint64) {
 		}
 		t.Fatal("expected no path to be found")
 	}
-	if err != nil {
-		t.Fatalf("unable to find path: %v", err)
-	}
+	require.NoError(t, err, "unable to find path")
 
 	const (
 		startingHeight = 100
@@ -2437,11 +2643,9 @@ func testCltvLimit(t *testing.T, limit uint32, expectedChannel uint64) {
 			amt:       paymentAmt,
 			cltvDelta: finalHopCLTV,
 			records:   nil,
-		},
+		}, nil,
 	)
-	if err != nil {
-		t.Fatalf("unable to create path: %v", err)
-	}
+	require.NoError(t, err, "unable to create path")
 
 	// Assert that the route starts with the expected channel.
 	if route.Hops[0].ChannelID != expectedChannel {
@@ -2451,17 +2655,16 @@ func testCltvLimit(t *testing.T, limit uint32, expectedChannel uint64) {
 	}
 }
 
-// TestProbabilityRouting asserts that path finding not only takes into account
+// runProbabilityRouting asserts that path finding not only takes into account
 // fees but also success probability.
-func TestProbabilityRouting(t *testing.T) {
-	t.Parallel()
-
+func runProbabilityRouting(t *testing.T, useCache bool) {
 	testCases := []struct {
 		name           string
 		p10, p11, p20  float64
 		minProbability float64
 		expectedChan   uint64
 		amount         btcutil.Amount
+		timePref       float64
 	}{
 		// Test two variations with probabilities that should multiply
 		// to the same total route probability. In both cases the three
@@ -2483,6 +2686,18 @@ func TestProbabilityRouting(t *testing.T) {
 			minProbability: 0.1,
 			expectedChan:   10,
 			amount:         100,
+		},
+
+		// If we increase the time preference, we expect the algorithm
+		// to choose - with everything else being equal - the more
+		// expensive, more reliable route.
+		{
+			name: "three hop timepref",
+			p10:  0.5, p11: 0.8, p20: 0.7,
+			minProbability: 0.1,
+			expectedChan:   20,
+			amount:         100,
+			timePref:       1,
 		},
 
 		// If a larger amount is sent, the effect of the proportional
@@ -2541,15 +2756,18 @@ func TestProbabilityRouting(t *testing.T) {
 
 		t.Run(tc.name, func(t *testing.T) {
 			testProbabilityRouting(
-				t, tc.amount, tc.p10, tc.p11, tc.p20,
+				t, useCache, tc.amount, tc.timePref,
+				tc.p10, tc.p11, tc.p20,
 				tc.minProbability, tc.expectedChan,
 			)
 		})
 	}
 }
 
-func testProbabilityRouting(t *testing.T, paymentAmt btcutil.Amount,
-	p10, p11, p20, minProbability float64, expectedChan uint64) {
+func testProbabilityRouting(t *testing.T, useCache bool,
+	paymentAmt btcutil.Amount, timePref float64,
+	p10, p11, p20, minProbability float64,
+	expectedChan uint64) {
 
 	t.Parallel()
 
@@ -2576,16 +2794,16 @@ func testProbabilityRouting(t *testing.T, paymentAmt btcutil.Amount,
 		}, 20),
 	}
 
-	ctx := newPathFindingTestContext(t, testChannels, "roasbeef")
-	defer ctx.cleanup()
+	ctx := newPathFindingTestContext(t, useCache, testChannels, "roasbeef")
 
 	alias := ctx.testGraphInstance.aliasMap
 
 	target := ctx.testGraphInstance.aliasMap["target"]
 
 	// Configure a probability source with the test parameters.
-	ctx.restrictParams.ProbabilitySource = func(fromNode, toNode route.Vertex,
-		amt lnwire.MilliSatoshi) float64 {
+	ctx.restrictParams.ProbabilitySource = func(fromNode,
+		toNode route.Vertex, amt lnwire.MilliSatoshi,
+		capacity btcutil.Amount) float64 {
 
 		if amt == 0 {
 			t.Fatal("expected non-zero amount")
@@ -2609,6 +2827,8 @@ func testProbabilityRouting(t *testing.T, paymentAmt btcutil.Amount,
 		MinProbability: minProbability,
 	}
 
+	ctx.timePref = timePref
+
 	path, err := ctx.findPath(
 		target, lnwire.NewMSatFromSatoshis(paymentAmt),
 	)
@@ -2630,15 +2850,13 @@ func testProbabilityRouting(t *testing.T, paymentAmt btcutil.Amount,
 	}
 }
 
-// TestEqualCostRouteSelection asserts that route probability will be used as a
+// runEqualCostRouteSelection asserts that route probability will be used as a
 // tie breaker in case the path finding probabilities are equal.
-func TestEqualCostRouteSelection(t *testing.T) {
-	t.Parallel()
-
+func runEqualCostRouteSelection(t *testing.T, useCache bool) {
 	// Set up a test graph with two possible paths to the target: via a and
 	// via b. The routing fees and probabilities are chosen such that the
 	// algorithm will first explore target->a->source (backwards search).
-	// This route has fee 6 and a penality of 4 for the 25% success
+	// This route has fee 6 and a penalty of 4 for the 25% success
 	// probability. The algorithm will then proceed with evaluating
 	// target->b->source, which has a fee of 8 and a penalty of 2 for the
 	// 50% success probability. Both routes have the same path finding cost
@@ -2659,16 +2877,16 @@ func TestEqualCostRouteSelection(t *testing.T) {
 		}, 2),
 	}
 
-	ctx := newPathFindingTestContext(t, testChannels, "source")
-	defer ctx.cleanup()
+	ctx := newPathFindingTestContext(t, useCache, testChannels, "source")
 
 	alias := ctx.testGraphInstance.aliasMap
 
 	paymentAmt := lnwire.NewMSatFromSatoshis(100)
 	target := ctx.testGraphInstance.aliasMap["target"]
 
-	ctx.restrictParams.ProbabilitySource = func(fromNode, toNode route.Vertex,
-		amt lnwire.MilliSatoshi) float64 {
+	ctx.restrictParams.ProbabilitySource = func(fromNode,
+		toNode route.Vertex, amt lnwire.MilliSatoshi,
+		capacity btcutil.Amount) float64 {
 
 		switch {
 		case fromNode == alias["source"] && toNode == alias["a"]:
@@ -2696,11 +2914,9 @@ func TestEqualCostRouteSelection(t *testing.T) {
 	}
 }
 
-// TestNoCycle tries to guide the path finding algorithm into reconstructing an
+// runNoCycle tries to guide the path finding algorithm into reconstructing an
 // endless route. It asserts that the algorithm is able to handle this properly.
-func TestNoCycle(t *testing.T) {
-	t.Parallel()
-
+func runNoCycle(t *testing.T, useCache bool) {
 	// Set up a test graph with two paths: source->a->target and
 	// source->b->c->target. The fees are setup such that, searching
 	// backwards, the algorithm will evaluate the following end of the route
@@ -2730,8 +2946,7 @@ func TestNoCycle(t *testing.T) {
 		}, 5),
 	}
 
-	ctx := newPathFindingTestContext(t, testChannels, "source")
-	defer ctx.cleanup()
+	ctx := newPathFindingTestContext(t, useCache, testChannels, "source")
 
 	const (
 		startingHeight = 100
@@ -2744,20 +2959,16 @@ func TestNoCycle(t *testing.T) {
 	// Find the best path given the restriction to only use channel 2 as the
 	// outgoing channel.
 	path, err := ctx.findPath(target, paymentAmt)
-	if err != nil {
-		t.Fatalf("unable to find path: %v", err)
-	}
+	require.NoError(t, err, "unable to find path")
 	route, err := newRoute(
 		ctx.source, path, startingHeight,
 		finalHopParams{
 			amt:       paymentAmt,
 			cltvDelta: finalHopCLTV,
 			records:   nil,
-		},
+		}, nil,
 	)
-	if err != nil {
-		t.Fatalf("unable to create path: %v", err)
-	}
+	require.NoError(t, err, "unable to create path")
 
 	if len(route.Hops) != 2 {
 		t.Fatalf("unexpected route")
@@ -2770,10 +2981,8 @@ func TestNoCycle(t *testing.T) {
 	}
 }
 
-// TestRouteToSelf tests that it is possible to find a route to the self node.
-func TestRouteToSelf(t *testing.T) {
-	t.Parallel()
-
+// runRouteToSelf tests that it is possible to find a route to the self node.
+func runRouteToSelf(t *testing.T, useCache bool) {
 	testChannels := []*testChannel{
 		symmetricTestChannel("source", "a", 100000, &testChannelPolicy{
 			Expiry:      144,
@@ -2789,8 +2998,7 @@ func TestRouteToSelf(t *testing.T) {
 		}, 3),
 	}
 
-	ctx := newPathFindingTestContext(t, testChannels, "source")
-	defer ctx.cleanup()
+	ctx := newPathFindingTestContext(t, useCache, testChannels, "source")
 
 	paymentAmt := lnwire.NewMSatFromSatoshis(100)
 	target := ctx.source
@@ -2798,9 +3006,7 @@ func TestRouteToSelf(t *testing.T) {
 	// Find the best path to self. We expect this to be source->a->source,
 	// because a charges the lowest forwarding fee.
 	path, err := ctx.findPath(target, paymentAmt)
-	if err != nil {
-		t.Fatalf("unable to find path: %v", err)
-	}
+	require.NoError(t, err, "unable to find path")
 	ctx.assertPath(path, []uint64{1, 1})
 
 	outgoingChanID := uint64(1)
@@ -2811,9 +3017,7 @@ func TestRouteToSelf(t *testing.T) {
 	// Find the best path to self given that we want to go out via channel 1
 	// and return through node b.
 	path, err = ctx.findPath(target, paymentAmt)
-	if err != nil {
-		t.Fatalf("unable to find path: %v", err)
-	}
+	require.NoError(t, err, "unable to find path")
 	ctx.assertPath(path, []uint64{1, 3, 2})
 }
 
@@ -2821,26 +3025,23 @@ type pathFindingTestContext struct {
 	t                 *testing.T
 	graph             *channeldb.ChannelGraph
 	restrictParams    RestrictParams
-	bandwidthHints    map[uint64]lnwire.MilliSatoshi
+	bandwidthHints    bandwidthHints
 	pathFindingConfig PathFindingConfig
 	testGraphInstance *testGraphInstance
 	source            route.Vertex
+	timePref          float64
 }
 
-func newPathFindingTestContext(t *testing.T, testChannels []*testChannel,
-	source string) *pathFindingTestContext {
+func newPathFindingTestContext(t *testing.T, useCache bool,
+	testChannels []*testChannel, source string) *pathFindingTestContext {
 
 	testGraphInstance, err := createTestGraphFromChannels(
-		testChannels, source,
+		t, useCache, testChannels, source,
 	)
-	if err != nil {
-		t.Fatalf("unable to create graph: %v", err)
-	}
+	require.NoError(t, err, "unable to create graph")
 
 	sourceNode, err := testGraphInstance.graph.SourceNode()
-	if err != nil {
-		t.Fatalf("unable to fetch source node: %v", err)
-	}
+	require.NoError(t, err, "unable to fetch source node")
 
 	ctx := &pathFindingTestContext{
 		t:                 t,
@@ -2849,6 +3050,7 @@ func newPathFindingTestContext(t *testing.T, testChannels []*testChannel,
 		pathFindingConfig: *testPathFindingConfig,
 		graph:             testGraphInstance.graph,
 		restrictParams:    *noRestrictions,
+		bandwidthHints:    &mockBandwidthHints{},
 	}
 
 	return ctx
@@ -2867,21 +3069,19 @@ func (c *pathFindingTestContext) aliasFromKey(pubKey route.Vertex) string {
 	return ""
 }
 
-func (c *pathFindingTestContext) cleanup() {
-	c.testGraphInstance.cleanUp()
-}
-
 func (c *pathFindingTestContext) findPath(target route.Vertex,
-	amt lnwire.MilliSatoshi) ([]*channeldb.ChannelEdgePolicy,
+	amt lnwire.MilliSatoshi) ([]*channeldb.CachedEdgePolicy,
 	error) {
 
 	return dbFindPath(
 		c.graph, nil, c.bandwidthHints, &c.restrictParams,
-		&c.pathFindingConfig, c.source, target, amt, 0,
+		&c.pathFindingConfig, c.source, target, amt, c.timePref, 0,
 	)
 }
 
-func (c *pathFindingTestContext) assertPath(path []*channeldb.ChannelEdgePolicy, expected []uint64) {
+func (c *pathFindingTestContext) assertPath(path []*channeldb.CachedEdgePolicy,
+	expected []uint64) {
+
 	if len(path) != len(expected) {
 		c.t.Fatalf("expected path of length %v, but got %v",
 			len(expected), len(path))
@@ -2898,29 +3098,219 @@ func (c *pathFindingTestContext) assertPath(path []*channeldb.ChannelEdgePolicy,
 // dbFindPath calls findPath after getting a db transaction from the database
 // graph.
 func dbFindPath(graph *channeldb.ChannelGraph,
-	additionalEdges map[route.Vertex][]*channeldb.ChannelEdgePolicy,
-	bandwidthHints map[uint64]lnwire.MilliSatoshi,
+	additionalEdges map[route.Vertex][]*channeldb.CachedEdgePolicy,
+	bandwidthHints bandwidthHints,
 	r *RestrictParams, cfg *PathFindingConfig,
-	source, target route.Vertex, amt lnwire.MilliSatoshi,
-	finalHtlcExpiry int32) ([]*channeldb.ChannelEdgePolicy, error) {
+	source, target route.Vertex, amt lnwire.MilliSatoshi, timePref float64,
+	finalHtlcExpiry int32) ([]*channeldb.CachedEdgePolicy, error) {
 
-	routingTx, err := newDbRoutingTx(graph)
+	sourceNode, err := graph.SourceNode()
 	if err != nil {
 		return nil, err
 	}
+
+	routingGraph, err := NewCachedGraph(sourceNode, graph)
+	if err != nil {
+		return nil, err
+	}
+
 	defer func() {
-		err := routingTx.close()
-		if err != nil {
+		if err := routingGraph.Close(); err != nil {
 			log.Errorf("Error closing db tx: %v", err)
 		}
 	}()
 
-	return findPath(
+	route, _, err := findPath(
 		&graphParams{
 			additionalEdges: additionalEdges,
 			bandwidthHints:  bandwidthHints,
-			graph:           routingTx,
+			graph:           routingGraph,
 		},
-		r, cfg, source, target, amt, finalHtlcExpiry,
+		r, cfg, source, target, amt, timePref, finalHtlcExpiry,
 	)
+
+	return route, err
+}
+
+// TestBlindedRouteConstruction tests creation of a blinded route with the
+// following topology:
+//
+// A -- B -- C (introduction point) - D (blinded) - E (blinded).
+func TestBlindedRouteConstruction(t *testing.T) {
+	t.Parallel()
+
+	var (
+		// We need valid pubkeys for the blinded portion of our route,
+		// so we just produce all of our pubkeys in the same way.
+		_, alicePk = btcec.PrivKeyFromBytes([]byte{1})
+		_, bobPk   = btcec.PrivKeyFromBytes([]byte{2})
+		_, carolPk = btcec.PrivKeyFromBytes([]byte{3})
+		_, davePk  = btcec.PrivKeyFromBytes([]byte{4})
+		_, evePk   = btcec.PrivKeyFromBytes([]byte{5})
+
+		_, blindingPk = btcec.PrivKeyFromBytes([]byte{9})
+
+		sourceVertex         = route.NewVertex(alicePk)
+		currentHeight uint32 = 100
+
+		metadata           = []byte{1, 2, 3}
+		carolEncryptedData = []byte{4, 5, 6}
+		daveEncryptedData  = []byte{7, 8, 9}
+		eveEncryptedData   = []byte{10, 11, 12}
+
+		blindedPath = &sphinx.BlindedPath{
+			IntroductionPoint: carolPk,
+			BlindingPoint:     blindingPk,
+			BlindedHops: []*sphinx.BlindedHopInfo{
+				{
+					// The first payload should contain
+					// carol's blinded pubkey, but we don't
+					// need it here.
+					Payload: carolEncryptedData,
+				},
+				{
+					NodePub: davePk,
+					Payload: daveEncryptedData,
+				},
+				{
+					NodePub: evePk,
+					Payload: eveEncryptedData,
+				},
+			},
+		}
+
+		// Create final hop parameters for amount = 110 and delta = 50.
+		totalAmt   lnwire.MilliSatoshi = 110
+		finalDelta uint16              = 50
+
+		finalHopParams = finalHopParams{
+			amt:         totalAmt,
+			totalAmt:    totalAmt,
+			cltvDelta:   finalDelta,
+			records:     nil,
+			paymentAddr: nil,
+			metadata:    metadata,
+		}
+
+		// Create channel edges for the unblinded portion of our
+		// route. Proportional fees are omitted for easy test
+		// calculations, but non-zero base fees ensure our fee is
+		// still accounted for. Feature vectors are left empty because
+		// we don't need them for intermediate nodes.
+		aliceBobEdge = &channeldb.CachedEdgePolicy{
+			ChannelID: 1,
+			// We won't actually use this timelock / fee (since
+			// it's the sender's outbound channel), but we include
+			// it with different values so that the test will trip
+			// up if we were to include the fee/delay.
+			TimeLockDelta: 10,
+			FeeBaseMSat:   50,
+			ToNodePubKey: func() route.Vertex {
+				return route.NewVertex(bobPk)
+			},
+			ToNodeFeatures: tlvFeatures,
+		}
+
+		bobCarolEdge = &channeldb.CachedEdgePolicy{
+			ChannelID:     2,
+			TimeLockDelta: 15,
+			FeeBaseMSat:   20,
+			ToNodePubKey: func() route.Vertex {
+				return route.NewVertex(carolPk)
+			},
+			ToNodeFeatures: tlvFeatures,
+		}
+
+		// Create edges for the blinded portion of the route with no
+		// fee values, as would be the case when we construct a route
+		// from blinded-route-generated hop hints.
+		carolDaveEdge = &channeldb.CachedEdgePolicy{
+			ToNodePubKey: func() route.Vertex {
+				return route.NewVertex(davePk)
+			},
+			ToNodeFeatures: tlvFeatures,
+		}
+
+		daveEveEdge = &channeldb.CachedEdgePolicy{
+			ToNodePubKey: func() route.Vertex {
+				return route.NewVertex(evePk)
+			},
+			ToNodeFeatures: tlvFeatures,
+		}
+
+		edges = []*channeldb.CachedEdgePolicy{
+			aliceBobEdge,
+			bobCarolEdge,
+			carolDaveEdge,
+			daveEveEdge,
+		}
+
+		// Create the individual hops that we expect in our route.
+		bobHop = &route.Hop{
+			PubKeyBytes:      route.NewVertex(bobPk),
+			ChannelID:        aliceBobEdge.ChannelID,
+			OutgoingTimeLock: 150,
+			AmtToForward:     110,
+		}
+
+		// The introduction node should not have forwarding amount or
+		// expiry, but it should include both her encrypted data and
+		// the blinding point.
+		carolHop = &route.Hop{
+			PubKeyBytes:      route.NewVertex(carolPk),
+			ChannelID:        bobCarolEdge.ChannelID,
+			OutgoingTimeLock: 0,
+			AmtToForward:     0,
+
+			// Carol's payload should have both her encrypted data
+			// and the blinded key for the blinded section of the
+			// route.
+			EncryptedData: carolEncryptedData,
+			BlindingPoint: blindingPk,
+		}
+
+		// Blinded hops should have their encrypted data included, and
+		// the final hop should have our metadata field and amount to
+		// forward / expiry.
+		daveHop = &route.Hop{
+			PubKeyBytes:      route.NewVertex(davePk),
+			OutgoingTimeLock: 0,
+			AmtToForward:     0,
+			EncryptedData:    daveEncryptedData,
+		}
+
+		eveHop = &route.Hop{
+			PubKeyBytes:      route.NewVertex(evePk),
+			OutgoingTimeLock: 150,
+			AmtToForward:     110,
+			EncryptedData:    eveEncryptedData,
+			// Eve's hop should contain fields intended for the
+			// final hop, like metadata.
+			Metadata: metadata,
+		}
+
+		expectedRoute = &route.Route{
+			SourcePubKey: sourceVertex,
+			Hops: []*route.Hop{
+				bobHop,
+				carolHop,
+				daveHop,
+				eveHop,
+			},
+			// Current height = 100
+			// + 50 (blinded portion)
+			// + 15 (Bob / Carol)
+			TotalTimeLock: 165,
+			// Final amount = 110
+			// + 20 (Bob / Carol base fee)
+			TotalAmount: 130,
+		}
+	)
+
+	route, err := newRoute(
+		sourceVertex, edges, currentHeight, finalHopParams,
+		blindedPath,
+	)
+	require.NoError(t, err)
+	require.Equal(t, expectedRoute, route)
 }

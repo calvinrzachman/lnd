@@ -5,12 +5,13 @@ import (
 	"io"
 	"sync"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/channeldb/models"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/labels"
 	"github.com/lightningnetwork/lnd/lnwallet"
@@ -67,6 +68,8 @@ type htlcSuccessResolver struct {
 	reportLock sync.Mutex
 
 	contractResolverKit
+
+	htlcLeaseResolver
 }
 
 // newSuccessResolver instanties a new htlc success resolver.
@@ -292,9 +295,12 @@ func (h *htlcSuccessResolver) broadcastReSignedSuccessTx() (
 		}
 	}
 
-	// The HTLC success tx has a CSV lock that we must wait for.
-	waitHeight := uint32(commitSpend.SpendingHeight) +
-		h.htlcResolution.CsvDelay - 1
+	// The HTLC success tx has a CSV lock that we must wait for, and if
+	// this is a lease enforced channel and we're the imitator, we may need
+	// to wait for longer.
+	waitHeight := h.deriveWaitHeight(
+		h.htlcResolution.CsvDelay, commitSpend,
+	)
 
 	// Now that the sweeper has broadcasted the second-level transaction,
 	// it has confirmed, and we have checkpointed our state, we'll sweep
@@ -305,8 +311,14 @@ func (h *htlcSuccessResolver) broadcastReSignedSuccessTx() (
 	h.currentReport.MaturityHeight = waitHeight
 	h.reportLock.Unlock()
 
-	log.Infof("%T(%x): waiting for CSV lock to expire at height %v",
-		h, h.htlc.RHash[:], waitHeight)
+	if h.hasCLTV() {
+		log.Infof("%T(%x): waiting for CSV and CLTV lock to "+
+			"expire at height %v", h, h.htlc.RHash[:],
+			waitHeight)
+	} else {
+		log.Infof("%T(%x): waiting for CSV lock to expire at "+
+			"height %v", h, h.htlc.RHash[:], waitHeight)
+	}
 
 	err := waitForHeight(waitHeight, h.Notifier, h.quit)
 	if err != nil {
@@ -327,10 +339,14 @@ func (h *htlcSuccessResolver) broadcastReSignedSuccessTx() (
 	log.Infof("%T(%x): CSV lock expired, offering second-layer "+
 		"output to sweeper: %v", h, h.htlc.RHash[:], op)
 
-	inp := input.NewCsvInput(
+	// Let the sweeper sweep the second-level output now that the
+	// CSV/CLTV locks have expired.
+	inp := h.makeSweepInput(
 		op, input.HtlcAcceptedSuccessSecondLevel,
-		&h.htlcResolution.SweepSignDesc, h.broadcastHeight,
-		h.htlcResolution.CsvDelay,
+		input.LeaseHtlcAcceptedSuccessSecondLevel,
+		&h.htlcResolution.SweepSignDesc,
+		h.htlcResolution.CsvDelay, h.broadcastHeight,
+		h.htlc.RHash,
 	)
 	_, err = h.Sweeper.SweepInput(
 		inp,
@@ -454,6 +470,26 @@ func (h *htlcSuccessResolver) resolveRemoteCommitOutput() (
 func (h *htlcSuccessResolver) checkpointClaim(spendTx *chainhash.Hash,
 	outcome channeldb.ResolverOutcome) error {
 
+	// Mark the htlc as final settled.
+	err := h.ChainArbitratorConfig.PutFinalHtlcOutcome(
+		h.ChannelArbitratorConfig.ShortChanID, h.htlc.HtlcIndex, true,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Send notification.
+	h.ChainArbitratorConfig.HtlcNotifier.NotifyFinalHtlcEvent(
+		models.CircuitKey{
+			ChanID: h.ShortChanID,
+			HtlcID: h.htlc.HtlcIndex,
+		},
+		channeldb.FinalHtlcInfo{
+			Settled:  true,
+			Offchain: false,
+		},
+	)
+
 	// Create a resolver report for claiming of the htlc itself.
 	amt := btcutil.Amount(h.htlcResolution.SweepSignDesc.Output.Value)
 	reports := []*channeldb.ResolverReport{
@@ -515,8 +551,8 @@ func (h *htlcSuccessResolver) report() *ContractReport {
 
 	h.reportLock.Lock()
 	defer h.reportLock.Unlock()
-	copy := h.currentReport
-	return &copy
+	cpy := h.currentReport
+	return &cpy
 }
 
 func (h *htlcSuccessResolver) initReport() {

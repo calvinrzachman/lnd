@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"image/color"
 	"math"
-	"math/big"
 	"math/rand"
 	"net"
 	"reflect"
@@ -14,24 +13,28 @@ import (
 	"testing/quick"
 	"time"
 
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/davecgh/go-spew/spew"
 	"github.com/lightningnetwork/lnd/tor"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var (
 	shaHash1Bytes, _ = hex.DecodeString("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
 	shaHash1, _      = chainhash.NewHash(shaHash1Bytes)
 	outpoint1        = wire.NewOutPoint(shaHash1, 0)
-	testSig          = &btcec.Signature{
-		R: new(big.Int),
-		S: new(big.Int),
-	}
-	_, _ = testSig.R.SetString("63724406601629180062774974542967536251589935445068131219452686511677818569431", 10)
-	_, _ = testSig.S.SetString("18801056069249825825291287104931333862866033135609736119018462340006816851118", 10)
+
+	testRBytes, _ = hex.DecodeString("8ce2bc69281ce27da07e6683571319d18e949ddfa2965fb6caa1bf0314f882d7")
+	testSBytes, _ = hex.DecodeString("299105481d63e0f4bc2a88121167221b6700d72a0ead154c03be696a292d24ae")
+	testRScalar   = new(btcec.ModNScalar)
+	testSScalar   = new(btcec.ModNScalar)
+	_             = testRScalar.SetByteSlice(testRBytes)
+	_             = testSScalar.SetByteSlice(testSBytes)
+	testSig       = ecdsa.NewSignature(testRScalar, testSScalar)
 )
 
 const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -46,7 +49,7 @@ func randAlias(r *rand.Rand) NodeAlias {
 }
 
 func randPubKey() (*btcec.PublicKey, error) {
-	priv, err := btcec.NewPrivateKey(btcec.S256())
+	priv, err := btcec.NewPrivateKey()
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +60,7 @@ func randPubKey() (*btcec.PublicKey, error) {
 func randRawKey() ([33]byte, error) {
 	var n [33]byte
 
-	priv, err := btcec.NewPrivateKey(btcec.S256())
+	priv, err := btcec.NewPrivateKey()
 	if err != nil {
 		return n, err
 	}
@@ -156,6 +159,22 @@ func randV3OnionAddr(r *rand.Rand) (*tor.OnionAddr, error) {
 	return &tor.OnionAddr{OnionService: onionService, Port: addrPort}, nil
 }
 
+func randOpaqueAddr(r *rand.Rand) (*OpaqueAddrs, error) {
+	payloadLen := r.Int63n(64) + 1
+	payload := make([]byte, payloadLen)
+
+	// The first byte is the address type. So set it to one that we
+	// definitely don't know about.
+	payload[0] = math.MaxUint8
+
+	// Generate random bytes for the rest of the payload.
+	if _, err := r.Read(payload[1:]); err != nil {
+		return nil, err
+	}
+
+	return &OpaqueAddrs{Payload: payload}, nil
+}
+
 func randAddrs(r *rand.Rand) ([]net.Addr, error) {
 	tcp4Addr, err := randTCP4Addr(r)
 	if err != nil {
@@ -177,7 +196,14 @@ func randAddrs(r *rand.Rand) ([]net.Addr, error) {
 		return nil, err
 	}
 
-	return []net.Addr{tcp4Addr, tcp6Addr, v2OnionAddr, v3OnionAddr}, nil
+	opaqueAddrs, err := randOpaqueAddr(r)
+	if err != nil {
+		return nil, err
+	}
+
+	return []net.Addr{
+		tcp4Addr, tcp6Addr, v2OnionAddr, v3OnionAddr, opaqueAddrs,
+	}, nil
 }
 
 // TestChanUpdateChanFlags ensures that converting the ChanUpdateChanFlags and
@@ -224,6 +250,45 @@ func TestChanUpdateChanFlags(t *testing.T) {
 	}
 }
 
+// TestDecodeUnknownAddressType shows that an unknown address type is currently
+// incorrectly dealt with.
+func TestDecodeUnknownAddressType(t *testing.T) {
+	// Add a normal, clearnet address.
+	tcpAddr := &net.TCPAddr{
+		IP:   net.IP{127, 0, 0, 1},
+		Port: 8080,
+	}
+
+	// Add an onion address.
+	onionAddr := &tor.OnionAddr{
+		OnionService: "abcdefghijklmnop.onion",
+		Port:         9065,
+	}
+
+	// Now add an address with an unknown type.
+	var newAddrType addressType = math.MaxUint8
+	data := make([]byte, 0, 16)
+	data = append(data, uint8(newAddrType))
+	opaqueAddrs := &OpaqueAddrs{
+		Payload: data,
+	}
+
+	buffer := bytes.NewBuffer(make([]byte, 0, MaxMsgBody))
+	err := WriteNetAddrs(
+		buffer, []net.Addr{tcpAddr, onionAddr, opaqueAddrs},
+	)
+	require.NoError(t, err)
+
+	// Now we attempt to parse the bytes and assert that we get an error.
+	var addrs []net.Addr
+	err = ReadElement(buffer, &addrs)
+	require.NoError(t, err)
+	require.Len(t, addrs, 3)
+	require.Equal(t, tcpAddr.String(), addrs[0].String())
+	require.Equal(t, onionAddr.String(), addrs[1].String())
+	require.Equal(t, hex.EncodeToString(data), addrs[2].String())
+}
+
 func TestMaxOutPointIndex(t *testing.T) {
 	t.Parallel()
 
@@ -232,7 +297,7 @@ func TestMaxOutPointIndex(t *testing.T) {
 	}
 
 	var b bytes.Buffer
-	if err := WriteElement(&b, op); err == nil {
+	if err := WriteOutPoint(&b, op); err == nil {
 		t.Fatalf("write of outPoint should fail, index exceeds 16-bits")
 	}
 }
@@ -240,7 +305,7 @@ func TestMaxOutPointIndex(t *testing.T) {
 func TestEmptyMessageUnknownType(t *testing.T) {
 	t.Parallel()
 
-	fakeType := MessageType(math.MaxUint16)
+	fakeType := CustomTypeStart - 1
 	if _, err := makeEmptyMessage(fakeType); err == nil {
 		t.Fatalf("should not be able to make an empty message of an " +
 			"unknown type")
@@ -250,9 +315,6 @@ func TestEmptyMessageUnknownType(t *testing.T) {
 // TestLightningWireProtocol uses the testing/quick package to create a series
 // of fuzz tests to attempt to break a primary scenario which is implemented as
 // property based testing scenario.
-//
-// Debug help: when the message payload can reach a size larger than the return
-// value of MaxPayloadLength, the test can panic without a helpful message.
 func TestLightningWireProtocol(t *testing.T) {
 	t.Parallel()
 
@@ -274,9 +336,9 @@ func TestLightningWireProtocol(t *testing.T) {
 		// the 2 bytes for the message type) is _below_ the specified
 		// max payload size for this message.
 		payloadLen := uint32(b.Len()) - 2
-		if payloadLen > msg.MaxPayloadLength(0) {
+		if payloadLen > MaxMsgBody {
 			t.Fatalf("msg payload constraint violated: %v > %v",
-				payloadLen, msg.MaxPayloadLength(0))
+				payloadLen, MaxMsgBody)
 			return false
 		}
 
@@ -287,9 +349,7 @@ func TestLightningWireProtocol(t *testing.T) {
 			t.Fatalf("unable to read msg: %v", err)
 			return false
 		}
-		if !reflect.DeepEqual(msg, newMsg) {
-			t.Fatalf("messages don't match after re-encoding: %v "+
-				"vs %v", spew.Sdump(msg), spew.Sdump(newMsg))
+		if !assert.Equalf(t, msg, newMsg, "message mismatch") {
 			return false
 		}
 
@@ -365,15 +425,26 @@ func TestLightningWireProtocol(t *testing.T) {
 				return
 			}
 
-			// 1/2 chance empty upfront shutdown script.
+			// 1/2 chance empty TLV records.
 			if r.Intn(2) == 0 {
 				req.UpfrontShutdownScript, err = randDeliveryAddress(r)
 				if err != nil {
 					t.Fatalf("unable to generate delivery address: %v", err)
 					return
 				}
+
+				req.ChannelType = new(ChannelType)
+				*req.ChannelType = ChannelType(*randRawFeatureVector(r))
+
+				req.LeaseExpiry = new(LeaseExpiry)
+				*req.LeaseExpiry = LeaseExpiry(1337)
 			} else {
 				req.UpfrontShutdownScript = []byte{}
+			}
+
+			// 1/2 chance additional TLV data.
+			if r.Intn(2) == 0 {
+				req.ExtraData = []byte{0xfd, 0x00, 0xff, 0x00}
 			}
 
 			v[0] = reflect.ValueOf(req)
@@ -426,21 +497,34 @@ func TestLightningWireProtocol(t *testing.T) {
 				return
 			}
 
-			// 1/2 chance empty upfront shutdown script.
+			// 1/2 chance empty TLV records.
 			if r.Intn(2) == 0 {
 				req.UpfrontShutdownScript, err = randDeliveryAddress(r)
 				if err != nil {
 					t.Fatalf("unable to generate delivery address: %v", err)
 					return
 				}
+
+				req.ChannelType = new(ChannelType)
+				*req.ChannelType = ChannelType(*randRawFeatureVector(r))
+
+				req.LeaseExpiry = new(LeaseExpiry)
+				*req.LeaseExpiry = LeaseExpiry(1337)
 			} else {
 				req.UpfrontShutdownScript = []byte{}
+			}
+
+			// 1/2 chance additional TLV data.
+			if r.Intn(2) == 0 {
+				req.ExtraData = []byte{0xfd, 0x00, 0xff, 0x00}
 			}
 
 			v[0] = reflect.ValueOf(req)
 		},
 		MsgFundingCreated: func(v []reflect.Value, r *rand.Rand) {
-			req := FundingCreated{}
+			req := FundingCreated{
+				ExtraData: make([]byte, 0),
+			}
 
 			if _, err := r.Read(req.PendingChannelID[:]); err != nil {
 				t.Fatalf("unable to generate pending chan id: %v", err)
@@ -471,7 +555,8 @@ func TestLightningWireProtocol(t *testing.T) {
 			}
 
 			req := FundingSigned{
-				ChanID: ChannelID(c),
+				ChanID:    ChannelID(c),
+				ExtraData: make([]byte, 0),
 			}
 			req.CommitSig, err = NewSigFromSignature(testSig)
 			if err != nil {
@@ -502,6 +587,7 @@ func TestLightningWireProtocol(t *testing.T) {
 		MsgClosingSigned: func(v []reflect.Value, r *rand.Rand) {
 			req := ClosingSigned{
 				FeeSatoshis: btcutil.Amount(r.Int63()),
+				ExtraData:   make([]byte, 0),
 			}
 			var err error
 			req.Signature, err = NewSigFromSignature(testSig)
@@ -570,8 +656,9 @@ func TestLightningWireProtocol(t *testing.T) {
 		MsgChannelAnnouncement: func(v []reflect.Value, r *rand.Rand) {
 			var err error
 			req := ChannelAnnouncement{
-				ShortChannelID: NewShortChanIDFromInt(uint64(r.Int63())),
-				Features:       randRawFeatureVector(r),
+				ShortChannelID:  NewShortChanIDFromInt(uint64(r.Int63())),
+				Features:        randRawFeatureVector(r),
+				ExtraOpaqueData: make([]byte, 0),
 			}
 			req.NodeSig1, err = NewSigFromSignature(testSig)
 			if err != nil {
@@ -643,6 +730,7 @@ func TestLightningWireProtocol(t *testing.T) {
 					G: uint8(r.Int31()),
 					B: uint8(r.Int31()),
 				},
+				ExtraOpaqueData: make([]byte, 0),
 			}
 			req.Signature, err = NewSigFromSignature(testSig)
 			if err != nil {
@@ -698,6 +786,7 @@ func TestLightningWireProtocol(t *testing.T) {
 				HtlcMaximumMsat: maxHtlc,
 				BaseFee:         uint32(r.Int31()),
 				FeeRate:         uint32(r.Int31()),
+				ExtraOpaqueData: make([]byte, 0),
 			}
 			req.Signature, err = NewSigFromSignature(testSig)
 			if err != nil {
@@ -726,7 +815,8 @@ func TestLightningWireProtocol(t *testing.T) {
 		MsgAnnounceSignatures: func(v []reflect.Value, r *rand.Rand) {
 			var err error
 			req := AnnounceSignatures{
-				ShortChannelID: NewShortChanIDFromInt(uint64(r.Int63())),
+				ShortChannelID:  NewShortChanIDFromInt(uint64(r.Int63())),
+				ExtraOpaqueData: make([]byte, 0),
 			}
 
 			req.NodeSignature, err = NewSigFromSignature(testSig)
@@ -763,6 +853,7 @@ func TestLightningWireProtocol(t *testing.T) {
 			req := ChannelReestablish{
 				NextLocalCommitHeight:  uint64(r.Int63()),
 				RemoteCommitTailHeight: uint64(r.Int63()),
+				ExtraData:              make([]byte, 0),
 			}
 
 			// With a 50/50 probability, we'll include the
@@ -785,7 +876,9 @@ func TestLightningWireProtocol(t *testing.T) {
 			v[0] = reflect.ValueOf(req)
 		},
 		MsgQueryShortChanIDs: func(v []reflect.Value, r *rand.Rand) {
-			req := QueryShortChanIDs{}
+			req := QueryShortChanIDs{
+				ExtraData: make([]byte, 0),
+			}
 
 			// With a 50/50 change, we'll either use zlib encoding,
 			// or regular encoding.
@@ -810,10 +903,9 @@ func TestLightningWireProtocol(t *testing.T) {
 		},
 		MsgReplyChannelRange: func(v []reflect.Value, r *rand.Rand) {
 			req := ReplyChannelRange{
-				QueryChannelRange: QueryChannelRange{
-					FirstBlockHeight: uint32(r.Int31()),
-					NumBlocks:        uint32(r.Int31()),
-				},
+				FirstBlockHeight: uint32(r.Int31()),
+				NumBlocks:        uint32(r.Int31()),
+				ExtraData:        make([]byte, 0),
 			}
 
 			if _, err := rand.Read(req.ChainHash[:]); err != nil {
@@ -839,6 +931,37 @@ func TestLightningWireProtocol(t *testing.T) {
 
 			v[0] = reflect.ValueOf(req)
 		},
+		MsgPing: func(v []reflect.Value, r *rand.Rand) {
+			// We use a special message generator here to ensure we
+			// don't generate ping messages that are too large,
+			// which'll cause the test to fail.
+			//
+			// We'll allow the test to generate padding bytes up to
+			// the max message limit, factoring in the 2 bytes for
+			// the num pong bytes.
+			paddingBytes := make([]byte, r.Intn(MaxMsgBody-1))
+			req := Ping{
+				NumPongBytes: uint16(r.Intn(MaxPongBytes + 1)),
+				PaddingBytes: paddingBytes,
+			}
+
+			v[0] = reflect.ValueOf(req)
+		},
+		MsgUpdateAddHTLC: func(v []reflect.Value, r *rand.Rand) {
+			req := NewUpdateAddHTLC()
+
+			pubkey, err := randPubKey()
+			if err != nil {
+				t.Fatalf("unable to generate key: %v", err)
+				return
+			}
+
+			req.BlindingPoint = BlindingPoint{
+				PublicKey: pubkey,
+			}
+
+			v[0] = reflect.ValueOf(*req)
+		},
 	}
 
 	// With the above types defined, we'll now generate a slice of
@@ -853,6 +976,12 @@ func TestLightningWireProtocol(t *testing.T) {
 		{
 			msgType: MsgInit,
 			scenario: func(m Init) bool {
+				return mainScenario(&m)
+			},
+		},
+		{
+			msgType: MsgWarning,
+			scenario: func(m Warning) bool {
 				return mainScenario(&m)
 			},
 		},

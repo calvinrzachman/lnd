@@ -89,7 +89,6 @@ func TestFeatureVectorSetUnset(t *testing.T) {
 				t.Errorf("Expectation failed in case %d, bit %d", i, j)
 				break
 			}
-
 		}
 
 		for _, bit := range test.bits {
@@ -352,4 +351,48 @@ func TestFeatures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRawFeatureVectorOnlyContains(t *testing.T) {
+	t.Parallel()
+
+	features := []FeatureBit{
+		StaticRemoteKeyOptional,
+		AnchorsZeroFeeHtlcTxOptional,
+		ExplicitChannelTypeRequired,
+	}
+	fv := NewRawFeatureVector(features...)
+	require.True(t, fv.OnlyContains(features...))
+	require.False(t, fv.OnlyContains(features[:1]...))
+}
+
+func TestEqualRawFeatureVectors(t *testing.T) {
+	t.Parallel()
+
+	a := NewRawFeatureVector(
+		StaticRemoteKeyOptional,
+		AnchorsZeroFeeHtlcTxOptional,
+		ExplicitChannelTypeRequired,
+	)
+	b := a.Clone()
+	require.True(t, a.Equals(b))
+
+	b.Unset(ExplicitChannelTypeRequired)
+	require.False(t, a.Equals(b))
+
+	b.Set(ExplicitChannelTypeOptional)
+	require.False(t, a.Equals(b))
+}
+
+func TestIsEmptyFeatureVector(t *testing.T) {
+	t.Parallel()
+
+	fv := NewRawFeatureVector()
+	require.True(t, fv.IsEmpty())
+
+	fv.Set(StaticRemoteKeyOptional)
+	require.False(t, fv.IsEmpty())
+
+	fv.Unset(StaticRemoteKeyOptional)
+	require.True(t, fv.IsEmpty())
 }

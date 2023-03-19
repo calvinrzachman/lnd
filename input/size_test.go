@@ -1,18 +1,20 @@
 package input_test
 
 import (
-	"math/big"
 	"testing"
 
 	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-
+	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/keychain"
+	"github.com/lightningnetwork/lnd/lnwallet"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -23,6 +25,8 @@ const (
 	// maxDERSignatureSize is the largest possible DER-encoded signature
 	// without the trailing sighash flag.
 	maxDERSignatureSize = 72
+
+	testAmt = btcutil.MaxSatoshi
 )
 
 var (
@@ -32,14 +36,16 @@ var (
 	testPreimage = make([]byte, 32)
 
 	// testPubkey is a pubkey used in script size calculation.
-	testPubkey = &btcec.PublicKey{
-		X: &big.Int{},
-		Y: &big.Int{},
-	}
+	testPubkey = &btcec.PublicKey{}
 
-	testPrivkey, _ = btcec.PrivKeyFromBytes(btcec.S256(), make([]byte, 32))
+	testPrivkey, _ = btcec.PrivKeyFromBytes(make([]byte, 32))
 
 	testTx = wire.NewMsgTx(2)
+
+	testOutPoint = wire.OutPoint{
+		Hash:  chainhash.Hash{},
+		Index: 1,
+	}
 )
 
 // TestTxWeightEstimator tests that transaction weight estimates are calculated
@@ -50,42 +56,26 @@ func TestTxWeightEstimator(t *testing.T) {
 
 	p2pkhAddr, err := btcutil.NewAddressPubKeyHash(
 		make([]byte, 20), netParams)
-	if err != nil {
-		t.Fatalf("Failed to generate address: %v", err)
-	}
+	require.NoError(t, err, "Failed to generate address")
 	p2pkhScript, err := txscript.PayToAddrScript(p2pkhAddr)
-	if err != nil {
-		t.Fatalf("Failed to generate scriptPubKey: %v", err)
-	}
+	require.NoError(t, err, "Failed to generate scriptPubKey")
 
 	p2wkhAddr, err := btcutil.NewAddressWitnessPubKeyHash(
 		make([]byte, 20), netParams)
-	if err != nil {
-		t.Fatalf("Failed to generate address: %v", err)
-	}
+	require.NoError(t, err, "Failed to generate address")
 	p2wkhScript, err := txscript.PayToAddrScript(p2wkhAddr)
-	if err != nil {
-		t.Fatalf("Failed to generate scriptPubKey: %v", err)
-	}
+	require.NoError(t, err, "Failed to generate scriptPubKey")
 
 	p2wshAddr, err := btcutil.NewAddressWitnessScriptHash(
 		make([]byte, 32), netParams)
-	if err != nil {
-		t.Fatalf("Failed to generate address: %v", err)
-	}
+	require.NoError(t, err, "Failed to generate address")
 	p2wshScript, err := txscript.PayToAddrScript(p2wshAddr)
-	if err != nil {
-		t.Fatalf("Failed to generate scriptPubKey: %v", err)
-	}
+	require.NoError(t, err, "Failed to generate scriptPubKey")
 
 	p2shAddr, err := btcutil.NewAddressScriptHash([]byte{0}, netParams)
-	if err != nil {
-		t.Fatalf("Failed to generate address: %v", err)
-	}
+	require.NoError(t, err, "Failed to generate address")
 	p2shScript, err := txscript.PayToAddrScript(p2shAddr)
-	if err != nil {
-		t.Fatalf("Failed to generate scriptPubKey: %v", err)
-	}
+	require.NoError(t, err, "Failed to generate scriptPubKey")
 
 	testCases := []struct {
 		numP2PKHInputs       int
@@ -485,7 +475,7 @@ var witnessSizeTests = []witnessSizeTest{
 	},
 	{
 		name:    "offered htlc revoke",
-		expSize: input.OfferedHtlcPenaltyWitnessSize - 3,
+		expSize: input.OfferedHtlcPenaltyWitnessSize,
 		genWitness: func(t *testing.T) wire.TxWitness {
 			witScript, err := input.SenderHTLCScript(
 				testPubkey, testPubkey, testPubkey,
@@ -515,7 +505,7 @@ var witnessSizeTests = []witnessSizeTest{
 	},
 	{
 		name:    "offered htlc revoke confirmed",
-		expSize: input.OfferedHtlcPenaltyWitnessSize,
+		expSize: input.OfferedHtlcPenaltyWitnessSizeConfirmed,
 		genWitness: func(t *testing.T) wire.TxWitness {
 			hash := make([]byte, 20)
 
@@ -547,7 +537,7 @@ var witnessSizeTests = []witnessSizeTest{
 	},
 	{
 		name:    "offered htlc timeout",
-		expSize: input.OfferedHtlcTimeoutWitnessSize - 3,
+		expSize: input.OfferedHtlcTimeoutWitnessSize,
 		genWitness: func(t *testing.T) wire.TxWitness {
 			witScript, err := input.SenderHTLCScript(
 				testPubkey, testPubkey, testPubkey,
@@ -574,7 +564,7 @@ var witnessSizeTests = []witnessSizeTest{
 	},
 	{
 		name:    "offered htlc timeout confirmed",
-		expSize: input.OfferedHtlcTimeoutWitnessSize,
+		expSize: input.OfferedHtlcTimeoutWitnessSizeConfirmed,
 		genWitness: func(t *testing.T) wire.TxWitness {
 			witScript, err := input.SenderHTLCScript(
 				testPubkey, testPubkey, testPubkey,
@@ -601,7 +591,7 @@ var witnessSizeTests = []witnessSizeTest{
 	},
 	{
 		name:    "offered htlc success",
-		expSize: input.OfferedHtlcSuccessWitnessSize - 3,
+		expSize: input.OfferedHtlcSuccessWitnessSize,
 		genWitness: func(t *testing.T) wire.TxWitness {
 			witScript, err := input.SenderHTLCScript(
 				testPubkey, testPubkey, testPubkey,
@@ -627,7 +617,7 @@ var witnessSizeTests = []witnessSizeTest{
 	},
 	{
 		name:    "offered htlc success confirmed",
-		expSize: input.OfferedHtlcSuccessWitnessSize,
+		expSize: input.OfferedHtlcSuccessWitnessSizeConfirmed,
 		genWitness: func(t *testing.T) wire.TxWitness {
 			witScript, err := input.SenderHTLCScript(
 				testPubkey, testPubkey, testPubkey,
@@ -653,7 +643,7 @@ var witnessSizeTests = []witnessSizeTest{
 	},
 	{
 		name:    "accepted htlc revoke",
-		expSize: input.AcceptedHtlcPenaltyWitnessSize - 3,
+		expSize: input.AcceptedHtlcPenaltyWitnessSize,
 		genWitness: func(t *testing.T) wire.TxWitness {
 			witScript, err := input.ReceiverHTLCScript(
 				testCLTVExpiry, testPubkey, testPubkey,
@@ -683,7 +673,7 @@ var witnessSizeTests = []witnessSizeTest{
 	},
 	{
 		name:    "accepted htlc revoke confirmed",
-		expSize: input.AcceptedHtlcPenaltyWitnessSize,
+		expSize: input.AcceptedHtlcPenaltyWitnessSizeConfirmed,
 		genWitness: func(t *testing.T) wire.TxWitness {
 			witScript, err := input.ReceiverHTLCScript(
 				testCLTVExpiry, testPubkey, testPubkey,
@@ -713,7 +703,7 @@ var witnessSizeTests = []witnessSizeTest{
 	},
 	{
 		name:    "accepted htlc timeout",
-		expSize: input.AcceptedHtlcTimeoutWitnessSize - 3,
+		expSize: input.AcceptedHtlcTimeoutWitnessSize,
 		genWitness: func(t *testing.T) wire.TxWitness {
 
 			witScript, err := input.ReceiverHTLCScript(
@@ -741,7 +731,7 @@ var witnessSizeTests = []witnessSizeTest{
 	},
 	{
 		name:    "accepted htlc timeout confirmed",
-		expSize: input.AcceptedHtlcTimeoutWitnessSize,
+		expSize: input.AcceptedHtlcTimeoutWitnessSizeConfirmed,
 		genWitness: func(t *testing.T) wire.TxWitness {
 			witScript, err := input.ReceiverHTLCScript(
 				testCLTVExpiry, testPubkey, testPubkey,
@@ -768,7 +758,7 @@ var witnessSizeTests = []witnessSizeTest{
 	},
 	{
 		name:    "accepted htlc success",
-		expSize: input.AcceptedHtlcSuccessWitnessSize - 3,
+		expSize: input.AcceptedHtlcSuccessWitnessSize,
 		genWitness: func(t *testing.T) wire.TxWitness {
 			witScript, err := input.ReceiverHTLCScript(
 				testCLTVExpiry, testPubkey, testPubkey,
@@ -798,7 +788,7 @@ var witnessSizeTests = []witnessSizeTest{
 	},
 	{
 		name:    "accepted htlc success confirmed",
-		expSize: input.AcceptedHtlcSuccessWitnessSize,
+		expSize: input.AcceptedHtlcSuccessWitnessSizeConfirmed,
 		genWitness: func(t *testing.T) wire.TxWitness {
 			witScript, err := input.ReceiverHTLCScript(
 				testCLTVExpiry, testPubkey, testPubkey,
@@ -841,6 +831,160 @@ func TestWitnessSizes(t *testing.T) {
 			if size != test.expSize {
 				t.Fatalf("size mismatch, want: %v, got: %v",
 					test.expSize, size)
+			}
+		})
+	}
+}
+
+// genTimeoutTx creates a signed HTLC second level timeout tx.
+func genTimeoutTx(chanType channeldb.ChannelType) (*wire.MsgTx, error) {
+	// Create the unsigned timeout tx.
+	timeoutTx, err := lnwallet.CreateHtlcTimeoutTx(
+		chanType, false, testOutPoint, testAmt, testCLTVExpiry,
+		testCSVDelay, 0, testPubkey, testPubkey,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// In order to sign the transcation, generate the script for the output
+	// it spends.
+	witScript, err := input.SenderHTLCScript(
+		testPubkey, testPubkey, testPubkey, testHash160,
+		chanType.HasAnchors(),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	signDesc := &input.SignDescriptor{
+		WitnessScript: witScript,
+		KeyDesc: keychain.KeyDescriptor{
+			PubKey: testPubkey,
+		},
+	}
+
+	// Sign the timeout tx and add the witness.
+	sigHashType := lnwallet.HtlcSigHashType(chanType)
+	timeoutWitness, err := input.SenderHtlcSpendTimeout(
+		&maxDERSignature{}, sigHashType, &dummySigner{},
+		signDesc, timeoutTx,
+	)
+	if err != nil {
+		return nil, err
+	}
+	timeoutTx.TxIn[0].Witness = timeoutWitness
+
+	return timeoutTx, nil
+}
+
+// genSuccessTx creates a signed HTLC second level success tx.
+func genSuccessTx(chanType channeldb.ChannelType) (*wire.MsgTx, error) {
+	// Create the unisgned success tx.
+	successTx, err := lnwallet.CreateHtlcSuccessTx(
+		chanType, false, testOutPoint, testAmt, testCSVDelay, 0,
+		testPubkey, testPubkey,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// In order to sign the transcation, generate the script for the output
+	// it spends.
+	witScript, err := input.ReceiverHTLCScript(
+		testCLTVExpiry, testPubkey, testPubkey,
+		testPubkey, testHash160, chanType.HasAnchors(),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	signDesc := &input.SignDescriptor{
+		WitnessScript: witScript,
+		KeyDesc: keychain.KeyDescriptor{
+			PubKey: testPubkey,
+		},
+	}
+
+	// Sign the success tx and add the witness.
+	sigHashType := lnwallet.HtlcSigHashType(channeldb.SingleFunderBit)
+	successWitness, err := input.ReceiverHtlcSpendRedeem(
+		&maxDERSignature{}, sigHashType, testPreimage,
+		&dummySigner{}, signDesc, successTx,
+	)
+	if err != nil {
+		return nil, err
+	}
+	successTx.TxIn[0].Witness = successWitness
+
+	return successTx, nil
+}
+
+type txSizeTest struct {
+	name      string
+	expWeight int64
+	genTx     func(t *testing.T) *wire.MsgTx
+}
+
+var txSizeTests = []txSizeTest{
+	{
+		name:      "htlc timeout regular ",
+		expWeight: input.HtlcTimeoutWeight,
+		genTx: func(t *testing.T) *wire.MsgTx {
+			tx, err := genTimeoutTx(channeldb.SingleFunderBit)
+			require.NoError(t, err)
+
+			return tx
+		},
+	},
+	{
+		name:      "htlc timeout confirmed",
+		expWeight: input.HtlcTimeoutWeightConfirmed,
+		genTx: func(t *testing.T) *wire.MsgTx {
+			tx, err := genTimeoutTx(channeldb.AnchorOutputsBit)
+			require.NoError(t, err)
+
+			return tx
+		},
+	},
+
+	{
+		name: "htlc success regular",
+		// The weight estimate from the spec is off by one, but it's
+		// okay since we overestimate the weight.
+		expWeight: input.HtlcSuccessWeight - 1,
+		genTx: func(t *testing.T) *wire.MsgTx {
+			tx, err := genSuccessTx(channeldb.SingleFunderBit)
+			require.NoError(t, err)
+
+			return tx
+		},
+	},
+	{
+		name: "htlc success confirmed",
+		// The weight estimate from the spec is off by one, but it's
+		// okay since we overestimate the weight.
+		expWeight: input.HtlcSuccessWeightConfirmed - 1,
+		genTx: func(t *testing.T) *wire.MsgTx {
+			tx, err := genSuccessTx(channeldb.AnchorOutputsBit)
+			require.NoError(t, err)
+
+			return tx
+		},
+	},
+}
+
+// TestWitnessSizes asserts the correctness of our magic tx size constants.
+func TestTxSizes(t *testing.T) {
+	for _, test := range txSizeTests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			tx := test.genTx(t)
+
+			weight := blockchain.GetTransactionWeight(btcutil.NewTx(tx))
+			if weight != test.expWeight {
+				t.Fatalf("size mismatch, want: %v, got: %v",
+					test.expWeight, weight)
 			}
 		})
 	}

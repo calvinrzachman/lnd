@@ -1,3 +1,4 @@
+//go:build walletrpc
 // +build walletrpc
 
 package walletrpc
@@ -9,6 +10,13 @@ import (
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 	"github.com/lightningnetwork/lnd/macaroons"
 	"github.com/lightningnetwork/lnd/sweep"
+)
+
+const (
+	// SubServerName is the name of the sub rpc server. We'll use this name
+	// to register ourselves, and we also require that the main
+	// SubServerConfigDispatcher instance recognize as the name of our.
+	SubServerName = "WalletKitRPC"
 )
 
 // Config is the primary configuration struct for the WalletKit RPC server. It
@@ -59,4 +67,8 @@ type Config struct {
 
 	// ChainParams are the parameters of the wallet's backing chain.
 	ChainParams *chaincfg.Params
+
+	// CurrentNumAnchorChans returns the current number of non-private
+	// anchor channels the wallet should be ready to fee bump if needed.
+	CurrentNumAnchorChans func() (int, error)
 }

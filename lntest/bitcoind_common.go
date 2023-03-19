@@ -1,3 +1,4 @@
+//go:build bitcoind
 // +build bitcoind
 
 package lntest
@@ -28,6 +29,7 @@ type BitcoindBackendConfig struct {
 	zmqTxPath    string
 	p2pPort      int
 	rpcClient    *rpcclient.Client
+	rpcPolling   bool
 
 	// minerAddr is the p2p address of the miner to connect to.
 	minerAddr string
@@ -45,10 +47,19 @@ func (b BitcoindBackendConfig) GenArgs() []string {
 	args = append(args, fmt.Sprintf("--bitcoind.rpchost=%v", b.rpcHost))
 	args = append(args, fmt.Sprintf("--bitcoind.rpcuser=%v", b.rpcUser))
 	args = append(args, fmt.Sprintf("--bitcoind.rpcpass=%v", b.rpcPass))
-	args = append(args, fmt.Sprintf("--bitcoind.zmqpubrawblock=%v",
-		b.zmqBlockPath))
-	args = append(args, fmt.Sprintf("--bitcoind.zmqpubrawtx=%v",
-		b.zmqTxPath))
+
+	if b.rpcPolling {
+		args = append(args, fmt.Sprintf("--bitcoind.rpcpolling"))
+		args = append(args,
+			fmt.Sprintf("--bitcoind.blockpollinginterval=10ms"))
+		args = append(args,
+			fmt.Sprintf("--bitcoind.txpollinginterval=10ms"))
+	} else {
+		args = append(args, fmt.Sprintf("--bitcoind.zmqpubrawblock=%v",
+			b.zmqBlockPath))
+		args = append(args, fmt.Sprintf("--bitcoind.zmqpubrawtx=%v",
+			b.zmqTxPath))
+	}
 
 	return args
 }
@@ -63,6 +74,11 @@ func (b BitcoindBackendConfig) DisconnectMiner() error {
 	return b.rpcClient.AddNode(b.minerAddr, rpcclient.ANRemove)
 }
 
+// Credentials returns the rpc username, password and host for the backend.
+func (b BitcoindBackendConfig) Credentials() (string, string, string, error) {
+	return b.rpcUser, b.rpcPass, b.rpcHost, nil
+}
+
 // Name returns the name of the backend type.
 func (b BitcoindBackendConfig) Name() string {
 	return "bitcoind"
@@ -70,8 +86,8 @@ func (b BitcoindBackendConfig) Name() string {
 
 // newBackend starts a bitcoind node with the given extra parameters and returns
 // a BitcoindBackendConfig for that node.
-func newBackend(miner string, netParams *chaincfg.Params, extraArgs []string) (
-	*BitcoindBackendConfig, func() error, error) {
+func newBackend(miner string, netParams *chaincfg.Params, extraArgs []string,
+	rpcPolling bool) (*BitcoindBackendConfig, func() error, error) {
 
 	baseLogDir := fmt.Sprintf(logDirPattern, GetLogDir())
 	if netParams != &chaincfg.RegressionNetParams {
@@ -93,10 +109,10 @@ func newBackend(miner string, netParams *chaincfg.Params, extraArgs []string) (
 			fmt.Errorf("unable to create temp directory: %v", err)
 	}
 
-	zmqBlockAddr := fmt.Sprintf("tcp://127.0.0.1:%d", nextAvailablePort())
-	zmqTxAddr := fmt.Sprintf("tcp://127.0.0.1:%d", nextAvailablePort())
-	rpcPort := nextAvailablePort()
-	p2pPort := nextAvailablePort()
+	zmqBlockAddr := fmt.Sprintf("tcp://127.0.0.1:%d", NextAvailablePort())
+	zmqTxAddr := fmt.Sprintf("tcp://127.0.0.1:%d", NextAvailablePort())
+	rpcPort := NextAvailablePort()
+	p2pPort := NextAvailablePort()
 
 	cmdArgs := []string{
 		"-datadir=" + tempBitcoindDir,
@@ -186,6 +202,7 @@ func newBackend(miner string, netParams *chaincfg.Params, extraArgs []string) (
 		p2pPort:      p2pPort,
 		rpcClient:    client,
 		minerAddr:    miner,
+		rpcPolling:   rpcPolling,
 	}
 
 	return &bd, cleanUp, nil

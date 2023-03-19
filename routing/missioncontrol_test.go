@@ -1,14 +1,14 @@
 package routing
 
 import (
-	"io/ioutil"
 	"os"
 	"testing"
 	"time"
 
-	"github.com/lightningnetwork/lnd/channeldb/kvdb"
+	"github.com/lightningnetwork/lnd/kvdb"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/routing/route"
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -56,10 +56,14 @@ func createMcTestContext(t *testing.T) *mcTestContext {
 		now: mcTestTime,
 	}
 
-	file, err := ioutil.TempFile("", "*.db")
+	file, err := os.CreateTemp("", "*.db")
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		require.NoError(t, file.Close())
+		require.NoError(t, os.Remove(file.Name()))
+	})
 
 	ctx.dbPath = file.Name()
 
@@ -69,6 +73,9 @@ func createMcTestContext(t *testing.T) *mcTestContext {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		require.NoError(t, ctx.db.Close())
+	})
 
 	ctx.restartMc()
 
@@ -77,13 +84,20 @@ func createMcTestContext(t *testing.T) *mcTestContext {
 
 // restartMc creates a new instances of mission control on the same database.
 func (ctx *mcTestContext) restartMc() {
+	// Since we don't run a timer to store results in unit tests, we store
+	// them here before fetching back everything in NewMissionControl.
+	if ctx.mc != nil {
+		require.NoError(ctx.t, ctx.mc.store.storeResults())
+	}
+
 	mc, err := NewMissionControl(
-		ctx.db,
+		ctx.db, mcTestSelf,
 		&MissionControlConfig{
-			PenaltyHalfLife:       testPenaltyHalfLife,
-			AprioriHopProbability: testAprioriHopProbability,
-			AprioriWeight:         testAprioriWeight,
-			SelfNode:              mcTestSelf,
+			ProbabilityEstimatorCfg: ProbabilityEstimatorCfg{
+				PenaltyHalfLife:       testPenaltyHalfLife,
+				AprioriHopProbability: testAprioriHopProbability,
+				AprioriWeight:         testAprioriWeight,
+			},
 		},
 	)
 	if err != nil {
@@ -94,20 +108,17 @@ func (ctx *mcTestContext) restartMc() {
 	ctx.mc = mc
 }
 
-// cleanup closes the database and removes the temp file.
-func (ctx *mcTestContext) cleanup() {
-	ctx.db.Close()
-	os.Remove(ctx.dbPath)
-}
-
 // Assert that mission control returns a probability for an edge.
 func (ctx *mcTestContext) expectP(amt lnwire.MilliSatoshi, expected float64) {
 	ctx.t.Helper()
 
-	p := ctx.mc.GetProbability(mcTestNode1, mcTestNode2, amt)
-	if p != expected {
-		ctx.t.Fatalf("expected probability %v but got %v", expected, p)
-	}
+	p := ctx.mc.GetProbability(mcTestNode1, mcTestNode2, amt, testCapacity)
+
+	// We relax the accuracy for the probability check because of the
+	// capacity cutoff factor.
+	require.InDelta(
+		ctx.t, expected, p, 0.001, "probability does not match",
+	)
 }
 
 // reportFailure reports a failure by using a test route.
@@ -135,15 +146,16 @@ func (ctx *mcTestContext) reportSuccess() {
 // TestMissionControl tests mission control probability estimation.
 func TestMissionControl(t *testing.T) {
 	ctx := createMcTestContext(t)
-	defer ctx.cleanup()
 
 	ctx.now = testTime
 
 	testTime := time.Date(2018, time.January, 9, 14, 00, 00, 0, time.UTC)
 
-	// For local channels, we expect a higher probability than our a prior
+	// For local channels, we expect a higher probability than our apriori
 	// test probability.
-	selfP := ctx.mc.GetProbability(mcTestSelf, mcTestNode1, 100)
+	selfP := ctx.mc.GetProbability(
+		mcTestSelf, mcTestNode1, 100, testCapacity,
+	)
 	if selfP != prevSuccessProbability {
 		t.Fatalf("expected prev success prob for untried local chans")
 	}

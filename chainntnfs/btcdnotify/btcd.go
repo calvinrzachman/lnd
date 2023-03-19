@@ -8,12 +8,13 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcjson"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
+	"github.com/lightningnetwork/lnd/blockcache"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/queue"
 )
@@ -69,6 +70,9 @@ type BtcdNotifier struct {
 
 	bestBlock chainntnfs.BlockEpoch
 
+	// blockCache is a LRU block cache.
+	blockCache *blockcache.BlockCache
+
 	chainUpdates *queue.ConcurrentQueue
 	txUpdates    *queue.ConcurrentQueue
 
@@ -94,7 +98,8 @@ var _ chainntnfs.ChainNotifier = (*BtcdNotifier)(nil)
 // accept new websockets clients.
 func New(config *rpcclient.ConnConfig, chainParams *chaincfg.Params,
 	spendHintCache chainntnfs.SpendHintCache,
-	confirmHintCache chainntnfs.ConfirmHintCache) (*BtcdNotifier, error) {
+	confirmHintCache chainntnfs.ConfirmHintCache,
+	blockCache *blockcache.BlockCache) (*BtcdNotifier, error) {
 
 	notifier := &BtcdNotifier{
 		chainParams: chainParams,
@@ -109,6 +114,8 @@ func New(config *rpcclient.ConnConfig, chainParams *chaincfg.Params,
 
 		spendHintCache:   spendHintCache,
 		confirmHintCache: confirmHintCache,
+
+		blockCache: blockCache,
 
 		quit: make(chan struct{}),
 	}
@@ -153,6 +160,8 @@ func (b *BtcdNotifier) Stop() error {
 	if atomic.AddInt32(&b.stopped, 1) != 1 {
 		return nil
 	}
+
+	chainntnfs.Log.Info("btcd notifier shutting down")
 
 	// Shutdown the rpc client, this gracefully disconnects from btcd, and
 	// cleans up all related resources.
@@ -199,14 +208,22 @@ func (b *BtcdNotifier) startNotifier() error {
 		return err
 	}
 
+	bestBlock, err := b.chainConn.GetBlock(currentHash)
+	if err != nil {
+		b.txUpdates.Stop()
+		b.chainUpdates.Stop()
+		return err
+	}
+
 	b.txNotifier = chainntnfs.NewTxNotifier(
 		uint32(currentHeight), chainntnfs.ReorgSafetyLimit,
 		b.confirmHintCache, b.spendHintCache,
 	)
 
 	b.bestBlock = chainntnfs.BlockEpoch{
-		Height: currentHeight,
-		Hash:   currentHash,
+		Height:      currentHeight,
+		Hash:        currentHash,
+		BlockHeader: &bestBlock.Header,
 	}
 
 	if err := b.chainConn.NotifyBlocks(); err != nil {
@@ -246,13 +263,14 @@ func (b *BtcdNotifier) onBlockConnected(hash *chainhash.Hash, height int32, t ti
 // chain. The slice of transactions will only be populated if the block
 // includes a transaction that confirmed one of our watched txids, or spends
 // one of the outputs currently being watched.
+//
 // TODO(halseth): this is currently used for complete blocks. Change to use
 // onFilteredBlockConnected and onFilteredBlockDisconnected, making it easier
 // to unify with the Neutrino implementation.
 type filteredBlock struct {
 	hash   chainhash.Hash
 	height uint32
-	txns   []*btcutil.Tx
+	block  *btcutil.Block
 
 	// connected is true if this update is a new block and false if it is a
 	// disconnected block.
@@ -329,7 +347,9 @@ out:
 				//
 				// TODO(wilmer): add retry logic if rescan fails?
 				b.wg.Add(1)
-				go func() {
+
+				//nolint:lll
+				go func(msg *chainntnfs.HistoricalConfDispatch) {
 					defer b.wg.Done()
 
 					confDetails, _, err := b.historicalConfDetails(
@@ -354,7 +374,7 @@ out:
 					if err != nil {
 						chainntnfs.Log.Error(err)
 					}
-				}()
+				}(msg)
 
 			case *blockEpochRegistration:
 				chainntnfs.Log.Infof("New block epoch subscription")
@@ -368,6 +388,7 @@ out:
 					b.notifyBlockEpochClient(
 						msg, b.bestBlock.Height,
 						b.bestBlock.Hash,
+						b.bestBlock.BlockHeader,
 					)
 
 					msg.errorChan <- nil
@@ -389,6 +410,7 @@ out:
 				for _, block := range missedBlocks {
 					b.notifyBlockEpochClient(
 						msg, block.Height, block.Hash,
+						block.BlockHeader,
 					)
 				}
 
@@ -398,8 +420,9 @@ out:
 		case item := <-b.chainUpdates.ChanOut():
 			update := item.(*chainUpdate)
 			if update.connect {
-				blockHeader, err :=
-					b.chainConn.GetBlockHeader(update.blockHash)
+				blockHeader, err := b.chainConn.GetBlockHeader(
+					update.blockHash,
+				)
 				if err != nil {
 					chainntnfs.Log.Errorf("Unable to fetch "+
 						"block header: %v", err)
@@ -438,8 +461,9 @@ out:
 				}
 
 				newBlock := chainntnfs.BlockEpoch{
-					Height: update.blockHeight,
-					Hash:   update.blockHash,
+					Height:      update.blockHeight,
+					Hash:        update.blockHash,
+					BlockHeader: blockHeader,
 				}
 				if err := b.handleBlockConnected(newBlock); err != nil {
 					chainntnfs.Log.Error(err)
@@ -578,7 +602,7 @@ func (b *BtcdNotifier) confDetailsManually(confRequest chainntnfs.ConfRequest,
 		}
 
 		// TODO: fetch the neutrino filters instead.
-		block, err := b.chainConn.GetBlock(blockHash)
+		block, err := b.GetBlock(blockHash)
 		if err != nil {
 			return nil, chainntnfs.TxNotFoundManually,
 				fmt.Errorf("unable to get block with hash "+
@@ -598,6 +622,7 @@ func (b *BtcdNotifier) confDetailsManually(confRequest chainntnfs.ConfRequest,
 				BlockHash:   blockHash,
 				BlockHeight: height,
 				TxIndex:     uint32(txIndex),
+				Block:       block,
 			}, chainntnfs.TxFoundManually, nil
 		}
 	}
@@ -616,23 +641,21 @@ func (b *BtcdNotifier) handleBlockConnected(epoch chainntnfs.BlockEpoch) error {
 	// First, we'll fetch the raw block as we'll need to gather all the
 	// transactions to determine whether any are relevant to our registered
 	// clients.
-	rawBlock, err := b.chainConn.GetBlock(epoch.Hash)
+	rawBlock, err := b.GetBlock(epoch.Hash)
 	if err != nil {
 		return fmt.Errorf("unable to get block: %v", err)
 	}
 	newBlock := &filteredBlock{
 		hash:    *epoch.Hash,
 		height:  uint32(epoch.Height),
-		txns:    btcutil.NewBlock(rawBlock).Transactions(),
+		block:   btcutil.NewBlock(rawBlock),
 		connect: true,
 	}
 
 	// We'll then extend the txNotifier's height with the information of
 	// this new block, which will handle all of the notification logic for
 	// us.
-	err = b.txNotifier.ConnectTip(
-		&newBlock.hash, newBlock.height, newBlock.txns,
-	)
+	err = b.txNotifier.ConnectTip(newBlock.block, newBlock.height)
 	if err != nil {
 		return fmt.Errorf("unable to connect tip: %v", err)
 	}
@@ -647,26 +670,34 @@ func (b *BtcdNotifier) handleBlockConnected(epoch chainntnfs.BlockEpoch) error {
 	// satisfy any client requests based upon the new block.
 	b.bestBlock = epoch
 
-	b.notifyBlockEpochs(epoch.Height, epoch.Hash)
+	b.notifyBlockEpochs(
+		epoch.Height, epoch.Hash, epoch.BlockHeader,
+	)
+
 	return b.txNotifier.NotifyHeight(uint32(epoch.Height))
 }
 
 // notifyBlockEpochs notifies all registered block epoch clients of the newly
 // connected block to the main chain.
-func (b *BtcdNotifier) notifyBlockEpochs(newHeight int32, newSha *chainhash.Hash) {
+func (b *BtcdNotifier) notifyBlockEpochs(newHeight int32,
+	newSha *chainhash.Hash, blockHeader *wire.BlockHeader) {
+
 	for _, client := range b.blockEpochClients {
-		b.notifyBlockEpochClient(client, newHeight, newSha)
+		b.notifyBlockEpochClient(
+			client, newHeight, newSha, blockHeader,
+		)
 	}
 }
 
 // notifyBlockEpochClient sends a registered block epoch client a notification
 // about a specific block.
 func (b *BtcdNotifier) notifyBlockEpochClient(epochClient *blockEpochRegistration,
-	height int32, sha *chainhash.Hash) {
+	height int32, sha *chainhash.Hash, blockHeader *wire.BlockHeader) {
 
 	epoch := &chainntnfs.BlockEpoch{
-		Height: height,
-		Hash:   sha,
+		Height:      height,
+		Hash:        sha,
+		BlockHeader: blockHeader,
 	}
 
 	select {
@@ -874,15 +905,15 @@ func (b *BtcdNotifier) RegisterSpendNtfn(outpoint *wire.OutPoint,
 // channel. Once it has reached all of its confirmations, a notification will be
 // sent across the 'Confirmed' channel.
 func (b *BtcdNotifier) RegisterConfirmationsNtfn(txid *chainhash.Hash,
-	pkScript []byte,
-	numConfs, heightHint uint32) (*chainntnfs.ConfirmationEvent, error) {
+	pkScript []byte, numConfs, heightHint uint32,
+	opts ...chainntnfs.NotifierOption) (*chainntnfs.ConfirmationEvent, error) {
 
 	// Register the conf notification with the TxNotifier. A non-nil value
 	// for `dispatch` will be returned if we are required to perform a
 	// manual scan for the confirmation. Otherwise the notifier will begin
 	// watching at tip for the transaction to confirm.
 	ntfn, err := b.txNotifier.RegisterConf(
-		txid, pkScript, numConfs, heightHint,
+		txid, pkScript, numConfs, heightHint, opts...,
 	)
 	if err != nil {
 		return nil, err
@@ -1011,4 +1042,12 @@ func (b *BtcdNotifier) RegisterBlockEpochNtfn(
 			},
 		}, nil
 	}
+}
+
+// GetBlock is used to retrieve the block with the given hash. This function
+// wraps the blockCache's GetBlock function.
+func (b *BtcdNotifier) GetBlock(hash *chainhash.Hash) (*wire.MsgBlock,
+	error) {
+
+	return b.blockCache.GetBlock(hash, b.chainConn.GetBlock)
 }

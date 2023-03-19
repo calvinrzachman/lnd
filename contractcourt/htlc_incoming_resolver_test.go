@@ -9,13 +9,15 @@ import (
 	sphinx "github.com/lightningnetwork/lightning-onion"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
-	"github.com/lightningnetwork/lnd/channeldb/kvdb"
+	"github.com/lightningnetwork/lnd/channeldb/models"
 	"github.com/lightningnetwork/lnd/htlcswitch/hop"
 	"github.com/lightningnetwork/lnd/invoices"
+	"github.com/lightningnetwork/lnd/kvdb"
 	"github.com/lightningnetwork/lnd/lntest/mock"
 	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwire"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -26,7 +28,7 @@ const (
 var (
 	testResPreimage         = lntypes.Preimage{1, 2, 3}
 	testResHash             = testResPreimage.Hash()
-	testResCircuitKey       = channeldb.CircuitKey{}
+	testResCircuitKey       = models.CircuitKey{}
 	testOnionBlob           = []byte{4, 5, 6}
 	testAcceptHeight  int32 = 1234
 	testHtlcAmount          = 2300
@@ -36,7 +38,7 @@ var (
 // for which the preimage is already known initially.
 func TestHtlcIncomingResolverFwdPreimageKnown(t *testing.T) {
 	t.Parallel()
-	defer timeout(t)()
+	defer timeout()()
 
 	ctx := newIncomingResolverTestContext(t, false)
 	ctx.witnessBeacon.lookupPreimage[testResHash] = testResPreimage
@@ -49,7 +51,7 @@ func TestHtlcIncomingResolverFwdPreimageKnown(t *testing.T) {
 // started.
 func TestHtlcIncomingResolverFwdContestedSuccess(t *testing.T) {
 	t.Parallel()
-	defer timeout(t)()
+	defer timeout()()
 
 	ctx := newIncomingResolverTestContext(t, false)
 	ctx.resolve()
@@ -65,7 +67,7 @@ func TestHtlcIncomingResolverFwdContestedSuccess(t *testing.T) {
 // htlc that times out after the resolver has been started.
 func TestHtlcIncomingResolverFwdContestedTimeout(t *testing.T) {
 	t.Parallel()
-	defer timeout(t)()
+	defer timeout()()
 
 	ctx := newIncomingResolverTestContext(t, false)
 
@@ -104,7 +106,7 @@ func TestHtlcIncomingResolverFwdContestedTimeout(t *testing.T) {
 // has already expired when the resolver starts.
 func TestHtlcIncomingResolverFwdTimeout(t *testing.T) {
 	t.Parallel()
-	defer timeout(t)()
+	defer timeout()()
 
 	ctx := newIncomingResolverTestContext(t, true)
 	ctx.witnessBeacon.lookupPreimage[testResHash] = testResPreimage
@@ -117,7 +119,7 @@ func TestHtlcIncomingResolverFwdTimeout(t *testing.T) {
 // which the invoice has already been settled when the resolver starts.
 func TestHtlcIncomingResolverExitSettle(t *testing.T) {
 	t.Parallel()
-	defer timeout(t)()
+	defer timeout()()
 
 	ctx := newIncomingResolverTestContext(t, true)
 	ctx.registry.notifyResolution = invoices.NewSettleResolution(
@@ -140,6 +142,7 @@ func TestHtlcIncomingResolverExitSettle(t *testing.T) {
 	if !bytes.Equal(
 		ctx.onionProcessor.offeredOnionBlob, testOnionBlob,
 	) {
+
 		t.Fatal("unexpected onion blob")
 	}
 }
@@ -148,7 +151,7 @@ func TestHtlcIncomingResolverExitSettle(t *testing.T) {
 // an invoice that is already canceled when the resolver starts.
 func TestHtlcIncomingResolverExitCancel(t *testing.T) {
 	t.Parallel()
-	defer timeout(t)()
+	defer timeout()()
 
 	ctx := newIncomingResolverTestContext(t, true)
 	ctx.registry.notifyResolution = invoices.NewFailResolution(
@@ -164,7 +167,7 @@ func TestHtlcIncomingResolverExitCancel(t *testing.T) {
 // for a hodl invoice that is settled after the resolver has started.
 func TestHtlcIncomingResolverExitSettleHodl(t *testing.T) {
 	t.Parallel()
-	defer timeout(t)()
+	defer timeout()()
 
 	ctx := newIncomingResolverTestContext(t, true)
 	ctx.resolve()
@@ -182,7 +185,7 @@ func TestHtlcIncomingResolverExitSettleHodl(t *testing.T) {
 // for a hodl invoice that times out.
 func TestHtlcIncomingResolverExitTimeoutHodl(t *testing.T) {
 	t.Parallel()
-	defer timeout(t)()
+	defer timeout()()
 
 	ctx := newIncomingResolverTestContext(t, true)
 
@@ -219,7 +222,7 @@ func TestHtlcIncomingResolverExitTimeoutHodl(t *testing.T) {
 // for a hodl invoice that is canceled after the resolver has started.
 func TestHtlcIncomingResolverExitCancelHodl(t *testing.T) {
 	t.Parallel()
-	defer timeout(t)()
+	defer timeout()()
 
 	ctx := newIncomingResolverTestContext(t, true)
 
@@ -275,6 +278,10 @@ func (h *mockHopIterator) HopPayload() (*hop.Payload, error) {
 	}), nil
 }
 
+func (h *mockHopIterator) EncodeNextHop(w io.Writer) error {
+	return nil
+}
+
 type mockOnionProcessor struct {
 	isExit           bool
 	offeredOnionBlob []byte
@@ -293,14 +300,15 @@ func (o *mockOnionProcessor) ReconstructHopIterator(r io.Reader, rHash []byte) (
 }
 
 type incomingResolverTestContext struct {
-	registry       *mockRegistry
-	witnessBeacon  *mockWitnessBeacon
-	resolver       *htlcIncomingContestResolver
-	notifier       *mock.ChainNotifier
-	onionProcessor *mockOnionProcessor
-	resolveErr     chan error
-	nextResolver   ContractResolver
-	t              *testing.T
+	registry               *mockRegistry
+	witnessBeacon          *mockWitnessBeacon
+	resolver               *htlcIncomingContestResolver
+	notifier               *mock.ChainNotifier
+	onionProcessor         *mockOnionProcessor
+	resolveErr             chan error
+	nextResolver           ContractResolver
+	finalHtlcOutcomeStored bool
+	t                      *testing.T
 }
 
 func newIncomingResolverTestContext(t *testing.T, isExit bool) *incomingResolverTestContext {
@@ -318,12 +326,30 @@ func newIncomingResolverTestContext(t *testing.T, isExit bool) *incomingResolver
 
 	checkPointChan := make(chan struct{}, 1)
 
+	c := &incomingResolverTestContext{
+		registry:       registry,
+		witnessBeacon:  witnessBeacon,
+		notifier:       notifier,
+		onionProcessor: onionProcessor,
+		t:              t,
+	}
+
+	htlcNotifier := &mockHTLCNotifier{}
+
 	chainCfg := ChannelArbitratorConfig{
 		ChainArbitratorConfig: ChainArbitratorConfig{
 			Notifier:       notifier,
 			PreimageDB:     witnessBeacon,
 			Registry:       registry,
 			OnionProcessor: onionProcessor,
+			PutFinalHtlcOutcome: func(chanId lnwire.ShortChannelID,
+				htlcId uint64, settled bool) error {
+
+				c.finalHtlcOutcomeStored = true
+
+				return nil
+			},
+			HtlcNotifier: htlcNotifier,
 		},
 		PutResolverReport: func(_ kvdb.RwTx,
 			_ *channeldb.ResolverReport) error {
@@ -341,7 +367,8 @@ func newIncomingResolverTestContext(t *testing.T, isExit bool) *incomingResolver
 			return nil
 		},
 	}
-	resolver := &htlcIncomingContestResolver{
+
+	c.resolver = &htlcIncomingContestResolver{
 		htlcSuccessResolver: &htlcSuccessResolver{
 			contractResolverKit: *newContractResolverKit(cfg),
 			htlcResolution:      lnwallet.IncomingHtlcResolution{},
@@ -354,14 +381,7 @@ func newIncomingResolverTestContext(t *testing.T, isExit bool) *incomingResolver
 		htlcExpiry: testHtlcExpiry,
 	}
 
-	return &incomingResolverTestContext{
-		registry:       registry,
-		witnessBeacon:  witnessBeacon,
-		resolver:       resolver,
-		notifier:       notifier,
-		onionProcessor: onionProcessor,
-		t:              t,
-	}
+	return c
 }
 
 func (i *incomingResolverTestContext) resolve() {
@@ -395,6 +415,10 @@ func (i *incomingResolverTestContext) waitForResult(expectSuccessRes bool) {
 		if i.nextResolver != nil {
 			i.t.Fatal("expected no next resolver")
 		}
+
+		require.True(i.t, i.finalHtlcOutcomeStored,
+			"expected final htlc outcome to be stored")
+
 		return
 	}
 

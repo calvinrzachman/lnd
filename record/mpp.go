@@ -80,7 +80,6 @@ func MPPDecoder(r io.Reader, val interface{}, buf *[8]byte, l uint64) error {
 		v.totalMsat = lnwire.MilliSatoshi(total)
 
 		return nil
-
 	}
 	return tlv.NewTypeForDecodingErr(val, "MPP", l, maxMPPLength)
 }
@@ -105,5 +104,9 @@ func (r *MPP) PayloadSize() uint64 {
 
 // String returns a human-readable representation of the mpp payload field.
 func (r *MPP) String() string {
+	if r == nil {
+		return "<nil>"
+	}
+
 	return fmt.Sprintf("total=%v, addr=%x", r.totalMsat, r.paymentAddr)
 }

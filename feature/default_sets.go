@@ -22,6 +22,7 @@ var defaultSetDesc = setDesc{
 		SetInit:         {}, // I
 		SetNodeAnn:      {}, // N
 		SetInvoice:      {}, // 9
+		SetInvoiceAmp:   {}, // 9A
 		SetLegacyGlobal: {},
 	},
 	lnwire.StaticRemoteKeyRequired: {
@@ -34,9 +35,10 @@ var defaultSetDesc = setDesc{
 		SetNodeAnn: {}, // N
 	},
 	lnwire.PaymentAddrRequired: {
-		SetInit:    {}, // I
-		SetNodeAnn: {}, // N
-		SetInvoice: {}, // 9
+		SetInit:       {}, // I
+		SetNodeAnn:    {}, // N
+		SetInvoice:    {}, // 9
+		SetInvoiceAmp: {}, // 9A
 	},
 	lnwire.MPPOptional: {
 		SetInit:    {}, // I
@@ -47,7 +49,44 @@ var defaultSetDesc = setDesc{
 		SetInit:    {}, // I
 		SetNodeAnn: {}, // N
 	},
+	// Note: we set route blinding optionally in our init and announcement,
+	// but not yet in invoices (9) as the spec instructs because we do not
+	// yet support receiving payments to blinded routes, only relaying them.
+	lnwire.RouteBlindingOptional: {
+		SetInit:    {}, // I
+		SetNodeAnn: {}, // N
+	},
 	lnwire.WumboChannelsOptional: {
+		SetInit:    {}, // I
+		SetNodeAnn: {}, // N
+	},
+	lnwire.AMPOptional: {
+		SetInit:    {}, // I
+		SetNodeAnn: {}, // N
+	},
+	lnwire.AMPRequired: {
+		SetInvoiceAmp: {}, // 9A
+	},
+	lnwire.ExplicitChannelTypeOptional: {
+		SetInit:    {}, // I
+		SetNodeAnn: {}, // N
+	},
+	lnwire.KeysendOptional: {
+		SetNodeAnn: {}, // N
+	},
+	lnwire.ScriptEnforcedLeaseOptional: {
+		SetInit:    {}, // I
+		SetNodeAnn: {}, // N
+	},
+	lnwire.ScidAliasOptional: {
+		SetInit:    {}, // I
+		SetNodeAnn: {}, // N
+	},
+	lnwire.ZeroConfOptional: {
+		SetInit:    {}, // I
+		SetNodeAnn: {}, // N
+	},
+	lnwire.ShutdownAnySegwitOptional: {
 		SetInit:    {}, // I
 		SetNodeAnn: {}, // N
 	},

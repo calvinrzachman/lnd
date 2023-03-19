@@ -2,38 +2,21 @@ package keychain
 
 import (
 	"fmt"
-	"io/ioutil"
 	"math/rand"
-	"os"
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcwallet/snacl"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/walletdb"
-	"github.com/davecgh/go-spew/spew"
-
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb" // Required in order to create the default database.
+	"github.com/davecgh/go-spew/spew"
+	"github.com/stretchr/testify/require"
 )
-
-// versionZeroKeyFamilies is a slice of all the known key families for first
-// version of the key derivation schema defined in this package.
-var versionZeroKeyFamilies = []KeyFamily{
-	KeyFamilyMultiSig,
-	KeyFamilyRevocationBase,
-	KeyFamilyHtlcBase,
-	KeyFamilyPaymentBase,
-	KeyFamilyDelayBase,
-	KeyFamilyRevocationRoot,
-	KeyFamilyNodeKey,
-	KeyFamilyStaticBackup,
-	KeyFamilyTowerSession,
-	KeyFamilyTowerID,
-}
 
 var (
 	testHDSeed = chainhash.Hash{
@@ -47,7 +30,7 @@ var (
 	testDBTimeout = time.Second * 10
 )
 
-func createTestBtcWallet(coinType uint32) (func(), *wallet.Wallet, error) {
+func createTestBtcWallet(t testing.TB, coinType uint32) (*wallet.Wallet, error) {
 	// Instruct waddrmgr to use the cranked down scrypt parameters when
 	// creating new wallet encryption keys.
 	fastScrypt := waddrmgr.FastScryptOptions
@@ -61,12 +44,8 @@ func createTestBtcWallet(coinType uint32) (func(), *wallet.Wallet, error) {
 	waddrmgr.SetSecretKeyGen(keyGen)
 
 	// Create a new test wallet that uses fast scrypt as KDF.
-	tempDir, err := ioutil.TempDir("", "keyring-lnwallet")
-	if err != nil {
-		return nil, nil, err
-	}
 	loader := wallet.NewLoader(
-		&chaincfg.SimNetParams, tempDir, true, testDBTimeout, 0,
+		&chaincfg.SimNetParams, t.TempDir(), true, testDBTimeout, 0,
 	)
 
 	pass := []byte("test")
@@ -75,11 +54,11 @@ func createTestBtcWallet(coinType uint32) (func(), *wallet.Wallet, error) {
 		pass, pass, testHDSeed[:], time.Time{},
 	)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	if err := baseWallet.Unlock(pass, nil); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	// Construct the key scope required to derive keys for the chose
@@ -103,16 +82,15 @@ func createTestBtcWallet(coinType uint32) (func(), *wallet.Wallet, error) {
 			return err
 		})
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 
-	cleanUp := func() {
+	t.Cleanup(func() {
 		baseWallet.Lock()
-		os.RemoveAll(tempDir)
-	}
+	})
 
-	return cleanUp, baseWallet, nil
+	return baseWallet, nil
 }
 
 func assertEqualKeyLocator(t *testing.T, a, b KeyLocator) {
@@ -125,9 +103,9 @@ func assertEqualKeyLocator(t *testing.T, a, b KeyLocator) {
 
 // secretKeyRingConstructor is a function signature that's used as a generic
 // constructor for various implementations of the KeyRing interface. A string
-// naming the returned interface, a function closure that cleans up any
-// resources, and the clean up interface itself are to be returned.
-type keyRingConstructor func() (string, func(), KeyRing, error)
+// naming the returned interface, and the KeyRing interface itself are to be
+// returned.
+type keyRingConstructor func() (string, KeyRing, error)
 
 // TestKeyRingDerivation tests that each known KeyRing implementation properly
 // adheres to the expected behavior of the set of interfaces.
@@ -135,41 +113,29 @@ func TestKeyRingDerivation(t *testing.T) {
 	t.Parallel()
 
 	keyRingImplementations := []keyRingConstructor{
-		func() (string, func(), KeyRing, error) {
-			cleanUp, wallet, err := createTestBtcWallet(
-				CoinTypeBitcoin,
-			)
-			if err != nil {
-				t.Fatalf("unable to create wallet: %v", err)
-			}
+		func() (string, KeyRing, error) {
+			wallet, err := createTestBtcWallet(t, CoinTypeBitcoin)
+			require.NoError(t, err)
 
 			keyRing := NewBtcWalletKeyRing(wallet, CoinTypeBitcoin)
 
-			return "btcwallet", cleanUp, keyRing, nil
+			return "btcwallet", keyRing, nil
 		},
-		func() (string, func(), KeyRing, error) {
-			cleanUp, wallet, err := createTestBtcWallet(
-				CoinTypeLitecoin,
-			)
-			if err != nil {
-				t.Fatalf("unable to create wallet: %v", err)
-			}
+		func() (string, KeyRing, error) {
+			wallet, err := createTestBtcWallet(t, CoinTypeLitecoin)
+			require.NoError(t, err)
 
 			keyRing := NewBtcWalletKeyRing(wallet, CoinTypeLitecoin)
 
-			return "ltcwallet", cleanUp, keyRing, nil
+			return "ltcwallet", keyRing, nil
 		},
-		func() (string, func(), KeyRing, error) {
-			cleanUp, wallet, err := createTestBtcWallet(
-				CoinTypeTestnet,
-			)
-			if err != nil {
-				t.Fatalf("unable to create wallet: %v", err)
-			}
+		func() (string, KeyRing, error) {
+			wallet, err := createTestBtcWallet(t, CoinTypeTestnet)
+			require.NoError(t, err)
 
 			keyRing := NewBtcWalletKeyRing(wallet, CoinTypeTestnet)
 
-			return "testwallet", cleanUp, keyRing, nil
+			return "testwallet", keyRing, nil
 		},
 	}
 
@@ -179,24 +145,20 @@ func TestKeyRingDerivation(t *testing.T) {
 	// an identical set of tests in order to ensure that the interface
 	// adheres to our nominal specification.
 	for _, keyRingConstructor := range keyRingImplementations {
-		keyRingName, cleanUp, keyRing, err := keyRingConstructor()
+		keyRingName, keyRing, err := keyRingConstructor()
 		if err != nil {
 			t.Fatalf("unable to create key ring %v: %v", keyRingName,
 				err)
 		}
-		defer cleanUp()
 
 		success := t.Run(fmt.Sprintf("%v", keyRingName), func(t *testing.T) {
 			// First, we'll ensure that we're able to derive keys
 			// from each of the known key families.
-			for _, keyFam := range versionZeroKeyFamilies {
+			for _, keyFam := range VersionZeroKeyFamilies {
 				// First, we'll ensure that we can derive the
 				// *next* key in the keychain.
 				keyDesc, err := keyRing.DeriveNextKey(keyFam)
-				if err != nil {
-					t.Fatalf("unable to derive next for "+
-						"keyFam=%v: %v", keyFam, err)
-				}
+				require.NoError(t, err)
 				assertEqualKeyLocator(t,
 					KeyLocator{
 						Family: keyFam,
@@ -212,10 +174,7 @@ func TestKeyRingDerivation(t *testing.T) {
 					Index:  0,
 				}
 				firstKeyDesc, err := keyRing.DeriveKey(keyLoc)
-				if err != nil {
-					t.Fatalf("unable to derive first key for "+
-						"keyFam=%v: %v", keyFam, err)
-				}
+				require.NoError(t, err)
 				if !keyDesc.PubKey.IsEqual(firstKeyDesc.PubKey) {
 					t.Fatalf("mismatched keys: expected %x, "+
 						"got %x",
@@ -240,10 +199,7 @@ func TestKeyRingDerivation(t *testing.T) {
 						Index:  uint32(i),
 					}
 					keyDesc, err := keyRing.DeriveKey(keyLoc)
-					if err != nil {
-						t.Fatalf("unable to derive first key for "+
-							"keyFam=%v: %v", keyFam, err)
-					}
+					require.NoError(t, err)
 
 					// Ensure that the key locator matches
 					// up as well.
@@ -260,11 +216,7 @@ func TestKeyRingDerivation(t *testing.T) {
 					Index:  randKeyIndex,
 				}
 				keyDesc, err = keyRing.DeriveKey(keyLoc)
-				if err != nil {
-					t.Fatalf("unable to derive key_index=%v "+
-						"for keyFam=%v: %v",
-						randKeyIndex, keyFam, err)
-				}
+				require.NoError(t, err)
 				assertEqualKeyLocator(
 					t, keyLoc, keyDesc.KeyLocator,
 				)
@@ -278,9 +230,9 @@ func TestKeyRingDerivation(t *testing.T) {
 
 // secretKeyRingConstructor is a function signature that's used as a generic
 // constructor for various implementations of the SecretKeyRing interface. A
-// string naming the returned interface, a function closure that cleans up any
-// resources, and the clean up interface itself are to be returned.
-type secretKeyRingConstructor func() (string, func(), SecretKeyRing, error)
+// string naming the returned interface, and the SecretKeyRing interface itself
+// are to be returned.
+type secretKeyRingConstructor func() (string, SecretKeyRing, error)
 
 // TestSecretKeyRingDerivation tests that each known SecretKeyRing
 // implementation properly adheres to the expected behavior of the set of
@@ -289,41 +241,29 @@ func TestSecretKeyRingDerivation(t *testing.T) {
 	t.Parallel()
 
 	secretKeyRingImplementations := []secretKeyRingConstructor{
-		func() (string, func(), SecretKeyRing, error) {
-			cleanUp, wallet, err := createTestBtcWallet(
-				CoinTypeBitcoin,
-			)
-			if err != nil {
-				t.Fatalf("unable to create wallet: %v", err)
-			}
+		func() (string, SecretKeyRing, error) {
+			wallet, err := createTestBtcWallet(t, CoinTypeBitcoin)
+			require.NoError(t, err)
 
 			keyRing := NewBtcWalletKeyRing(wallet, CoinTypeBitcoin)
 
-			return "btcwallet", cleanUp, keyRing, nil
+			return "btcwallet", keyRing, nil
 		},
-		func() (string, func(), SecretKeyRing, error) {
-			cleanUp, wallet, err := createTestBtcWallet(
-				CoinTypeLitecoin,
-			)
-			if err != nil {
-				t.Fatalf("unable to create wallet: %v", err)
-			}
+		func() (string, SecretKeyRing, error) {
+			wallet, err := createTestBtcWallet(t, CoinTypeLitecoin)
+			require.NoError(t, err)
 
 			keyRing := NewBtcWalletKeyRing(wallet, CoinTypeLitecoin)
 
-			return "ltcwallet", cleanUp, keyRing, nil
+			return "ltcwallet", keyRing, nil
 		},
-		func() (string, func(), SecretKeyRing, error) {
-			cleanUp, wallet, err := createTestBtcWallet(
-				CoinTypeTestnet,
-			)
-			if err != nil {
-				t.Fatalf("unable to create wallet: %v", err)
-			}
+		func() (string, SecretKeyRing, error) {
+			wallet, err := createTestBtcWallet(t, CoinTypeTestnet)
+			require.NoError(t, err)
 
 			keyRing := NewBtcWalletKeyRing(wallet, CoinTypeTestnet)
 
-			return "testwallet", cleanUp, keyRing, nil
+			return "testwallet", keyRing, nil
 		},
 	}
 
@@ -331,18 +271,17 @@ func TestSecretKeyRingDerivation(t *testing.T) {
 	// an identical set of tests in order to ensure that the interface
 	// adheres to our nominal specification.
 	for _, secretKeyRingConstructor := range secretKeyRingImplementations {
-		keyRingName, cleanUp, secretKeyRing, err := secretKeyRingConstructor()
+		keyRingName, secretKeyRing, err := secretKeyRingConstructor()
 		if err != nil {
 			t.Fatalf("unable to create secret key ring %v: %v",
 				keyRingName, err)
 		}
-		defer cleanUp()
 
 		success := t.Run(fmt.Sprintf("%v", keyRingName), func(t *testing.T) {
 			// For, each key family, we'll ensure that we're able
 			// to obtain the private key of a randomly select child
 			// index within the key family.
-			for _, keyFam := range versionZeroKeyFamilies {
+			for _, keyFam := range VersionZeroKeyFamilies {
 				randKeyIndex := uint32(rand.Int31())
 				keyLoc := KeyLocator{
 					Family: keyFam,
@@ -416,7 +355,7 @@ func TestSecretKeyRingDerivation(t *testing.T) {
 				// We'll try again, but this time with an
 				// unknown public key.
 				_, pub := btcec.PrivKeyFromBytes(
-					btcec.S256(), testHDSeed[:],
+					testHDSeed[:],
 				)
 				keyDesc.PubKey = pub
 

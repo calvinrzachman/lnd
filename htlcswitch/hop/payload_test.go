@@ -2,20 +2,35 @@ package hop_test
 
 import (
 	"bytes"
+	"encoding/hex"
 	"reflect"
 	"testing"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/lightningnetwork/lnd/htlcswitch/hop"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/record"
+	"github.com/stretchr/testify/require"
 )
 
+var (
+	//nolint:lll
+	testPrivKeyBytes, _ = hex.DecodeString("e126f68f7eafcc8b74f54d269fe206be715000f94dac067d1c04a8ca3b2db734")
+	_, testPubKey       = btcec.PrivKeyFromBytes(testPrivKeyBytes)
+)
+
+const testUnknownRequiredType = 0x80
+
 type decodePayloadTest struct {
-	name             string
-	payload          []byte
-	expErr           error
-	expCustomRecords map[uint64][]byte
-	shouldHaveMPP    bool
+	name               string
+	payload            []byte
+	expErr             error
+	expCustomRecords   map[uint64][]byte
+	shouldHaveMPP      bool
+	shouldHaveAMP      bool
+	shouldHaveEncData  bool
+	shouldHaveBlinding bool
+	shouldHaveMetadata bool
 }
 
 var decodePayloadTests = []decodePayloadTest{
@@ -81,21 +96,26 @@ var decodePayloadTests = []decodePayloadTest{
 		},
 	},
 	{
-		name:    "required type after omitted hop id",
-		payload: []byte{0x02, 0x00, 0x04, 0x00, 0x0a, 0x00},
+		name: "required type after omitted hop id",
+		payload: []byte{
+			0x02, 0x00, 0x04, 0x00,
+			testUnknownRequiredType, 0x00,
+		},
 		expErr: hop.ErrInvalidPayload{
-			Type:      10,
+			Type:      testUnknownRequiredType,
 			Violation: hop.RequiredViolation,
 			FinalHop:  true,
 		},
 	},
 	{
 		name: "required type after included hop id",
-		payload: []byte{0x02, 0x00, 0x04, 0x00, 0x06, 0x08, 0x01, 0x00,
-			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x00,
+		payload: []byte{
+			0x02, 0x00, 0x04, 0x00, 0x06, 0x08, 0x01, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00,
+			testUnknownRequiredType, 0x00,
 		},
 		expErr: hop.ErrInvalidPayload{
-			Type:      10,
+			Type:      testUnknownRequiredType,
 			Violation: hop.RequiredViolation,
 			FinalHop:  false,
 		},
@@ -177,6 +197,67 @@ var decodePayloadTests = []decodePayloadTest{
 		},
 	},
 	{
+		name: "intermediate hop with amp",
+		payload: []byte{
+			// amount
+			0x02, 0x00,
+			// cltv
+			0x04, 0x00,
+			// next hop id
+			0x06, 0x08,
+			0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			// amp
+			0x0e, 0x41,
+			// amp.root_share
+			0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12,
+			0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12,
+			0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12,
+			0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12,
+			// amp.set_id
+			0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13,
+			0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13,
+			0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13,
+			0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13,
+			// amp.child_index
+			0x09,
+		},
+		expErr: hop.ErrInvalidPayload{
+			Type:      record.AMPOnionType,
+			Violation: hop.IncludedViolation,
+			FinalHop:  false,
+		},
+	},
+	// {
+	// 	name: "intermediate hop with encrypted data",
+	// 	payload: []byte{
+	// 		// amount
+	// 		0x02, 0x00,
+	// 		// cltv
+	// 		0x04, 0x00,
+	// 		// encrypted data
+	// 		0x0a, 0x03, 0x03, 0x02, 0x01,
+	// 	},
+	// 	shouldHaveEncData: true,
+	// },
+	// {
+	// 	name: "intermediate hop with blinding point",
+	// 	payload: append([]byte{
+	// 		// amount
+	// 		0x02, 0x00,
+	// 		// cltv
+	// 		0x04, 0x00,
+	// 		// encrypted data
+	// 		// 0x0a, 0x03, 0x03, 0x02, 0x01,
+	// 		0x0a, 0x00,
+	// 		// blinding point (type / length)
+	// 		0x0c, 0x21,
+	// 	},
+	// 		// blinding point (value)
+	// 		testPubKey.SerializeCompressed()...,
+	// 	),
+	// 	shouldHaveBlinding: true,
+	// },
+	{
 		name: "final hop with mpp",
 		payload: []byte{
 			// amount
@@ -193,6 +274,42 @@ var decodePayloadTests = []decodePayloadTest{
 		},
 		expErr:        nil,
 		shouldHaveMPP: true,
+	},
+	{
+		name: "final hop with amp",
+		payload: []byte{
+			// amount
+			0x02, 0x00,
+			// cltv
+			0x04, 0x00,
+			// amp
+			0x0e, 0x41,
+			// amp.root_share
+			0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12,
+			0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12,
+			0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12,
+			0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12,
+			// amp.set_id
+			0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13,
+			0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13,
+			0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13,
+			0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13,
+			// amp.child_index
+			0x09,
+		},
+		shouldHaveAMP: true,
+	},
+	{
+		name: "final hop with metadata",
+		payload: []byte{
+			// amount
+			0x02, 0x00,
+			// cltv
+			0x04, 0x00,
+			// metadata
+			0x10, 0x03, 0x01, 0x02, 0x03,
+		},
+		shouldHaveMetadata: true,
 	},
 }
 
@@ -216,9 +333,35 @@ func testDecodeHopPayloadValidation(t *testing.T, test decodePayloadTest) {
 			0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
 			0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
 		}
+
+		testRootShare = [32]byte{
+			0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12,
+			0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12,
+			0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12,
+			0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12,
+		}
+		testSetID = [32]byte{
+			0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13,
+			0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13,
+			0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13,
+			0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13,
+		}
+		testEncData    = []byte{3, 2, 1}
+		testMetadata   = []byte{1, 2, 3}
+		testChildIndex = uint32(9)
 	)
 
-	p, err := hop.NewPayloadFromReader(bytes.NewReader(test.payload))
+	p, err := hop.NewPayloadFromReader(
+		bytes.NewReader(test.payload),
+		&hop.BlindingKit{},
+		// NOTE(1/17/23: Something like this is needed if you start
+		// to include route blinding fields in the top level onion TLV
+		// payload since NewPayloadFromReader attempts to handle
+		// the route blinding payload alongside the onion TLV payload.
+		// hop.MakeBlindingKit(&mockBlindHopProcessor{},
+		// 	testPubKey, false, false, 20001, 0,
+		// ),
+	)
 	if !reflect.DeepEqual(test.expErr, err) {
 		t.Fatalf("expected error mismatch, want: %v, got: %v",
 			test.expErr, err)
@@ -240,6 +383,43 @@ func testDecodeHopPayloadValidation(t *testing.T, test decodePayloadTest) {
 		}
 	} else if p.MPP != nil {
 		t.Fatalf("unexpected MPP payload")
+	}
+
+	if test.shouldHaveAMP {
+		if p.AMP == nil {
+			t.Fatalf("payload should have AMP record")
+		}
+		require.Equal(t, testRootShare, p.AMP.RootShare())
+		require.Equal(t, testSetID, p.AMP.SetID())
+		require.Equal(t, testChildIndex, p.AMP.ChildIndex())
+	} else if p.AMP != nil {
+		t.Fatalf("unexpected AMP payload")
+	}
+
+	if test.shouldHaveMetadata {
+		if p.Metadata() == nil {
+			t.Fatalf("payload should have metadata")
+		}
+		require.Equal(t, testMetadata, p.Metadata())
+	} else if p.Metadata() != nil {
+		t.Fatalf("unexpected metadata")
+	}
+
+	if test.shouldHaveEncData {
+		require.NotNil(t, p.EncryptedData(),
+			"payment should have encrypted data")
+
+		require.Equal(t, testEncData, p.EncryptedData())
+	} else {
+		require.Nil(t, p.EncryptedData())
+	}
+
+	if test.shouldHaveBlinding {
+		require.NotNil(t, p.BlindingPoint())
+
+		require.Equal(t, testPubKey, p.BlindingPoint())
+	} else {
+		require.Nil(t, p.BlindingPoint())
 	}
 
 	// Convert expected nil map to empty map, because we always expect an

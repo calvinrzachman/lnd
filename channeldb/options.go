@@ -3,8 +3,8 @@ package channeldb
 import (
 	"time"
 
-	"github.com/lightningnetwork/lnd/channeldb/kvdb"
 	"github.com/lightningnetwork/lnd/clock"
+	"github.com/lightningnetwork/lnd/kvdb"
 )
 
 const (
@@ -17,11 +17,26 @@ const (
 	// in order to reply to gossip queries. This produces a cache size of
 	// around 40MB.
 	DefaultChannelCacheSize = 20000
+
+	// DefaultPreAllocCacheNumNodes is the default number of channels we
+	// assume for mainnet for pre-allocating the graph cache. As of
+	// September 2021, there currently are 14k nodes in a strictly pruned
+	// graph, so we choose a number that is slightly higher.
+	DefaultPreAllocCacheNumNodes = 15000
 )
+
+// OptionalMiragtionConfig defines the flags used to signal whether a
+// particular migration needs to be applied.
+type OptionalMiragtionConfig struct {
+	// PruneRevocationLog specifies that the revocation log migration needs
+	// to be applied.
+	PruneRevocationLog bool
+}
 
 // Options holds parameters for tuning and customizing a channeldb.DB.
 type Options struct {
 	kvdb.BoltBackendConfig
+	OptionalMiragtionConfig
 
 	// RejectCacheSize is the maximum number of rejectCacheEntries to hold
 	// in the rejection cache.
@@ -35,12 +50,34 @@ type Options struct {
 	// wait before attempting to commit a pending set of updates.
 	BatchCommitInterval time.Duration
 
+	// PreAllocCacheNumNodes is the number of nodes we expect to be in the
+	// graph cache, so we can pre-allocate the map accordingly.
+	PreAllocCacheNumNodes int
+
+	// UseGraphCache denotes whether the in-memory graph cache should be
+	// used or a fallback version that uses the underlying database for
+	// path finding.
+	UseGraphCache bool
+
+	// NoMigration specifies that underlying backend was opened in read-only
+	// mode and migrations shouldn't be performed. This can be useful for
+	// applications that use the channeldb package as a library.
+	NoMigration bool
+
 	// clock is the time source used by the database.
 	clock clock.Clock
 
 	// dryRun will fail to commit a successful migration when opening the
 	// database if set to true.
 	dryRun bool
+
+	// keepFailedPaymentAttempts determines whether failed htlc attempts
+	// are kept on disk or removed to save space.
+	keepFailedPaymentAttempts bool
+
+	// storeFinalHtlcResolutions determines whether to persistently store
+	// the final resolution of incoming htlcs.
+	storeFinalHtlcResolutions bool
 }
 
 // DefaultOptions returns an Options populated with default values.
@@ -52,9 +89,13 @@ func DefaultOptions() Options {
 			AutoCompactMinAge: kvdb.DefaultBoltAutoCompactMinAge,
 			DBTimeout:         kvdb.DefaultDBTimeout,
 		},
-		RejectCacheSize:  DefaultRejectCacheSize,
-		ChannelCacheSize: DefaultChannelCacheSize,
-		clock:            clock.NewDefaultClock(),
+		OptionalMiragtionConfig: OptionalMiragtionConfig{},
+		RejectCacheSize:         DefaultRejectCacheSize,
+		ChannelCacheSize:        DefaultChannelCacheSize,
+		PreAllocCacheNumNodes:   DefaultPreAllocCacheNumNodes,
+		UseGraphCache:           true,
+		NoMigration:             false,
+		clock:                   clock.NewDefaultClock(),
 	}
 }
 
@@ -72,6 +113,20 @@ func OptionSetRejectCacheSize(n int) OptionModifier {
 func OptionSetChannelCacheSize(n int) OptionModifier {
 	return func(o *Options) {
 		o.ChannelCacheSize = n
+	}
+}
+
+// OptionSetPreAllocCacheNumNodes sets the PreAllocCacheNumNodes to n.
+func OptionSetPreAllocCacheNumNodes(n int) OptionModifier {
+	return func(o *Options) {
+		o.PreAllocCacheNumNodes = n
+	}
+}
+
+// OptionSetUseGraphCache sets the UseGraphCache option to the given value.
+func OptionSetUseGraphCache(use bool) OptionModifier {
+	return func(o *Options) {
+		o.UseGraphCache = use
 	}
 }
 
@@ -105,6 +160,14 @@ func OptionSetBatchCommitInterval(interval time.Duration) OptionModifier {
 	}
 }
 
+// OptionNoMigration allows the database to be opened in read only mode by
+// disabling migrations.
+func OptionNoMigration(b bool) OptionModifier {
+	return func(o *Options) {
+		o.NoMigration = b
+	}
+}
+
 // OptionClock sets a non-default clock dependency.
 func OptionClock(clock clock.Clock) OptionModifier {
 	return func(o *Options) {
@@ -112,10 +175,36 @@ func OptionClock(clock clock.Clock) OptionModifier {
 	}
 }
 
-// OptionDryRunMigration controls whether or not to intentially fail to commit a
+// OptionDryRunMigration controls whether or not to intentionally fail to commit a
 // successful migration that occurs when opening the database.
 func OptionDryRunMigration(dryRun bool) OptionModifier {
 	return func(o *Options) {
 		o.dryRun = dryRun
+	}
+}
+
+// OptionKeepFailedPaymentAttempts controls whether failed payment attempts are
+// kept on disk after a payment settles.
+func OptionKeepFailedPaymentAttempts(keepFailedPaymentAttempts bool) OptionModifier {
+	return func(o *Options) {
+		o.keepFailedPaymentAttempts = keepFailedPaymentAttempts
+	}
+}
+
+// OptionStoreFinalHtlcResolutions controls whether to persistently store the
+// final resolution of incoming htlcs.
+func OptionStoreFinalHtlcResolutions(
+	storeFinalHtlcResolutions bool) OptionModifier {
+
+	return func(o *Options) {
+		o.storeFinalHtlcResolutions = storeFinalHtlcResolutions
+	}
+}
+
+// OptionPruneRevocationLog specifies whether the migration for pruning
+// revocation logs needs to be applied or not.
+func OptionPruneRevocationLog(prune bool) OptionModifier {
+	return func(o *Options) {
+		o.OptionalMiragtionConfig.PruneRevocationLog = prune
 	}
 }

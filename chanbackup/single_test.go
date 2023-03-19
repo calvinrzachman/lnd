@@ -8,14 +8,16 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/keychain"
+	"github.com/lightningnetwork/lnd/lnencrypt"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/shachain"
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -101,14 +103,12 @@ func genRandomOpenChannelShell() (*channeldb.OpenChannel, error) {
 		return nil, err
 	}
 
-	_, pub := btcec.PrivKeyFromBytes(btcec.S256(), testPriv[:])
+	_, pub := btcec.PrivKeyFromBytes(testPriv[:])
 
 	var chanPoint wire.OutPoint
 	if _, err := rand.Read(chanPoint.Hash[:]); err != nil {
 		return nil, err
 	}
-
-	pub.Curve = nil
 
 	chanPoint.Index = uint32(rand.Intn(math.MaxUint16))
 
@@ -124,10 +124,7 @@ func genRandomOpenChannelShell() (*channeldb.OpenChannel, error) {
 		isInitiator = true
 	}
 
-	chanType := channeldb.SingleFunderBit
-	if rand.Int63()%2 == 0 {
-		chanType = channeldb.SingleFunderTweaklessBit
-	}
+	chanType := channeldb.ChannelType(rand.Intn(8))
 
 	return &channeldb.OpenChannel{
 		ChainHash:       chainHash,
@@ -137,6 +134,7 @@ func genRandomOpenChannelShell() (*channeldb.OpenChannel, error) {
 		ShortChannelID: lnwire.NewShortChanIDFromInt(
 			uint64(rand.Int63()),
 		),
+		ThawHeight:  rand.Uint32(),
 		IdentityPub: pub,
 		LocalChanCfg: channeldb.ChannelConfig{
 			ChannelConstraints: channeldb.ChannelConstraints{
@@ -206,14 +204,11 @@ func TestSinglePackUnpack(t *testing.T) {
 	// contains all the information we need to create a static channel
 	// backup.
 	channel, err := genRandomOpenChannelShell()
-	if err != nil {
-		t.Fatalf("unable to gen open channel: %v", err)
-	}
+	require.NoError(t, err, "unable to gen open channel")
 
 	singleChanBackup := NewSingle(channel, []net.Addr{addr1, addr2})
-	singleChanBackup.RemoteNodePub.Curve = nil
 
-	keyRing := &mockKeyRing{}
+	keyRing := &lnencrypt.MockKeyRing{}
 
 	versionTestCases := []struct {
 		// version is the pack/unpack version that we should use to
@@ -240,6 +235,13 @@ func TestSinglePackUnpack(t *testing.T) {
 		// problem.
 		{
 			version: AnchorsCommitVersion,
+			valid:   true,
+		},
+
+		// The new script enforced channel lease version should
+		// pack/unpack with no problem.
+		{
+			version: ScriptEnforcedLeaseVersion,
 			valid:   true,
 		},
 
@@ -280,7 +282,6 @@ func TestSinglePackUnpack(t *testing.T) {
 				t.Fatalf("#%v unable to unpack single: %v",
 					i, err)
 			}
-			unpackedSingle.RemoteNodePub.Curve = nil
 
 			assertSingleEqual(t, singleChanBackup, unpackedSingle)
 
@@ -293,8 +294,9 @@ func TestSinglePackUnpack(t *testing.T) {
 				t.Fatalf("unable to serialize single: %v", err)
 			}
 
+			// Mutate the version byte to an unknown version.
 			rawBytes := rawSingle.Bytes()
-			rawBytes[0] ^= 5
+			rawBytes[0] = ^uint8(0)
 
 			newReader := bytes.NewReader(rawBytes)
 			err = unpackedSingle.Deserialize(newReader)
@@ -311,7 +313,7 @@ func TestSinglePackUnpack(t *testing.T) {
 func TestPackedSinglesUnpack(t *testing.T) {
 	t.Parallel()
 
-	keyRing := &mockKeyRing{}
+	keyRing := &lnencrypt.MockKeyRing{}
 
 	// To start, we'll create 10 new singles, and them assemble their
 	// packed forms into a slice.
@@ -338,9 +340,7 @@ func TestPackedSinglesUnpack(t *testing.T) {
 	// With all singles packed, we'll create the grouped type and attempt
 	// to Unpack all of them in a single go.
 	freshSingles, err := PackedSingles(packedSingles).Unpack(keyRing)
-	if err != nil {
-		t.Fatalf("unable to unpack singles: %v", err)
-	}
+	require.NoError(t, err, "unable to unpack singles")
 
 	// The set of freshly unpacked singles should exactly match the initial
 	// set of singles that we packed before.
@@ -362,7 +362,7 @@ func TestPackedSinglesUnpack(t *testing.T) {
 func TestSinglePackStaticChanBackups(t *testing.T) {
 	t.Parallel()
 
-	keyRing := &mockKeyRing{}
+	keyRing := &lnencrypt.MockKeyRing{}
 
 	// First, we'll create a set of random single, and along the way,
 	// create a map that will let us look up each single by its chan point.
@@ -384,9 +384,7 @@ func TestSinglePackStaticChanBackups(t *testing.T) {
 	// Now that we have all of our singles are created, we'll attempt to
 	// pack them all in a single batch.
 	packedSingleMap, err := PackStaticChanBackups(unpackedSingles, keyRing)
-	if err != nil {
-		t.Fatalf("unable to pack backups: %v", err)
-	}
+	require.NoError(t, err, "unable to pack backups")
 
 	// With our packed singles obtained, we'll ensure that each of them
 	// match their unpacked counterparts after they themselves have been
@@ -410,8 +408,9 @@ func TestSinglePackStaticChanBackups(t *testing.T) {
 
 	// If we attempt to pack again, but force the key ring to fail, then
 	// the entire method should fail.
+	keyRing.Fail = true
 	_, err = PackStaticChanBackups(
-		unpackedSingles, &mockKeyRing{true},
+		unpackedSingles, &lnencrypt.MockKeyRing{Fail: true},
 	)
 	if err == nil {
 		t.Fatalf("pack attempt should fail")
@@ -430,14 +429,12 @@ func TestSingleUnconfirmedChannel(t *testing.T) {
 	// we need to create a static channel backup but simulate an
 	// unconfirmed channel by setting the block height to 0.
 	channel, err := genRandomOpenChannelShell()
-	if err != nil {
-		t.Fatalf("unable to gen open channel: %v", err)
-	}
+	require.NoError(t, err, "unable to gen open channel")
 	channel.ShortChannelID.BlockHeight = 0
 	channel.FundingBroadcastHeight = fundingBroadcastHeight
 
 	singleChanBackup := NewSingle(channel, []net.Addr{addr1, addr2})
-	keyRing := &mockKeyRing{}
+	keyRing := &lnencrypt.MockKeyRing{}
 
 	// Pack it and then unpack it again to make sure everything is written
 	// correctly, then check that the block height of the unpacked
@@ -448,9 +445,7 @@ func TestSingleUnconfirmedChannel(t *testing.T) {
 	}
 	var unpackedSingle Single
 	err = unpackedSingle.UnpackFromReader(&b, keyRing)
-	if err != nil {
-		t.Fatalf("unable to unpack single: %v", err)
-	}
+	require.NoError(t, err, "unable to unpack single")
 	if unpackedSingle.ShortChannelID.BlockHeight != fundingBroadcastHeight {
 		t.Fatalf("invalid block height. got %d expected %d.",
 			unpackedSingle.ShortChannelID.BlockHeight,

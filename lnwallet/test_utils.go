@@ -5,21 +5,21 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"io"
-	"io/ioutil"
 	prand "math/rand"
 	"net"
-	"os"
+	"testing"
 
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/shachain"
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -93,29 +93,32 @@ var (
 		0xc5, 0x6c, 0xbb, 0xac, 0x46, 0x22, 0x08, 0x22,
 		0x21, 0xa8, 0x76, 0x8d, 0x1d, 0x09,
 	}
+
+	aliceDustLimit = btcutil.Amount(200)
+	bobDustLimit   = btcutil.Amount(1300)
+
+	testChannelCapacity float64 = 10
 )
 
 // CreateTestChannels creates to fully populated channels to be used within
 // testing fixtures. The channels will be returned as if the funding process
 // has just completed.  The channel itself is funded with 10 BTC, with 5 BTC
-// allocated to each side. Within the channel, Alice is the initiator. The
-// function also returns a "cleanup" function that is meant to be called once
-// the test has been finalized. The clean up function will remote all temporary
-// files created. If tweaklessCommits is true, then the commits within the
-// channels will use the new format, otherwise the legacy format.
-func CreateTestChannels(chanType channeldb.ChannelType) (
-	*LightningChannel, *LightningChannel, func(), error) {
+// allocated to each side. Within the channel, Alice is the initiator. If
+// tweaklessCommits is true, then the commits within the channels will use the
+// new format, otherwise the legacy format.
+func CreateTestChannels(t *testing.T, chanType channeldb.ChannelType,
+	dbModifiers ...channeldb.OptionModifier) (*LightningChannel,
+	*LightningChannel, error) {
 
-	channelCapacity, err := btcutil.NewAmount(10)
+	channelCapacity, err := btcutil.NewAmount(testChannelCapacity)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
 	channelBal := channelCapacity / 2
-	aliceDustLimit := btcutil.Amount(200)
-	bobDustLimit := btcutil.Amount(1300)
 	csvTimeoutAlice := uint32(5)
 	csvTimeoutBob := uint32(4)
+	isAliceInitiator := true
 
 	prevOut := &wire.OutPoint{
 		Hash:  chainhash.Hash(testHdSeed),
@@ -134,14 +137,14 @@ func CreateTestChannels(chanType channeldb.ChannelType) (
 		copy(key[:], testWalletPrivKey[:])
 		key[0] ^= byte(i + 1)
 
-		aliceKey, _ := btcec.PrivKeyFromBytes(btcec.S256(), key)
+		aliceKey, _ := btcec.PrivKeyFromBytes(key)
 		aliceKeys = append(aliceKeys, aliceKey)
 
 		key = make([]byte, len(bobsPrivKey))
 		copy(key[:], bobsPrivKey)
 		key[0] ^= byte(i + 1)
 
-		bobKey, _ := btcec.PrivKeyFromBytes(btcec.S256(), key)
+		bobKey, _ := btcec.PrivKeyFromBytes(key)
 		bobKeys = append(bobKeys, bobKey)
 	}
 
@@ -198,58 +201,54 @@ func CreateTestChannels(chanType channeldb.ChannelType) (
 
 	bobRoot, err := chainhash.NewHash(bobKeys[0].Serialize())
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	bobPreimageProducer := shachain.NewRevocationProducer(*bobRoot)
 	bobFirstRevoke, err := bobPreimageProducer.AtIndex(0)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	bobCommitPoint := input.ComputeCommitmentPoint(bobFirstRevoke[:])
 
 	aliceRoot, err := chainhash.NewHash(aliceKeys[0].Serialize())
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	alicePreimageProducer := shachain.NewRevocationProducer(*aliceRoot)
 	aliceFirstRevoke, err := alicePreimageProducer.AtIndex(0)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	aliceCommitPoint := input.ComputeCommitmentPoint(aliceFirstRevoke[:])
 
 	aliceCommitTx, bobCommitTx, err := CreateCommitmentTxns(
 		channelBal, channelBal, &aliceCfg, &bobCfg, aliceCommitPoint,
-		bobCommitPoint, *fundingTxIn, chanType,
+		bobCommitPoint, *fundingTxIn, chanType, isAliceInitiator, 0,
 	)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
-	alicePath, err := ioutil.TempDir("", "alicedb")
+	dbAlice, err := channeldb.Open(t.TempDir(), dbModifiers...)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
+	t.Cleanup(func() {
+		require.NoError(t, dbAlice.Close())
+	})
 
-	dbAlice, err := channeldb.Open(alicePath)
+	dbBob, err := channeldb.Open(t.TempDir(), dbModifiers...)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
-
-	bobPath, err := ioutil.TempDir("", "bobdb")
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	dbBob, err := channeldb.Open(bobPath)
-	if err != nil {
-		return nil, nil, nil, err
-	}
+	t.Cleanup(func() {
+		require.NoError(t, dbBob.Close())
+	})
 
 	estimator := chainfee.NewStaticEstimator(6000, 0)
 	feePerKw, err := estimator.EstimateFeePerKW(1)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	commitFee := calcStaticFee(chanType, 0)
 	var anchorAmt btcutil.Amount
@@ -301,7 +300,7 @@ func CreateTestChannels(chanType channeldb.ChannelType) (
 
 	var chanIDBytes [8]byte
 	if _, err := io.ReadFull(rand.Reader, chanIDBytes[:]); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
 	shortChanID := lnwire.NewShortChanIDFromInt(
@@ -315,14 +314,14 @@ func CreateTestChannels(chanType channeldb.ChannelType) (
 		FundingOutpoint:         *prevOut,
 		ShortChannelID:          shortChanID,
 		ChanType:                chanType,
-		IsInitiator:             true,
+		IsInitiator:             isAliceInitiator,
 		Capacity:                channelCapacity,
 		RemoteCurrentRevocation: bobCommitPoint,
 		RevocationProducer:      alicePreimageProducer,
 		RevocationStore:         shachain.NewRevocationStore(),
 		LocalCommitment:         aliceLocalCommit,
 		RemoteCommitment:        aliceRemoteCommit,
-		Db:                      dbAlice,
+		Db:                      dbAlice.ChannelStateDB(),
 		Packager:                channeldb.NewChannelPackager(shortChanID),
 		FundingTxn:              testTx,
 	}
@@ -333,14 +332,14 @@ func CreateTestChannels(chanType channeldb.ChannelType) (
 		FundingOutpoint:         *prevOut,
 		ShortChannelID:          shortChanID,
 		ChanType:                chanType,
-		IsInitiator:             false,
+		IsInitiator:             !isAliceInitiator,
 		Capacity:                channelCapacity,
 		RemoteCurrentRevocation: aliceCommitPoint,
 		RevocationProducer:      bobPreimageProducer,
 		RevocationStore:         shachain.NewRevocationStore(),
 		LocalCommitment:         bobLocalCommit,
 		RemoteCommitment:        bobRemoteCommit,
-		Db:                      dbBob,
+		Db:                      dbBob.ChannelStateDB(),
 		Packager:                channeldb.NewChannelPackager(shortChanID),
 	}
 
@@ -354,9 +353,12 @@ func CreateTestChannels(chanType channeldb.ChannelType) (
 		aliceSigner, aliceChannelState, alicePool,
 	)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	alicePool.Start()
+	t.Cleanup(func() {
+		require.NoError(t, alicePool.Stop())
+	})
 
 	obfuscator := createStateHintObfuscator(aliceChannelState)
 
@@ -365,21 +367,24 @@ func CreateTestChannels(chanType channeldb.ChannelType) (
 		bobSigner, bobChannelState, bobPool,
 	)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	bobPool.Start()
+	t.Cleanup(func() {
+		require.NoError(t, bobPool.Stop())
+	})
 
 	err = SetStateNumHint(
 		aliceCommitTx, 0, obfuscator,
 	)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	err = SetStateNumHint(
 		bobCommitTx, 0, obfuscator,
 	)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
 	addr := &net.TCPAddr{
@@ -387,7 +392,7 @@ func CreateTestChannels(chanType channeldb.ChannelType) (
 		Port: 18556,
 	}
 	if err := channelAlice.channelState.SyncPending(addr, 101); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
 	addr = &net.TCPAddr{
@@ -396,25 +401,17 @@ func CreateTestChannels(chanType channeldb.ChannelType) (
 	}
 
 	if err := channelBob.channelState.SyncPending(addr, 101); err != nil {
-		return nil, nil, nil, err
-	}
-
-	cleanUpFunc := func() {
-		os.RemoveAll(bobPath)
-		os.RemoveAll(alicePath)
-
-		alicePool.Stop()
-		bobPool.Stop()
+		return nil, nil, err
 	}
 
 	// Now that the channel are open, simulate the start of a session by
 	// having Alice and Bob extend their revocation windows to each other.
 	err = initRevocationWindows(channelAlice, channelBob)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
-	return channelAlice, channelBob, cleanUpFunc, nil
+	return channelAlice, channelBob, nil
 }
 
 // initRevocationWindows simulates a new channel being opened within the p2p
@@ -446,7 +443,7 @@ func pubkeyFromHex(keyHex string) (*btcec.PublicKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	return btcec.ParsePubKey(bytes, btcec.S256())
+	return btcec.ParsePubKey(bytes)
 }
 
 // privkeyFromHex parses a Bitcoin private key from a hex encoded string.
@@ -455,7 +452,7 @@ func privkeyFromHex(keyHex string) (*btcec.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	key, _ := btcec.PrivKeyFromBytes(btcec.S256(), bytes)
+	key, _ := btcec.PrivKeyFromBytes(bytes)
 	return key, nil
 
 }
@@ -506,7 +503,7 @@ func ForceStateTransition(chanA, chanB *LightningChannel) error {
 		return err
 	}
 
-	bobRevocation, _, err := chanB.RevokeCurrentCommitment()
+	bobRevocation, _, _, err := chanB.RevokeCurrentCommitment()
 	if err != nil {
 		return err
 	}
@@ -522,7 +519,7 @@ func ForceStateTransition(chanA, chanB *LightningChannel) error {
 		return err
 	}
 
-	aliceRevocation, _, err := chanA.RevokeCurrentCommitment()
+	aliceRevocation, _, _, err := chanA.RevokeCurrentCommitment()
 	if err != nil {
 		return err
 	}

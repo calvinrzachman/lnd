@@ -1,15 +1,18 @@
 package wtmock
 
 import (
+	"encoding/binary"
 	"net"
 	"sync"
 	"sync/atomic"
 
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/watchtower/blob"
 	"github.com/lightningnetwork/lnd/watchtower/wtdb"
 )
+
+var byteOrder = binary.BigEndian
 
 type towerPK [33]byte
 
@@ -18,16 +21,23 @@ type keyIndexKey struct {
 	blobType blob.Type
 }
 
+type rangeIndexArrayMap map[wtdb.SessionID]map[lnwire.ChannelID]*wtdb.RangeIndex
+
+type rangeIndexKVStore map[wtdb.SessionID]map[lnwire.ChannelID]*mockKVStore
+
 // ClientDB is a mock, in-memory database or testing the watchtower client
 // behavior.
 type ClientDB struct {
 	nextTowerID uint64 // to be used atomically
 
-	mu             sync.Mutex
-	summaries      map[lnwire.ChannelID]wtdb.ClientChanSummary
-	activeSessions map[wtdb.SessionID]wtdb.ClientSession
-	towerIndex     map[towerPK]wtdb.TowerID
-	towers         map[wtdb.TowerID]*wtdb.Tower
+	mu                    sync.Mutex
+	summaries             map[lnwire.ChannelID]wtdb.ClientChanSummary
+	activeSessions        map[wtdb.SessionID]wtdb.ClientSession
+	ackedUpdates          rangeIndexArrayMap
+	persistedAckedUpdates rangeIndexKVStore
+	committedUpdates      map[wtdb.SessionID][]wtdb.CommittedUpdate
+	towerIndex            map[towerPK]wtdb.TowerID
+	towers                map[wtdb.TowerID]*wtdb.Tower
 
 	nextIndex     uint32
 	indexes       map[keyIndexKey]uint32
@@ -37,12 +47,21 @@ type ClientDB struct {
 // NewClientDB initializes a new mock ClientDB.
 func NewClientDB() *ClientDB {
 	return &ClientDB{
-		summaries:      make(map[lnwire.ChannelID]wtdb.ClientChanSummary),
-		activeSessions: make(map[wtdb.SessionID]wtdb.ClientSession),
-		towerIndex:     make(map[towerPK]wtdb.TowerID),
-		towers:         make(map[wtdb.TowerID]*wtdb.Tower),
-		indexes:        make(map[keyIndexKey]uint32),
-		legacyIndexes:  make(map[wtdb.TowerID]uint32),
+		summaries: make(
+			map[lnwire.ChannelID]wtdb.ClientChanSummary,
+		),
+		activeSessions: make(
+			map[wtdb.SessionID]wtdb.ClientSession,
+		),
+		ackedUpdates:          make(rangeIndexArrayMap),
+		persistedAckedUpdates: make(rangeIndexKVStore),
+		committedUpdates: make(
+			map[wtdb.SessionID][]wtdb.CommittedUpdate,
+		),
+		towerIndex:    make(map[towerPK]wtdb.TowerID),
+		towers:        make(map[wtdb.TowerID]*wtdb.Tower),
+		indexes:       make(map[keyIndexKey]uint32),
+		legacyIndexes: make(map[wtdb.TowerID]uint32),
 	}
 }
 
@@ -75,7 +94,7 @@ func (m *ClientDB) CreateTower(lnAddr *lnwire.NetAddress) (*wtdb.Tower, error) {
 	} else {
 		towerID = wtdb.TowerID(atomic.AddUint64(&m.nextTowerID, 1))
 		tower = &wtdb.Tower{
-			ID:          wtdb.TowerID(towerID),
+			ID:          towerID,
 			IdentityKey: lnAddr.IdentityKey,
 			Addresses:   []net.Addr{lnAddr.Address},
 		}
@@ -129,7 +148,7 @@ func (m *ClientDB) RemoveTower(pubKey *btcec.PublicKey, addr net.Addr) error {
 	}
 
 	for id, session := range towerSessions {
-		if len(session.CommittedUpdates) > 0 {
+		if len(m.committedUpdates[session.ID]) > 0 {
 			return wtdb.ErrTowerUnackedUpdates
 		}
 		session.Status = wtdb.CSessionInactive
@@ -193,26 +212,33 @@ func (m *ClientDB) ListTowers() ([]*wtdb.Tower, error) {
 // MarkBackupIneligible records that particular commit height is ineligible for
 // backup. This allows the client to track which updates it should not attempt
 // to retry after startup.
-func (m *ClientDB) MarkBackupIneligible(chanID lnwire.ChannelID, commitHeight uint64) error {
+func (m *ClientDB) MarkBackupIneligible(_ lnwire.ChannelID, _ uint64) error {
 	return nil
 }
 
 // ListClientSessions returns the set of all client sessions known to the db. An
 // optional tower ID can be used to filter out any client sessions in the
 // response that do not correspond to this tower.
-func (m *ClientDB) ListClientSessions(
-	tower *wtdb.TowerID) (map[wtdb.SessionID]*wtdb.ClientSession, error) {
+func (m *ClientDB) ListClientSessions(tower *wtdb.TowerID,
+	opts ...wtdb.ClientSessionListOption) (
+	map[wtdb.SessionID]*wtdb.ClientSession, error) {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.listClientSessions(tower)
+	return m.listClientSessions(tower, opts...)
 }
 
 // listClientSessions returns the set of all client sessions known to the db. An
 // optional tower ID can be used to filter out any client sessions in the
 // response that do not correspond to this tower.
-func (m *ClientDB) listClientSessions(
-	tower *wtdb.TowerID) (map[wtdb.SessionID]*wtdb.ClientSession, error) {
+func (m *ClientDB) listClientSessions(tower *wtdb.TowerID,
+	opts ...wtdb.ClientSessionListOption) (
+	map[wtdb.SessionID]*wtdb.ClientSession, error) {
+
+	cfg := wtdb.NewClientSessionCfg()
+	for _, o := range opts {
+		o(cfg)
+	}
 
 	sessions := make(map[wtdb.SessionID]*wtdb.ClientSession)
 	for _, session := range m.activeSessions {
@@ -221,9 +247,80 @@ func (m *ClientDB) listClientSessions(
 			continue
 		}
 		sessions[session.ID] = &session
+
+		if cfg.PerMaxHeight != nil {
+			for chanID, index := range m.ackedUpdates[session.ID] {
+				cfg.PerMaxHeight(
+					&session, chanID, index.MaxHeight(),
+				)
+			}
+		}
+
+		if cfg.PerNumAckedUpdates != nil {
+			for chanID, index := range m.ackedUpdates[session.ID] {
+				cfg.PerNumAckedUpdates(
+					&session, chanID,
+					uint16(index.NumInSet()),
+				)
+			}
+		}
+
+		if cfg.PerCommittedUpdate != nil {
+			for _, update := range m.committedUpdates[session.ID] {
+				update := update
+				cfg.PerCommittedUpdate(&session, &update)
+			}
+		}
 	}
 
 	return sessions, nil
+}
+
+// FetchSessionCommittedUpdates retrieves the current set of un-acked updates
+// of the given session.
+func (m *ClientDB) FetchSessionCommittedUpdates(id *wtdb.SessionID) (
+	[]wtdb.CommittedUpdate, error) {
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	updates, ok := m.committedUpdates[*id]
+	if !ok {
+		return nil, wtdb.ErrClientSessionNotFound
+	}
+
+	return updates, nil
+}
+
+// IsAcked returns true if the given backup has been backed up using the given
+// session.
+func (m *ClientDB) IsAcked(id *wtdb.SessionID, backupID *wtdb.BackupID) (bool,
+	error) {
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	index, ok := m.ackedUpdates[*id][backupID.ChanID]
+	if !ok {
+		return false, nil
+	}
+
+	return index.IsInIndex(backupID.CommitHeight), nil
+}
+
+// NumAckedUpdates returns the number of backups that have been successfully
+// backed up using the given session.
+func (m *ClientDB) NumAckedUpdates(id *wtdb.SessionID) (uint64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var numAcked uint64
+
+	for _, index := range m.ackedUpdates[*id] {
+		numAcked += index.NumInSet()
+	}
+
+	return numAcked, nil
 }
 
 // CreateClientSession records a newly negotiated client session in the set of
@@ -270,9 +367,12 @@ func (m *ClientDB) CreateClientSession(session *wtdb.ClientSession) error {
 			Policy:           session.Policy,
 			RewardPkScript:   cloneBytes(session.RewardPkScript),
 		},
-		CommittedUpdates: make([]wtdb.CommittedUpdate, 0),
-		AckedUpdates:     make(map[uint16]wtdb.BackupID),
 	}
+	m.ackedUpdates[session.ID] = make(map[lnwire.ChannelID]*wtdb.RangeIndex)
+	m.persistedAckedUpdates[session.ID] = make(
+		map[lnwire.ChannelID]*mockKVStore,
+	)
+	m.committedUpdates[session.ID] = make([]wtdb.CommittedUpdate, 0)
 
 	return nil
 }
@@ -333,7 +433,7 @@ func (m *ClientDB) CommitUpdate(id *wtdb.SessionID,
 	}
 
 	// Check if an update has already been committed for this state.
-	for _, dbUpdate := range session.CommittedUpdates {
+	for _, dbUpdate := range m.committedUpdates[session.ID] {
 		if dbUpdate.SeqNum == update.SeqNum {
 			// If the breach hint matches, we'll just return the
 			// last applied value so the client can retransmit.
@@ -352,7 +452,9 @@ func (m *ClientDB) CommitUpdate(id *wtdb.SessionID,
 	}
 
 	// Save the update and increment the sequence number.
-	session.CommittedUpdates = append(session.CommittedUpdates, *update)
+	m.committedUpdates[session.ID] = append(
+		m.committedUpdates[session.ID], *update,
+	)
 	session.SeqNum++
 	m.activeSessions[*id] = session
 
@@ -362,7 +464,9 @@ func (m *ClientDB) CommitUpdate(id *wtdb.SessionID,
 // AckUpdate persists an acknowledgment for a given (session, seqnum) pair. This
 // removes the update from the set of committed updates, and validates the
 // lastApplied value returned from the tower.
-func (m *ClientDB) AckUpdate(id *wtdb.SessionID, seqNum, lastApplied uint16) error {
+func (m *ClientDB) AckUpdate(id *wtdb.SessionID, seqNum,
+	lastApplied uint16) error {
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -386,7 +490,7 @@ func (m *ClientDB) AckUpdate(id *wtdb.SessionID, seqNum, lastApplied uint16) err
 
 	// Retrieve the committed update, failing if none is found. We should
 	// only receive acks for state updates that we send.
-	updates := session.CommittedUpdates
+	updates := m.committedUpdates[session.ID]
 	for i, update := range updates {
 		if update.SeqNum != seqNum {
 			continue
@@ -397,9 +501,27 @@ func (m *ClientDB) AckUpdate(id *wtdb.SessionID, seqNum, lastApplied uint16) err
 		// along with the next update.
 		copy(updates[:i], updates[i+1:])
 		updates[len(updates)-1] = wtdb.CommittedUpdate{}
-		session.CommittedUpdates = updates[:len(updates)-1]
+		m.committedUpdates[session.ID] = updates[:len(updates)-1]
 
-		session.AckedUpdates[seqNum] = update.BackupID
+		chanID := update.BackupID.ChanID
+		if _, ok := m.ackedUpdates[*id][update.BackupID.ChanID]; !ok {
+			index, err := wtdb.NewRangeIndex(nil)
+			if err != nil {
+				return err
+			}
+
+			m.ackedUpdates[*id][chanID] = index
+			m.persistedAckedUpdates[*id][chanID] = newMockKVStore()
+		}
+
+		err := m.ackedUpdates[*id][chanID].Add(
+			update.BackupID.CommitHeight,
+			m.persistedAckedUpdates[*id][chanID],
+		)
+		if err != nil {
+			return err
+		}
+
 		session.TowerLastApplied = lastApplied
 
 		m.activeSessions[*id] = session
@@ -467,4 +589,40 @@ func copyTower(tower *wtdb.Tower) *wtdb.Tower {
 	copy(t.Addresses, tower.Addresses)
 
 	return t
+}
+
+type mockKVStore struct {
+	kv map[uint64]uint64
+
+	err error
+}
+
+func newMockKVStore() *mockKVStore {
+	return &mockKVStore{
+		kv: make(map[uint64]uint64),
+	}
+}
+
+func (m *mockKVStore) Put(key, value []byte) error {
+	if m.err != nil {
+		return m.err
+	}
+
+	k := byteOrder.Uint64(key)
+	v := byteOrder.Uint64(value)
+
+	m.kv[k] = v
+
+	return nil
+}
+
+func (m *mockKVStore) Delete(key []byte) error {
+	if m.err != nil {
+		return m.err
+	}
+
+	k := byteOrder.Uint64(key)
+	delete(m.kv, k)
+
+	return nil
 }

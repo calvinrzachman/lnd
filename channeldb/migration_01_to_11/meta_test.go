@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/go-errors/errors"
-	"github.com/lightningnetwork/lnd/channeldb/kvdb"
+	"github.com/lightningnetwork/lnd/kvdb"
 )
 
 // applyMigration is a helper test function that encapsulates the general steps
@@ -12,8 +12,7 @@ import (
 func applyMigration(t *testing.T, beforeMigration, afterMigration func(d *DB),
 	migrationFunc migration, shouldFail bool) {
 
-	cdb, cleanUp, err := makeTestDB()
-	defer cleanUp()
+	cdb, err := makeTestDB(t)
 	if err != nil {
 		t.Fatal(err)
 	}

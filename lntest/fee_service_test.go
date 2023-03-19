@@ -11,7 +11,7 @@ import (
 
 // TestFeeService tests the itest fee estimating web service.
 func TestFeeService(t *testing.T) {
-	service := startFeeService()
+	service := startFeeService(t)
 	defer service.stop()
 
 	service.setFee(5000)
@@ -34,6 +34,6 @@ func TestFeeService(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(
-		t, "{\"fee_by_block_target\":{\"2\":20000}}", string(body),
+		t, "{\"fee_by_block_target\":{\"1\":20000}}", string(body),
 	)
 }

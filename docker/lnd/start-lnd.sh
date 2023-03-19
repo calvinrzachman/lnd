@@ -59,11 +59,12 @@ exec lnd \
     --noseedbackup \
     "--$CHAIN.active" \
     "--$CHAIN.$NETWORK" \
-    "--$CHAIN.node"="btcd" \
+    "--$CHAIN.node"="$BACKEND" \
     "--$BACKEND.rpccert"="/rpc/rpc.cert" \
     "--$BACKEND.rpchost"="blockchain" \
     "--$BACKEND.rpcuser"="$RPCUSER" \
     "--$BACKEND.rpcpass"="$RPCPASS" \
     "--rpclisten=$HOSTNAME:10009" \
+    "--rpclisten=localhost:10009" \
     --debuglevel="$DEBUG" \
     "$@"

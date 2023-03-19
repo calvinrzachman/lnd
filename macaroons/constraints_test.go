@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/lightningnetwork/lnd/macaroons"
+	"github.com/stretchr/testify/require"
 	macaroon "gopkg.in/macaroon.v2"
 )
 
@@ -22,9 +23,7 @@ func createDummyMacaroon(t *testing.T) *macaroon.Macaroon {
 	dummyMacaroon, err := macaroon.New(
 		testRootKey, testID, testLocation, testVersion,
 	)
-	if err != nil {
-		t.Fatalf("Error creating initial macaroon: %v", err)
-	}
+	require.NoError(t, err, "Error creating initial macaroon")
 	return dummyMacaroon
 }
 
@@ -40,9 +39,7 @@ func TestAddConstraints(t *testing.T) {
 	newMac, err := macaroons.AddConstraints(
 		initialMac, macaroons.TimeoutConstraint(1),
 	)
-	if err != nil {
-		t.Fatalf("Error adding constraint: %v", err)
-	}
+	require.NoError(t, err, "Error adding constraint")
 	if &newMac == &initialMac {
 		t.Fatalf("Initial macaroon has been changed, something " +
 			"went wrong!")
@@ -65,9 +62,7 @@ func TestTimeoutConstraint(t *testing.T) {
 	// function to.
 	testMacaroon := createDummyMacaroon(t)
 	err := constraintFunc(testMacaroon)
-	if err != nil {
-		t.Fatalf("Error applying timeout constraint: %v", err)
-	}
+	require.NoError(t, err, "Error applying timeout constraint")
 
 	// Finally, check that the created caveat has an
 	// acceptable value.
@@ -75,6 +70,7 @@ func TestTimeoutConstraint(t *testing.T) {
 		string(testMacaroon.Caveats()[0].Id),
 		expectedTimeCaveatSubstring,
 	) {
+
 		t.Fatalf("Added caveat '%s' does not meet the expectations!",
 			testMacaroon.Caveats()[0].Id)
 	}
@@ -90,9 +86,7 @@ func TestIpLockConstraint(t *testing.T) {
 	// function to.
 	testMacaroon := createDummyMacaroon(t)
 	err := constraintFunc(testMacaroon)
-	if err != nil {
-		t.Fatalf("Error applying timeout constraint: %v", err)
-	}
+	require.NoError(t, err, "Error applying timeout constraint")
 
 	// Finally, check that the created caveat has an
 	// acceptable value.
@@ -111,4 +105,45 @@ func TestIPLockBadIP(t *testing.T) {
 	if err == nil {
 		t.Fatalf("IPLockConstraint with bad IP should fail.")
 	}
+}
+
+// TestCustomConstraint tests that a custom constraint with a name and value can
+// be added to a macaroon.
+func TestCustomConstraint(t *testing.T) {
+	// Test a custom caveat with a value first.
+	constraintFunc := macaroons.CustomConstraint("unit-test", "test-value")
+	testMacaroon := createDummyMacaroon(t)
+	require.NoError(t, constraintFunc(testMacaroon))
+
+	require.Equal(
+		t, []byte("lnd-custom unit-test test-value"),
+		testMacaroon.Caveats()[0].Id,
+	)
+	require.True(t, macaroons.HasCustomCaveat(testMacaroon, "unit-test"))
+	require.False(t, macaroons.HasCustomCaveat(testMacaroon, "test-value"))
+	require.False(t, macaroons.HasCustomCaveat(testMacaroon, "something"))
+	require.False(t, macaroons.HasCustomCaveat(nil, "foo"))
+
+	customCaveatCondition := macaroons.GetCustomCaveatCondition(
+		testMacaroon, "unit-test",
+	)
+	require.Equal(t, customCaveatCondition, "test-value")
+
+	// Custom caveats don't necessarily need a value, just the name is fine
+	// too to create a tagged macaroon.
+	constraintFunc = macaroons.CustomConstraint("unit-test", "")
+	testMacaroon = createDummyMacaroon(t)
+	require.NoError(t, constraintFunc(testMacaroon))
+
+	require.Equal(
+		t, []byte("lnd-custom unit-test"), testMacaroon.Caveats()[0].Id,
+	)
+	require.True(t, macaroons.HasCustomCaveat(testMacaroon, "unit-test"))
+	require.False(t, macaroons.HasCustomCaveat(testMacaroon, "test-value"))
+	require.False(t, macaroons.HasCustomCaveat(testMacaroon, "something"))
+
+	customCaveatCondition = macaroons.GetCustomCaveatCondition(
+		testMacaroon, "unit-test",
+	)
+	require.Equal(t, customCaveatCondition, "")
 }

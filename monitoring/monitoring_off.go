@@ -1,3 +1,4 @@
+//go:build !monitoring
 // +build !monitoring
 
 package monitoring
@@ -5,9 +6,8 @@ package monitoring
 import (
 	"fmt"
 
-	"google.golang.org/grpc"
-
 	"github.com/lightningnetwork/lnd/lncfg"
+	"google.golang.org/grpc"
 )
 
 // GetPromInterceptors returns the set of interceptors for Prometheus

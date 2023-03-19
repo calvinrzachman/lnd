@@ -2,15 +2,15 @@ package channeldb_test
 
 import (
 	"bytes"
-	"io/ioutil"
 	"path/filepath"
 	"runtime"
 	"testing"
 
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/channeldb"
-	"github.com/lightningnetwork/lnd/channeldb/kvdb"
+	"github.com/lightningnetwork/lnd/kvdb"
 	"github.com/lightningnetwork/lnd/lnwire"
+	"github.com/stretchr/testify/require"
 )
 
 // TestPkgFilterBruteForce tests the behavior of a pkg filter up to size 1000,
@@ -109,10 +109,10 @@ func checkPkgFilterRand(t *testing.T, b, p uint16) {
 }
 
 // checkPkgFilterEncodeDecode tests the serialization of a pkg filter by:
-//   1) writing it to a buffer
-//   2) verifying the number of bytes written matches the filter's Size()
-//   3) reconstructing the filter decoding the bytes
-//   4) checking that the two filters are the same according to Equal
+//  1. writing it to a buffer
+//  2. verifying the number of bytes written matches the filter's Size()
+//  3. reconstructing the filter decoding the bytes
+//  4. checking that the two filters are the same according to Equal
 func checkPkgFilterEncodeDecode(t *testing.T, i uint16, f *channeldb.PkgFilter) {
 	var b bytes.Buffer
 	if err := f.Encode(&b); err != nil {
@@ -729,6 +729,49 @@ func TestPackagerSettleFailsThenAdds(t *testing.T) {
 	}
 }
 
+// TestPackagerWipeAll checks that when the method is called, all the related
+// forwarding packages will be removed.
+func TestPackagerWipeAll(t *testing.T) {
+	t.Parallel()
+
+	db := makeFwdPkgDB(t, "")
+
+	shortChanID := lnwire.NewShortChanIDFromInt(1)
+	packager := channeldb.NewChannelPackager(shortChanID)
+
+	// To begin, there should be no forwarding packages on disk.
+	fwdPkgs := loadFwdPkgs(t, db, packager)
+	require.Empty(t, fwdPkgs, "no forwarding packages should exist")
+
+	// Now, check we can wipe without error since it's a noop.
+	err := kvdb.Update(db, packager.Wipe, func() {})
+	require.NoError(t, err, "unable to wipe fwdpkg")
+
+	// Next, create and write two forwarding packages with no htlcs.
+	fwdPkg1 := channeldb.NewFwdPkg(shortChanID, 0, nil, nil)
+	fwdPkg2 := channeldb.NewFwdPkg(shortChanID, 1, nil, nil)
+
+	err = kvdb.Update(db, func(tx kvdb.RwTx) error {
+		if err := packager.AddFwdPkg(tx, fwdPkg2); err != nil {
+			return err
+		}
+		return packager.AddFwdPkg(tx, fwdPkg1)
+	}, func() {})
+	require.NoError(t, err, "unable to add fwd pkg")
+
+	// There should now be two fwdpkgs on disk.
+	fwdPkgs = loadFwdPkgs(t, db, packager)
+	require.Equal(t, 2, len(fwdPkgs), "expected 2 fwdpkg")
+
+	// Now, wipe all forwarding packages from disk.
+	err = kvdb.Update(db, packager.Wipe, func() {})
+	require.NoError(t, err, "unable to wipe fwdpkg")
+
+	// Check that the packages were actually removed.
+	fwdPkgs = loadFwdPkgs(t, db, packager)
+	require.Empty(t, fwdPkgs, "no forwarding packages should exist")
+}
+
 // assertFwdPkgState checks the current state of a fwdpkg meets our
 // expectations.
 func assertFwdPkgState(t *testing.T, fwdPkg *channeldb.FwdPkg,
@@ -799,21 +842,13 @@ func loadFwdPkgs(t *testing.T, db kvdb.Backend,
 // provided path is an empty, it will create a temp dir/file to use.
 func makeFwdPkgDB(t *testing.T, path string) kvdb.Backend { // nolint:unparam
 	if path == "" {
-		var err error
-		path, err = ioutil.TempDir("", "fwdpkgdb")
-		if err != nil {
-			t.Fatalf("unable to create temp path: %v", err)
-		}
-
-		path = filepath.Join(path, "fwdpkg.db")
+		path = filepath.Join(t.TempDir(), "fwdpkg.db")
 	}
 
 	bdb, err := kvdb.Create(
 		kvdb.BoltBackendName, path, true, kvdb.DefaultDBTimeout,
 	)
-	if err != nil {
-		t.Fatalf("unable to open boltdb: %v", err)
-	}
+	require.NoError(t, err, "unable to open boltdb")
 
 	return bdb
 }

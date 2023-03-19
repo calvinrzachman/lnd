@@ -4,6 +4,11 @@
     "title": "walletrpc/walletkit.proto",
     "version": "version not set"
   },
+  "tags": [
+    {
+      "name": "WalletKit"
+    }
+  ],
   "consumes": [
     "application/json"
   ],
@@ -11,10 +16,91 @@
     "application/json"
   ],
   "paths": {
+    "/v2/wallet/accounts": {
+      "get": {
+        "summary": "ListAccounts retrieves all accounts belonging to the wallet by default. A\nname and key scope filter can be provided to filter through all of the\nwallet accounts and return only those matching.",
+        "operationId": "WalletKit_ListAccounts",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/walletrpcListAccountsResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "name",
+            "description": "An optional filter to only return accounts matching this name.",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "address_type",
+            "description": "An optional filter to only return accounts matching this address type.",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "enum": [
+              "UNKNOWN",
+              "WITNESS_PUBKEY_HASH",
+              "NESTED_WITNESS_PUBKEY_HASH",
+              "HYBRID_NESTED_WITNESS_PUBKEY_HASH",
+              "TAPROOT_PUBKEY"
+            ],
+            "default": "UNKNOWN"
+          }
+        ],
+        "tags": [
+          "WalletKit"
+        ]
+      }
+    },
+    "/v2/wallet/accounts/import": {
+      "post": {
+        "summary": "ImportAccount imports an account backed by an account extended public key.\nThe master key fingerprint denotes the fingerprint of the root key\ncorresponding to the account public key (also known as the key with\nderivation path m/). This may be required by some hardware wallets for\nproper identification and signing.",
+        "description": "The address type can usually be inferred from the key's version, but may be\nrequired for certain keys to map them into the proper scope.\n\nFor BIP-0044 keys, an address type must be specified as we intend to not\nsupport importing BIP-0044 keys into the wallet using the legacy\npay-to-pubkey-hash (P2PKH) scheme. A nested witness address type will force\nthe standard BIP-0049 derivation scheme, while a witness address type will\nforce the standard BIP-0084 derivation scheme.\n\nFor BIP-0049 keys, an address type must also be specified to make a\ndistinction between the standard BIP-0049 address schema (nested witness\npubkeys everywhere) and our own BIP-0049Plus address schema (nested pubkeys\nexternally, witness pubkeys internally).\n\nNOTE: Events (deposits/spends) for keys derived from an account will only be\ndetected by lnd if they happen after the import. Rescans to detect past\nevents will be supported later on.",
+        "operationId": "WalletKit_ImportAccount",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/walletrpcImportAccountResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/walletrpcImportAccountRequest"
+            }
+          }
+        ],
+        "tags": [
+          "WalletKit"
+        ]
+      }
+    },
     "/v2/wallet/address/next": {
       "post": {
         "summary": "NextAddr returns the next unused address within the wallet.",
-        "operationId": "NextAddr",
+        "operationId": "WalletKit_NextAddr",
         "responses": {
           "200": {
             "description": "A successful response.",
@@ -23,9 +109,9 @@
             }
           },
           "default": {
-            "description": "An unexpected error response",
+            "description": "An unexpected error response.",
             "schema": {
-              "$ref": "#/definitions/runtimeError"
+              "$ref": "#/definitions/rpcStatus"
             }
           }
         },
@@ -44,11 +130,118 @@
         ]
       }
     },
+    "/v2/wallet/address/signmessage": {
+      "post": {
+        "summary": "SignMessageWithAddr returns the compact signature (base64 encoded) created\nwith the private key of the provided address. This requires the address\nto be solely based on a public key lock (no scripts). Obviously the internal\nlnd wallet has to possess the private key of the address otherwise\nan error is returned.",
+        "description": "This method aims to provide full compatibility with the bitcoin-core and\nbtcd implementation. Bitcoin-core's algorithm is not specified in a\nBIP and only applicable for legacy addresses. This method enhances the\nsigning for additional address types: P2WKH, NP2WKH, P2TR.\nFor P2TR addresses this represents a special case. ECDSA is used to create\na compact signature which makes the public key of the signature recoverable.",
+        "operationId": "WalletKit_SignMessageWithAddr",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/walletrpcSignMessageWithAddrResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/walletrpcSignMessageWithAddrRequest"
+            }
+          }
+        ],
+        "tags": [
+          "WalletKit"
+        ]
+      }
+    },
+    "/v2/wallet/address/verifymessage": {
+      "post": {
+        "summary": "VerifyMessageWithAddr returns the validity and the recovered public key of\nthe provided compact signature (base64 encoded). The verification is\ntwofold. First the validity of the signature itself is checked and then\nit is verified that the recovered public key of the signature equals\nthe public key of the provided address. There is no dependence on the\nprivate key of the address therefore also external addresses are allowed\nto verify signatures.\nSupported address types are P2PKH, P2WKH, NP2WKH, P2TR.",
+        "description": "This method is the counterpart of the related signing method\n(SignMessageWithAddr) and aims to provide full compatibility to\nbitcoin-core's implementation. Although bitcoin-core/btcd only provide\nthis functionality for legacy addresses this function enhances it to\nthe address types: P2PKH, P2WKH, NP2WKH, P2TR.\n\nThe verification for P2TR addresses is a special case and requires the\nECDSA compact signature to compare the reovered public key to the internal\ntaproot key. The compact ECDSA signature format was used because there\nare still no known compact signature schemes for schnorr signatures.",
+        "operationId": "WalletKit_VerifyMessageWithAddr",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/walletrpcVerifyMessageWithAddrResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/walletrpcVerifyMessageWithAddrRequest"
+            }
+          }
+        ],
+        "tags": [
+          "WalletKit"
+        ]
+      }
+    },
+    "/v2/wallet/addresses": {
+      "get": {
+        "summary": "ListAddresses retrieves all the addresses along with their balance. An\naccount name filter can be provided to filter through all of the\nwallet accounts and return the addresses of only those matching.",
+        "operationId": "WalletKit_ListAddresses",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/walletrpcListAddressesResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "account_name",
+            "description": "An optional filter to only return addresses matching this account.",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "show_custom_accounts",
+            "description": "An optional flag to return LND's custom accounts (Purpose=1017)\npublic key along with other addresses.",
+            "in": "query",
+            "required": false,
+            "type": "boolean"
+          }
+        ],
+        "tags": [
+          "WalletKit"
+        ]
+      }
+    },
     "/v2/wallet/bumpfee": {
       "post": {
         "summary": "BumpFee bumps the fee of an arbitrary input within a transaction. This RPC\ntakes a different approach than bitcoind's bumpfee command. lnd has a\ncentral batching engine in which inputs with similar fee rates are batched\ntogether to save on transaction fees. Due to this, we cannot rely on\nbumping the fee on a specific transaction, since transactions can change at\nany point with the addition of new inputs. The list of inputs that\ncurrently exist within lnd's central batching engine can be retrieved\nthrough the PendingSweeps RPC.",
         "description": "When bumping the fee of an input that currently exists within lnd's central\nbatching engine, a higher fee transaction will be created that replaces the\nlower fee transaction through the Replace-By-Fee (RBF) policy. If it\n\nThis RPC also serves useful when wanting to perform a Child-Pays-For-Parent\n(CPFP), where the child transaction pays for its parent's fee. This can be\ndone by specifying an outpoint within the low fee transaction that is under\nthe control of the wallet.\n\nThe fee preference can be expressed either as a specific fee rate or a delta\nof blocks in which the output should be swept on-chain within. If a fee\npreference is not explicitly specified, then an error is returned.\n\nNote that this RPC currently doesn't perform any validation checks on the\nfee preference being provided. For now, the responsibility of ensuring that\nthe new fee preference is sufficient is delegated to the user.",
-        "operationId": "BumpFee",
+        "operationId": "WalletKit_BumpFee",
         "responses": {
           "200": {
             "description": "A successful response.",
@@ -57,9 +250,9 @@
             }
           },
           "default": {
-            "description": "An unexpected error response",
+            "description": "An unexpected error response.",
             "schema": {
-              "$ref": "#/definitions/runtimeError"
+              "$ref": "#/definitions/rpcStatus"
             }
           }
         },
@@ -81,7 +274,7 @@
     "/v2/wallet/estimatefee/{conf_target}": {
       "get": {
         "summary": "EstimateFee attempts to query the internal fee estimator of the wallet to\ndetermine the fee (in sat/kw) to attach to a transaction in order to\nachieve the confirmation target.",
-        "operationId": "EstimateFee",
+        "operationId": "WalletKit_EstimateFee",
         "responses": {
           "200": {
             "description": "A successful response.",
@@ -90,9 +283,9 @@
             }
           },
           "default": {
-            "description": "An unexpected error response",
+            "description": "An unexpected error response.",
             "schema": {
-              "$ref": "#/definitions/runtimeError"
+              "$ref": "#/definitions/rpcStatus"
             }
           }
         },
@@ -114,7 +307,7 @@
     "/v2/wallet/key": {
       "post": {
         "summary": "DeriveKey attempts to derive an arbitrary key specified by the passed\nKeyLocator.",
-        "operationId": "DeriveKey",
+        "operationId": "WalletKit_DeriveKey",
         "responses": {
           "200": {
             "description": "A successful response.",
@@ -123,9 +316,9 @@
             }
           },
           "default": {
-            "description": "An unexpected error response",
+            "description": "An unexpected error response.",
             "schema": {
-              "$ref": "#/definitions/runtimeError"
+              "$ref": "#/definitions/rpcStatus"
             }
           }
         },
@@ -144,10 +337,44 @@
         ]
       }
     },
+    "/v2/wallet/key/import": {
+      "post": {
+        "summary": "ImportPublicKey imports a public key as watch-only into the wallet. The\npublic key is converted into a simple address of the given type and that\naddress script is watched on chain. For Taproot keys, this will only watch\nthe BIP-0086 style output script. Use ImportTapscript for more advanced key\nspend or script spend outputs.",
+        "description": "NOTE: Events (deposits/spends) for a key will only be detected by lnd if\nthey happen after the import. Rescans to detect past events will be\nsupported later on.",
+        "operationId": "WalletKit_ImportPublicKey",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/walletrpcImportPublicKeyResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/walletrpcImportPublicKeyRequest"
+            }
+          }
+        ],
+        "tags": [
+          "WalletKit"
+        ]
+      }
+    },
     "/v2/wallet/key/next": {
       "post": {
         "summary": "DeriveNextKey attempts to derive the *next* key within the key family\n(account in BIP43) specified. This method should return the next external\nchild within this branch.",
-        "operationId": "DeriveNextKey",
+        "operationId": "WalletKit_DeriveNextKey",
         "responses": {
           "200": {
             "description": "A successful response.",
@@ -156,9 +383,9 @@
             }
           },
           "default": {
-            "description": "An unexpected error response",
+            "description": "An unexpected error response.",
             "schema": {
-              "$ref": "#/definitions/runtimeError"
+              "$ref": "#/definitions/rpcStatus"
             }
           }
         },
@@ -181,7 +408,7 @@
       "post": {
         "summary": "FinalizePsbt expects a partial transaction with all inputs and outputs fully\ndeclared and tries to sign all inputs that belong to the wallet. Lnd must be\nthe last signer of the transaction. That means, if there are any unsigned\nnon-witness inputs or inputs without UTXO information attached or inputs\nwithout witness data that do not belong to lnd's wallet, this method will\nfail. If no error is returned, the PSBT is ready to be extracted and the\nfinal TX within to be broadcast.",
         "description": "NOTE: This method does NOT publish the transaction once finalized. It is the\ncaller's responsibility to either publish the transaction on success or\nunlock/release any locked UTXOs in case of an error in this method.",
-        "operationId": "FinalizePsbt",
+        "operationId": "WalletKit_FinalizePsbt",
         "responses": {
           "200": {
             "description": "A successful response.",
@@ -190,9 +417,9 @@
             }
           },
           "default": {
-            "description": "An unexpected error response",
+            "description": "An unexpected error response.",
             "schema": {
-              "$ref": "#/definitions/runtimeError"
+              "$ref": "#/definitions/rpcStatus"
             }
           }
         },
@@ -215,7 +442,7 @@
       "post": {
         "summary": "FundPsbt creates a fully populated PSBT that contains enough inputs to fund\nthe outputs specified in the template. There are two ways of specifying a\ntemplate: Either by passing in a PSBT with at least one output declared or\nby passing in a raw TxTemplate message.",
         "description": "If there are no inputs specified in the template, coin selection is\nperformed automatically. If the template does contain any inputs, it is\nassumed that full coin selection happened externally and no additional\ninputs are added. If the specified inputs aren't enough to fund the outputs\nwith the given fee rate, an error is returned.\n\nAfter either selecting or verifying the inputs, all input UTXOs are locked\nwith an internal app ID.\n\nNOTE: If this method returns without an error, it is the caller's\nresponsibility to either spend the locked UTXOs (by finalizing and then\npublishing the transaction) or to unlock/release the locked UTXOs in case of\nan error on the caller's side.",
-        "operationId": "FundPsbt",
+        "operationId": "WalletKit_FundPsbt",
         "responses": {
           "200": {
             "description": "A successful response.",
@@ -224,9 +451,9 @@
             }
           },
           "default": {
-            "description": "An unexpected error response",
+            "description": "An unexpected error response.",
             "schema": {
-              "$ref": "#/definitions/runtimeError"
+              "$ref": "#/definitions/rpcStatus"
             }
           }
         },
@@ -245,10 +472,77 @@
         ]
       }
     },
+    "/v2/wallet/psbt/sign": {
+      "post": {
+        "summary": "SignPsbt expects a partial transaction with all inputs and outputs fully\ndeclared and tries to sign all unsigned inputs that have all required fields\n(UTXO information, BIP32 derivation information, witness or sig scripts)\nset.\nIf no error is returned, the PSBT is ready to be given to the next signer or\nto be finalized if lnd was the last signer.",
+        "description": "NOTE: This RPC only signs inputs (and only those it can sign), it does not\nperform any other tasks (such as coin selection, UTXO locking or\ninput/output/fee value validation, PSBT finalization). Any input that is\nincomplete will be skipped.",
+        "operationId": "WalletKit_SignPsbt",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/walletrpcSignPsbtResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/walletrpcSignPsbtRequest"
+            }
+          }
+        ],
+        "tags": [
+          "WalletKit"
+        ]
+      }
+    },
+    "/v2/wallet/reserve": {
+      "get": {
+        "summary": "RequiredReserve returns the minimum amount of satoshis that should be kept\nin the wallet in order to fee bump anchor channels if necessary. The value\nscales with the number of public anchor channels but is capped at a maximum.",
+        "operationId": "WalletKit_RequiredReserve",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/walletrpcRequiredReserveResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "additional_public_channels",
+            "description": "The number of additional channels the user would like to open.",
+            "in": "query",
+            "required": false,
+            "type": "integer",
+            "format": "int64"
+          }
+        ],
+        "tags": [
+          "WalletKit"
+        ]
+      }
+    },
     "/v2/wallet/send": {
       "post": {
         "summary": "SendOutputs is similar to the existing sendmany call in Bitcoind, and\nallows the caller to create a transaction that sends to several outputs at\nonce. This is ideal when wanting to batch create a set of transactions.",
-        "operationId": "SendOutputs",
+        "operationId": "WalletKit_SendOutputs",
         "responses": {
           "200": {
             "description": "A successful response.",
@@ -257,9 +551,9 @@
             }
           },
           "default": {
-            "description": "An unexpected error response",
+            "description": "An unexpected error response.",
             "schema": {
-              "$ref": "#/definitions/runtimeError"
+              "$ref": "#/definitions/rpcStatus"
             }
           }
         },
@@ -281,7 +575,7 @@
     "/v2/wallet/sweeps": {
       "get": {
         "summary": "ListSweeps returns a list of the sweep transactions our node has produced.\nNote that these sweeps may not be confirmed yet, as we record sweeps on\nbroadcast, not confirmation.",
-        "operationId": "ListSweeps",
+        "operationId": "WalletKit_ListSweeps",
         "responses": {
           "200": {
             "description": "A successful response.",
@@ -290,9 +584,9 @@
             }
           },
           "default": {
-            "description": "An unexpected error response",
+            "description": "An unexpected error response.",
             "schema": {
-              "$ref": "#/definitions/runtimeError"
+              "$ref": "#/definitions/rpcStatus"
             }
           }
         },
@@ -302,8 +596,7 @@
             "description": "Retrieve the full sweep transaction details. If false, only the sweep txids\nwill be returned. Note that some sweeps that LND publishes will have been\nreplaced-by-fee, so will not be included in this output.",
             "in": "query",
             "required": false,
-            "type": "boolean",
-            "format": "boolean"
+            "type": "boolean"
           }
         ],
         "tags": [
@@ -315,7 +608,7 @@
       "get": {
         "summary": "PendingSweeps returns lists of on-chain outputs that lnd is currently\nattempting to sweep within its central batching engine. Outputs with similar\nfee rates are batched together in order to sweep them within a single\ntransaction.",
         "description": "NOTE: Some of the fields within PendingSweepsRequest are not guaranteed to\nremain supported. This is an advanced API that depends on the internals of\nthe UtxoSweeper, so things may change.",
-        "operationId": "PendingSweeps",
+        "operationId": "WalletKit_PendingSweeps",
         "responses": {
           "200": {
             "description": "A successful response.",
@@ -324,9 +617,9 @@
             }
           },
           "default": {
-            "description": "An unexpected error response",
+            "description": "An unexpected error response.",
             "schema": {
-              "$ref": "#/definitions/runtimeError"
+              "$ref": "#/definitions/rpcStatus"
             }
           }
         },
@@ -335,10 +628,44 @@
         ]
       }
     },
+    "/v2/wallet/tapscript/import": {
+      "post": {
+        "summary": "ImportTapscript imports a Taproot script and internal key and adds the\nresulting Taproot output key as a watch-only output script into the wallet.\nFor BIP-0086 style Taproot keys (no root hash commitment and no script spend\npath) use ImportPublicKey.",
+        "description": "NOTE: Events (deposits/spends) for a key will only be detected by lnd if\nthey happen after the import. Rescans to detect past events will be\nsupported later on.\n\nNOTE: Taproot keys imported through this RPC currently _cannot_ be used for\nfunding PSBTs. Only tracking the balance and UTXOs is currently supported.",
+        "operationId": "WalletKit_ImportTapscript",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/walletrpcImportTapscriptResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/walletrpcImportTapscriptRequest"
+            }
+          }
+        ],
+        "tags": [
+          "WalletKit"
+        ]
+      }
+    },
     "/v2/wallet/tx": {
       "post": {
         "summary": "PublishTransaction attempts to publish the passed transaction to the\nnetwork. Once this returns without an error, the wallet will continually\nattempt to re-broadcast the transaction on start up, until it enters the\nchain.",
-        "operationId": "PublishTransaction",
+        "operationId": "WalletKit_PublishTransaction",
         "responses": {
           "200": {
             "description": "A successful response.",
@@ -347,9 +674,9 @@
             }
           },
           "default": {
-            "description": "An unexpected error response",
+            "description": "An unexpected error response.",
             "schema": {
-              "$ref": "#/definitions/runtimeError"
+              "$ref": "#/definitions/rpcStatus"
             }
           }
         },
@@ -371,7 +698,7 @@
     "/v2/wallet/tx/label": {
       "post": {
         "summary": "LabelTransaction adds a label to a transaction. If the transaction already\nhas a label the call will fail unless the overwrite bool is set. This will\noverwrite the exiting transaction label. Labels must not be empty, and\ncannot exceed 500 characters.",
-        "operationId": "LabelTransaction",
+        "operationId": "WalletKit_LabelTransaction",
         "responses": {
           "200": {
             "description": "A successful response.",
@@ -380,9 +707,9 @@
             }
           },
           "default": {
-            "description": "An unexpected error response",
+            "description": "An unexpected error response.",
             "schema": {
-              "$ref": "#/definitions/runtimeError"
+              "$ref": "#/definitions/rpcStatus"
             }
           }
         },
@@ -403,8 +730,8 @@
     },
     "/v2/wallet/utxos": {
       "post": {
-        "summary": "ListUnspent returns a list of all utxos spendable by the wallet with a\nnumber of confirmations between the specified minimum and maximum.",
-        "operationId": "ListUnspent",
+        "summary": "ListUnspent returns a list of all utxos spendable by the wallet with a\nnumber of confirmations between the specified minimum and maximum. By\ndefault, all utxos are listed. To list only the unconfirmed utxos, set\nthe unconfirmed_only to true.",
+        "operationId": "WalletKit_ListUnspent",
         "responses": {
           "200": {
             "description": "A successful response.",
@@ -413,12 +740,22 @@
             }
           },
           "default": {
-            "description": "An unexpected error response",
+            "description": "An unexpected error response.",
             "schema": {
-              "$ref": "#/definitions/runtimeError"
+              "$ref": "#/definitions/rpcStatus"
             }
           }
         },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/walletrpcListUnspentRequest"
+            }
+          }
+        ],
         "tags": [
           "WalletKit"
         ]
@@ -427,7 +764,7 @@
     "/v2/wallet/utxos/lease": {
       "post": {
         "summary": "LeaseOutput locks an output to the given ID, preventing it from being\navailable for any future coin selection attempts. The absolute time of the\nlock's expiration is returned. The expiration of the lock can be extended by\nsuccessive invocations of this RPC. Outputs can be unlocked before their\nexpiration through `ReleaseOutput`.",
-        "operationId": "LeaseOutput",
+        "operationId": "WalletKit_LeaseOutput",
         "responses": {
           "200": {
             "description": "A successful response.",
@@ -436,9 +773,9 @@
             }
           },
           "default": {
-            "description": "An unexpected error response",
+            "description": "An unexpected error response.",
             "schema": {
-              "$ref": "#/definitions/runtimeError"
+              "$ref": "#/definitions/rpcStatus"
             }
           }
         },
@@ -457,10 +794,33 @@
         ]
       }
     },
+    "/v2/wallet/utxos/leases": {
+      "post": {
+        "summary": "ListLeases lists all currently locked utxos.",
+        "operationId": "WalletKit_ListLeases",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/walletrpcListLeasesResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "tags": [
+          "WalletKit"
+        ]
+      }
+    },
     "/v2/wallet/utxos/release": {
       "post": {
         "summary": "ReleaseOutput unlocks an output, allowing it to be available for coin\nselection if it remains unspent. The ID should match the one used to\noriginally lock the output.",
-        "operationId": "ReleaseOutput",
+        "operationId": "WalletKit_ReleaseOutput",
         "responses": {
           "200": {
             "description": "A successful response.",
@@ -469,9 +829,9 @@
             }
           },
           "default": {
-            "description": "An unexpected error response",
+            "description": "An unexpected error response.",
             "schema": {
-              "$ref": "#/definitions/runtimeError"
+              "$ref": "#/definitions/rpcStatus"
             }
           }
         },
@@ -510,10 +870,12 @@
         "WITNESS_PUBKEY_HASH",
         "NESTED_PUBKEY_HASH",
         "UNUSED_WITNESS_PUBKEY_HASH",
-        "UNUSED_NESTED_PUBKEY_HASH"
+        "UNUSED_NESTED_PUBKEY_HASH",
+        "TAPROOT_PUBKEY",
+        "UNUSED_TAPROOT_PUBKEY"
       ],
       "default": "WITNESS_PUBKEY_HASH",
-      "description": "- `p2wkh`: Pay to witness key hash (`WITNESS_PUBKEY_HASH` = 0)\n- `np2wkh`: Pay to nested witness key hash (`NESTED_PUBKEY_HASH` = 1)",
+      "description": "- `p2wkh`: Pay to witness key hash (`WITNESS_PUBKEY_HASH` = 0)\n- `np2wkh`: Pay to nested witness key hash (`NESTED_PUBKEY_HASH` = 1)\n- `p2tr`: Pay to taproot pubkey (`TAPROOT_PUBKEY` = 4)",
       "title": "`AddressType` has to be one of:"
     },
     "lnrpcOutPoint": {
@@ -532,6 +894,66 @@
           "type": "integer",
           "format": "int64",
           "description": "The index of the output on the transaction."
+        }
+      }
+    },
+    "lnrpcOutputDetail": {
+      "type": "object",
+      "properties": {
+        "output_type": {
+          "$ref": "#/definitions/lnrpcOutputScriptType",
+          "title": "The type of the output"
+        },
+        "address": {
+          "type": "string",
+          "title": "The address"
+        },
+        "pk_script": {
+          "type": "string",
+          "title": "The pkscript in hex"
+        },
+        "output_index": {
+          "type": "string",
+          "format": "int64",
+          "title": "The output index used in the raw transaction"
+        },
+        "amount": {
+          "type": "string",
+          "format": "int64",
+          "title": "The value of the output coin in satoshis"
+        },
+        "is_our_address": {
+          "type": "boolean",
+          "title": "Denotes if the output is controlled by the internal wallet"
+        }
+      }
+    },
+    "lnrpcOutputScriptType": {
+      "type": "string",
+      "enum": [
+        "SCRIPT_TYPE_PUBKEY_HASH",
+        "SCRIPT_TYPE_SCRIPT_HASH",
+        "SCRIPT_TYPE_WITNESS_V0_PUBKEY_HASH",
+        "SCRIPT_TYPE_WITNESS_V0_SCRIPT_HASH",
+        "SCRIPT_TYPE_PUBKEY",
+        "SCRIPT_TYPE_MULTISIG",
+        "SCRIPT_TYPE_NULLDATA",
+        "SCRIPT_TYPE_NON_STANDARD",
+        "SCRIPT_TYPE_WITNESS_UNKNOWN",
+        "SCRIPT_TYPE_WITNESS_V1_TAPROOT"
+      ],
+      "default": "SCRIPT_TYPE_PUBKEY_HASH"
+    },
+    "lnrpcPreviousOutPoint": {
+      "type": "object",
+      "properties": {
+        "outpoint": {
+          "type": "string",
+          "description": "The outpoint in format txid:n."
+        },
+        "is_our_output": {
+          "type": "boolean",
+          "description": "Denotes if the outpoint is controlled by the internal wallet.\nThe flag will only detect p2wkh, np2wkh and p2tr inputs as its own."
         }
       }
     },
@@ -576,7 +998,14 @@
           "items": {
             "type": "string"
           },
-          "title": "Addresses that received funds for this transaction"
+          "description": "Addresses that received funds for this transaction. Deprecated as it is\nnow incorporated in the output_details field."
+        },
+        "output_details": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/lnrpcOutputDetail"
+          },
+          "title": "Outputs that received funds for this transaction"
         },
         "raw_tx_hex": {
           "type": "string",
@@ -585,6 +1014,13 @@
         "label": {
           "type": "string",
           "description": "A label that was optionally set on transaction broadcast."
+        },
+        "previous_outpoints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/lnrpcPreviousOutPoint"
+          },
+          "description": "PreviousOutpoints/Inputs of this transaction."
         }
       }
     },
@@ -643,12 +1079,9 @@
         }
       }
     },
-    "runtimeError": {
+    "rpcStatus": {
       "type": "object",
       "properties": {
-        "error": {
-          "type": "string"
-        },
         "code": {
           "type": "integer",
           "format": "int32"
@@ -670,11 +1103,11 @@
         "raw_key_bytes": {
           "type": "string",
           "format": "byte",
-          "description": "The raw bytes of the key being identified. Either this or the KeyLocator\nmust be specified."
+          "description": "The raw bytes of the public key in the key pair being identified. Either\nthis or the KeyLocator must be specified."
         },
         "key_loc": {
           "$ref": "#/definitions/signrpcKeyLocator",
-          "description": "The key locator that identifies which key to use for signing. Either this\nor the raw bytes of the target key must be specified."
+          "description": "The key locator that identifies which private key to use for signing.\nEither this or the raw bytes of the target public key must be specified."
         }
       }
     },
@@ -708,8 +1141,86 @@
         }
       }
     },
+    "walletrpcAccount": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The name used to identify the account."
+        },
+        "address_type": {
+          "$ref": "#/definitions/walletrpcAddressType",
+          "description": "The type of addresses the account supports."
+        },
+        "extended_public_key": {
+          "type": "string",
+          "description": "The public key backing the account that all keys are derived from\nrepresented as an extended key. This will always be empty for the default\nimported account in which single public keys are imported into."
+        },
+        "master_key_fingerprint": {
+          "type": "string",
+          "format": "byte",
+          "description": "The fingerprint of the root key from which the account public key was\nderived from. This will always be zero for the default imported account in\nwhich single public keys are imported into. The bytes are in big-endian\norder."
+        },
+        "derivation_path": {
+          "type": "string",
+          "description": "The derivation path corresponding to the account public key. This will\nalways be empty for the default imported account in which single public keys\nare imported into."
+        },
+        "external_key_count": {
+          "type": "integer",
+          "format": "int64",
+          "description": "The number of keys derived from the external branch of the account public\nkey. This will always be zero for the default imported account in which\nsingle public keys are imported into."
+        },
+        "internal_key_count": {
+          "type": "integer",
+          "format": "int64",
+          "description": "The number of keys derived from the internal branch of the account public\nkey. This will always be zero for the default imported account in which\nsingle public keys are imported into."
+        },
+        "watch_only": {
+          "type": "boolean",
+          "description": "Whether the wallet stores private keys for the account."
+        }
+      }
+    },
+    "walletrpcAccountWithAddresses": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The name used to identify the account."
+        },
+        "address_type": {
+          "$ref": "#/definitions/walletrpcAddressType",
+          "description": "The type of addresses the account supports."
+        },
+        "derivation_path": {
+          "type": "string",
+          "description": "The derivation path corresponding to the account public key. This will\nalways be empty for the default imported account in which single public keys\nare imported into."
+        },
+        "addresses": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/walletrpcAddressProperty"
+          },
+          "description": "List of address, its type internal/external \u0026 balance.\nNote that the order of addresses will be random and not according to the\nderivation index, since that information is not stored by the underlying\nwallet."
+        }
+      }
+    },
     "walletrpcAddrRequest": {
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "account": {
+          "type": "string",
+          "description": "The name of the account to retrieve the next address of. If empty, the\ndefault wallet account is used."
+        },
+        "type": {
+          "$ref": "#/definitions/walletrpcAddressType",
+          "description": "The type of address to derive."
+        },
+        "change": {
+          "type": "boolean",
+          "description": "Whether a change address should be derived."
+        }
+      }
     },
     "walletrpcAddrResponse": {
       "type": "object",
@@ -719,6 +1230,35 @@
           "description": "The address encoded using a bech32 format."
         }
       }
+    },
+    "walletrpcAddressProperty": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string",
+          "description": "The address encoded using the appropriate format depending on the\naddress type (base58, bech32, bech32m).\n\nNote that lnd's internal/custom keys for channels and other\nfunctionality are derived from the same scope. Since they\naren't really used as addresses and will never have an\non-chain balance, we'll show the public key instead (only if\nthe show_custom_accounts flag is provided)."
+        },
+        "is_internal": {
+          "type": "boolean",
+          "description": "Denotes if the address is a change address."
+        },
+        "balance": {
+          "type": "string",
+          "format": "int64",
+          "description": "The balance of the address."
+        }
+      }
+    },
+    "walletrpcAddressType": {
+      "type": "string",
+      "enum": [
+        "UNKNOWN",
+        "WITNESS_PUBKEY_HASH",
+        "NESTED_WITNESS_PUBKEY_HASH",
+        "HYBRID_NESTED_WITNESS_PUBKEY_HASH",
+        "TAPROOT_PUBKEY"
+      ],
+      "default": "UNKNOWN"
     },
     "walletrpcBumpFeeRequest": {
       "type": "object",
@@ -735,12 +1275,16 @@
         "sat_per_byte": {
           "type": "integer",
           "format": "int64",
-          "description": "The fee rate, expressed in sat/byte, that should be used to spend the input\nwith."
+          "description": "Deprecated, use sat_per_vbyte.\nThe fee rate, expressed in sat/vbyte, that should be used to spend the input\nwith."
         },
         "force": {
           "type": "boolean",
-          "format": "boolean",
           "description": "Whether this input must be force-swept. This means that it is swept even\nif it has a negative yield."
+        },
+        "sat_per_vbyte": {
+          "type": "string",
+          "format": "uint64",
+          "description": "The fee rate, expressed in sat/vbyte, that should be used to spend the input\nwith."
         }
       }
     },
@@ -764,6 +1308,10 @@
           "type": "string",
           "format": "byte",
           "description": "A PSBT that should be signed and finalized. The PSBT must contain all\nrequired inputs, outputs, UTXO data and partial signatures of all other\nsigners."
+        },
+        "account": {
+          "type": "string",
+          "description": "The name of the account to finalize the PSBT with. If empty, the default\nwallet account is used."
         }
       }
     },
@@ -800,9 +1348,22 @@
           "description": "The target number of blocks that the transaction should be confirmed in."
         },
         "sat_per_vbyte": {
-          "type": "integer",
-          "format": "int64",
+          "type": "string",
+          "format": "uint64",
           "description": "The fee rate, expressed in sat/vbyte, that should be used to spend the\ninput with."
+        },
+        "account": {
+          "type": "string",
+          "description": "The name of the account to fund the PSBT with. If empty, the default wallet\naccount is used."
+        },
+        "min_confs": {
+          "type": "integer",
+          "format": "int32",
+          "description": "The minimum number of confirmations each one of your outputs used for\nthe transaction must satisfy."
+        },
+        "spend_unconfirmed": {
+          "type": "boolean",
+          "description": "Whether unconfirmed outputs should be used as inputs for the transaction."
         }
       }
     },
@@ -825,6 +1386,108 @@
             "$ref": "#/definitions/walletrpcUtxoLease"
           },
           "description": "The list of lock leases that were acquired for the inputs in the funded PSBT\npacket."
+        }
+      }
+    },
+    "walletrpcImportAccountRequest": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "A name to identify the account with."
+        },
+        "extended_public_key": {
+          "type": "string",
+          "description": "A public key that corresponds to a wallet account represented as an extended\nkey. It must conform to a derivation path of the form\nm/purpose'/coin_type'/account'."
+        },
+        "master_key_fingerprint": {
+          "type": "string",
+          "format": "byte",
+          "description": "The fingerprint of the root key (also known as the key with derivation path\nm/) from which the account public key was derived from. This may be required\nby some hardware wallets for proper identification and signing. The bytes\nmust be in big-endian order."
+        },
+        "address_type": {
+          "$ref": "#/definitions/walletrpcAddressType",
+          "description": "An address type is only required when the extended account public key has a\nlegacy version (xpub, tpub, etc.), such that the wallet cannot detect what\naddress scheme it belongs to."
+        },
+        "dry_run": {
+          "type": "boolean",
+          "description": "Whether a dry run should be attempted when importing the account. This\nserves as a way to confirm whether the account is being imported correctly\nby returning the first N addresses for the external and internal branches of\nthe account. If these addresses match as expected, then it should be safe to\nimport the account as is."
+        }
+      }
+    },
+    "walletrpcImportAccountResponse": {
+      "type": "object",
+      "properties": {
+        "account": {
+          "$ref": "#/definitions/walletrpcAccount",
+          "description": "The details of the imported account."
+        },
+        "dry_run_external_addrs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The first N addresses that belong to the external branch of the account.\nThe external branch is typically used for external non-change addresses.\nThese are only returned if a dry run was specified within the request."
+        },
+        "dry_run_internal_addrs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The first N addresses that belong to the internal branch of the account.\nThe internal branch is typically used for change addresses. These are only\nreturned if a dry run was specified within the request."
+        }
+      }
+    },
+    "walletrpcImportPublicKeyRequest": {
+      "type": "object",
+      "properties": {
+        "public_key": {
+          "type": "string",
+          "format": "byte",
+          "description": "A compressed public key represented as raw bytes."
+        },
+        "address_type": {
+          "$ref": "#/definitions/walletrpcAddressType",
+          "description": "The type of address that will be generated from the public key."
+        }
+      }
+    },
+    "walletrpcImportPublicKeyResponse": {
+      "type": "object"
+    },
+    "walletrpcImportTapscriptRequest": {
+      "type": "object",
+      "properties": {
+        "internal_public_key": {
+          "type": "string",
+          "format": "byte",
+          "description": "The internal public key, serialized as 32-byte x-only public key."
+        },
+        "full_tree": {
+          "$ref": "#/definitions/walletrpcTapscriptFullTree",
+          "description": "The full script tree with all individual leaves is known and the root\nhash can be constructed from the full tree directly."
+        },
+        "partial_reveal": {
+          "$ref": "#/definitions/walletrpcTapscriptPartialReveal",
+          "description": "Only a single script leaf is known. To construct the root hash, the full\ninclusion proof must also be provided."
+        },
+        "root_hash_only": {
+          "type": "string",
+          "format": "byte",
+          "description": "Only the root hash of the Taproot script tree (or other form of Taproot\ncommitment) is known."
+        },
+        "full_key_only": {
+          "type": "boolean",
+          "description": "Only the final, tweaked Taproot key is known and no additional\ninformation about the internal key or type of tweak that was used to\nderive it. When this is set, the wallet treats the key in\ninternal_public_key as the Taproot key directly. This can be useful for\ntracking arbitrary Taproot outputs without the goal of ever being able\nto spend from them through the internal wallet."
+        }
+      }
+    },
+    "walletrpcImportTapscriptResponse": {
+      "type": "object",
+      "properties": {
+        "p2tr_address": {
+          "type": "string",
+          "description": "The resulting pay-to-Taproot address that represents the imported internal\nkey with the script committed to it."
         }
       }
     },
@@ -857,7 +1520,6 @@
         },
         "overwrite": {
           "type": "boolean",
-          "format": "boolean",
           "description": "Whether to overwrite the existing label, if it is present."
         }
       }
@@ -876,6 +1538,11 @@
         "outpoint": {
           "$ref": "#/definitions/lnrpcOutPoint",
           "description": "The identifying outpoint of the output being leased."
+        },
+        "expiration_seconds": {
+          "type": "string",
+          "format": "uint64",
+          "description": "The time in seconds before the lock expires. If set to zero, the default\nlock duration is used."
         }
       }
     },
@@ -889,6 +1556,41 @@
         }
       }
     },
+    "walletrpcListAccountsResponse": {
+      "type": "object",
+      "properties": {
+        "accounts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/walletrpcAccount"
+          }
+        }
+      }
+    },
+    "walletrpcListAddressesResponse": {
+      "type": "object",
+      "properties": {
+        "account_with_addresses": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/walletrpcAccountWithAddresses"
+          },
+          "description": "A list of all the accounts and their addresses."
+        }
+      }
+    },
+    "walletrpcListLeasesResponse": {
+      "type": "object",
+      "properties": {
+        "locked_utxos": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/walletrpcUtxoLease"
+          },
+          "description": "The list of currently leased utxos."
+        }
+      }
+    },
     "walletrpcListSweepsResponse": {
       "type": "object",
       "properties": {
@@ -897,6 +1599,29 @@
         },
         "transaction_ids": {
           "$ref": "#/definitions/ListSweepsResponseTransactionIDs"
+        }
+      }
+    },
+    "walletrpcListUnspentRequest": {
+      "type": "object",
+      "properties": {
+        "min_confs": {
+          "type": "integer",
+          "format": "int32",
+          "description": "The minimum number of confirmations to be included."
+        },
+        "max_confs": {
+          "type": "integer",
+          "format": "int32",
+          "description": "The maximum number of confirmations to be included."
+        },
+        "account": {
+          "type": "string",
+          "description": "An optional filter to only include outputs belonging to an account."
+        },
+        "unconfirmed_only": {
+          "type": "boolean",
+          "title": "When min_confs and max_confs are zero, setting false implicitly\noverrides max_confs to be MaxInt32, otherwise max_confs remains\nzero. An error is returned if the value is true and both min_confs\nand max_confs are non-zero. (default: false)"
         }
       }
     },
@@ -931,7 +1656,7 @@
         "sat_per_byte": {
           "type": "integer",
           "format": "int64",
-          "description": "The fee rate we'll use to sweep the output. The fee rate is only determined\nonce a sweeping transaction for the output is created, so it's possible for\nthis to be 0 before this."
+          "description": "Deprecated, use sat_per_vbyte.\nThe fee rate we'll use to sweep the output, expressed in sat/vbyte. The fee\nrate is only determined once a sweeping transaction for the output is\ncreated, so it's possible for this to be 0 before this."
         },
         "broadcast_attempts": {
           "type": "integer",
@@ -951,11 +1676,20 @@
         "requested_sat_per_byte": {
           "type": "integer",
           "format": "int64",
-          "description": "The requested fee rate, expressed in sat/byte, for this output."
+          "description": "Deprecated, use requested_sat_per_vbyte.\nThe requested fee rate, expressed in sat/vbyte, for this output."
+        },
+        "sat_per_vbyte": {
+          "type": "string",
+          "format": "uint64",
+          "description": "The fee rate we'll use to sweep the output, expressed in sat/vbyte. The fee\nrate is only determined once a sweeping transaction for the output is\ncreated, so it's possible for this to be 0 before this."
+        },
+        "requested_sat_per_vbyte": {
+          "type": "string",
+          "format": "uint64",
+          "description": "The requested fee rate, expressed in sat/vbyte, for this output."
         },
         "force": {
           "type": "boolean",
-          "format": "boolean",
           "description": "Whether this input must be force-swept. This means that it is swept even\nif it has a negative yield."
         }
       }
@@ -998,6 +1732,16 @@
     "walletrpcReleaseOutputResponse": {
       "type": "object"
     },
+    "walletrpcRequiredReserveResponse": {
+      "type": "object",
+      "properties": {
+        "required_reserve": {
+          "type": "string",
+          "format": "int64",
+          "description": "The amount of reserve required."
+        }
+      }
+    },
     "walletrpcSendOutputsRequest": {
       "type": "object",
       "properties": {
@@ -1024,7 +1768,6 @@
         },
         "spend_unconfirmed": {
           "type": "boolean",
-          "format": "boolean",
           "description": "Whether unconfirmed outputs should be used as inputs for the transaction."
         }
       }
@@ -1036,6 +1779,98 @@
           "type": "string",
           "format": "byte",
           "description": "The serialized transaction sent out on the network."
+        }
+      }
+    },
+    "walletrpcSignMessageWithAddrRequest": {
+      "type": "object",
+      "properties": {
+        "msg": {
+          "type": "string",
+          "format": "byte",
+          "description": "The message to be signed. When using REST, this field must be encoded as\nbase64."
+        },
+        "addr": {
+          "type": "string",
+          "description": "The address which will be used to look up the private key and sign the\ncorresponding message."
+        }
+      }
+    },
+    "walletrpcSignMessageWithAddrResponse": {
+      "type": "object",
+      "properties": {
+        "signature": {
+          "type": "string",
+          "description": "The compact ECDSA signature for the given message encoded in base64."
+        }
+      }
+    },
+    "walletrpcSignPsbtRequest": {
+      "type": "object",
+      "properties": {
+        "funded_psbt": {
+          "type": "string",
+          "format": "byte",
+          "description": "The PSBT that should be signed. The PSBT must contain all required inputs,\noutputs, UTXO data and custom fields required to identify the signing key."
+        }
+      }
+    },
+    "walletrpcSignPsbtResponse": {
+      "type": "object",
+      "properties": {
+        "signed_psbt": {
+          "type": "string",
+          "format": "byte",
+          "description": "The signed transaction in PSBT format."
+        },
+        "signed_inputs": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "description": "The indices of signed inputs."
+        }
+      }
+    },
+    "walletrpcTapLeaf": {
+      "type": "object",
+      "properties": {
+        "leaf_version": {
+          "type": "integer",
+          "format": "int64",
+          "description": "The leaf version. Should be 0xc0 (192) in case of a SegWit v1 script."
+        },
+        "script": {
+          "type": "string",
+          "format": "byte",
+          "description": "The script of the tap leaf."
+        }
+      }
+    },
+    "walletrpcTapscriptFullTree": {
+      "type": "object",
+      "properties": {
+        "all_leaves": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/walletrpcTapLeaf"
+          },
+          "description": "The complete, ordered list of all tap leaves of the tree."
+        }
+      }
+    },
+    "walletrpcTapscriptPartialReveal": {
+      "type": "object",
+      "properties": {
+        "revealed_leaf": {
+          "$ref": "#/definitions/walletrpcTapLeaf",
+          "description": "The tap leaf that is known and will be revealed."
+        },
+        "full_inclusion_proof": {
+          "type": "string",
+          "format": "byte",
+          "description": "The BIP-0341 serialized inclusion proof that is required to prove that\nthe revealed leaf is part of the tree. This contains 0..n blocks of 32\nbytes. If the tree only contained a single leaf (which is the revealed\nleaf), this can be empty."
         }
       }
     },
@@ -1089,6 +1924,48 @@
           "type": "string",
           "format": "uint64",
           "description": "The absolute expiration of the output lease represented as a unix timestamp."
+        },
+        "pk_script": {
+          "type": "string",
+          "format": "byte",
+          "description": "The public key script of the leased output."
+        },
+        "value": {
+          "type": "string",
+          "format": "uint64",
+          "description": "The value of the leased output in satoshis."
+        }
+      }
+    },
+    "walletrpcVerifyMessageWithAddrRequest": {
+      "type": "object",
+      "properties": {
+        "msg": {
+          "type": "string",
+          "format": "byte",
+          "description": "The message to be signed. When using REST, this field must be encoded as\nbase64."
+        },
+        "signature": {
+          "type": "string",
+          "description": "The compact ECDSA signature to be verified over the given message\necoded in base64."
+        },
+        "addr": {
+          "type": "string",
+          "description": "The address which will be used to look up the public key and verify the\nthe signature."
+        }
+      }
+    },
+    "walletrpcVerifyMessageWithAddrResponse": {
+      "type": "object",
+      "properties": {
+        "valid": {
+          "type": "boolean",
+          "description": "Whether the signature was valid over the given message."
+        },
+        "pubkey": {
+          "type": "string",
+          "format": "byte",
+          "description": "The pubkey recovered from the signature."
         }
       }
     },

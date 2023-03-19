@@ -7,15 +7,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
-	"github.com/lightningnetwork/lnd/channeldb/kvdb"
 	"github.com/lightningnetwork/lnd/clock"
 	"github.com/lightningnetwork/lnd/input"
+	"github.com/lightningnetwork/lnd/kvdb"
 	"github.com/lightningnetwork/lnd/labels"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
@@ -101,9 +101,10 @@ type ChainArbitratorConfig struct {
 
 	// ContractBreach is a function closure that the ChainArbitrator will
 	// use to notify the breachArbiter about a contract breach. It should
-	// only return a non-nil error when the breachArbiter has preserved the
-	// necessary breach info for this channel point, and it is safe to mark
-	// the channel as pending close in the database.
+	// only return a non-nil error when the breachArbiter has preserved
+	// the necessary breach info for this channel point. Once the breach
+	// resolution is persisted in the channel arbitrator, it will be safe
+	// to mark the channel closed.
 	ContractBreach func(wire.OutPoint, *lnwallet.BreachRetribution) error
 
 	// IsOurAddress is a function that returns true if the passed address
@@ -155,6 +156,15 @@ type ChainArbitratorConfig struct {
 	// will use to notify the ChannelNotifier about a newly closed channel.
 	NotifyClosedChannel func(wire.OutPoint)
 
+	// NotifyFullyResolvedChannel is a function closure that the
+	// ChainArbitrator will use to notify the ChannelNotifier about a newly
+	// resolved channel. The main difference to NotifyClosedChannel is that
+	// in case of a local force close the NotifyClosedChannel is called when
+	// the published commitment transaction confirms while
+	// NotifyFullyResolvedChannel is only called when the channel is fully
+	// resolved (which includes sweeping any time locked funds).
+	NotifyFullyResolvedChannel func(point wire.OutPoint)
+
 	// OnionProcessor is used to decode onion payloads for on-chain
 	// resolution.
 	OnionProcessor OnionProcessor
@@ -171,6 +181,20 @@ type ChainArbitratorConfig struct {
 	// Clock is the clock implementation that ChannelArbitrator uses.
 	// It is useful for testing.
 	Clock clock.Clock
+
+	// SubscribeBreachComplete is used by the breachResolver to register a
+	// subscription that notifies when the breach resolution process is
+	// complete.
+	SubscribeBreachComplete func(op *wire.OutPoint, c chan struct{}) (
+		bool, error)
+
+	// PutFinalHtlcOutcome stores the final outcome of an htlc in the
+	// database.
+	PutFinalHtlcOutcome func(chanId lnwire.ShortChannelID,
+		htlcId uint64, settled bool) error
+
+	// HtlcNotifier is an interface that htlc events are sent to.
+	HtlcNotifier HtlcNotifier
 }
 
 // ChainArbitrator is a sub-system that oversees the on-chain resolution of all
@@ -238,7 +262,7 @@ type arbChannel struct {
 // commitment transactions.
 //
 // NOTE: Part of the ArbChannel interface.
-func (a *arbChannel) NewAnchorResolutions() ([]*lnwallet.AnchorResolution,
+func (a *arbChannel) NewAnchorResolutions() (*lnwallet.AnchorResolutions,
 	error) {
 
 	// Get a fresh copy of the database state to base the anchor resolutions
@@ -246,7 +270,9 @@ func (a *arbChannel) NewAnchorResolutions() ([]*lnwallet.AnchorResolution,
 	// same instance that is used by the link.
 	chanPoint := a.channel.FundingOutpoint
 
-	channel, err := a.c.chanSource.FetchChannel(chanPoint)
+	channel, err := a.c.chanSource.ChannelStateDB().FetchChannel(
+		nil, chanPoint,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -289,7 +315,9 @@ func (a *arbChannel) ForceCloseChan() (*lnwallet.LocalForceCloseSummary, error) 
 	// Now that we know the link can't mutate the channel
 	// state, we'll read the channel from disk the target
 	// channel according to its channel point.
-	channel, err := a.c.chanSource.FetchChannel(chanPoint)
+	channel, err := a.c.chanSource.ChannelStateDB().FetchChannel(
+		nil, chanPoint,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -347,6 +375,10 @@ func newActiveChannelArbitrator(channel *channeldb.OpenChannel,
 				report,
 			)
 		},
+		FetchHistoricalChannel: func() (*channeldb.OpenChannel, error) {
+			chanStateDB := c.chanSource.ChannelStateDB()
+			return chanStateDB.FetchHistoricalChannel(&chanPoint)
+		},
 	}
 
 	// The final component needed is an arbitrator log that the arbitrator
@@ -363,6 +395,10 @@ func newActiveChannelArbitrator(channel *channeldb.OpenChannel,
 	}
 
 	arbCfg.MarkChannelResolved = func() error {
+		if c.cfg.NotifyFullyResolvedChannel != nil {
+			c.cfg.NotifyFullyResolvedChannel(chanPoint)
+		}
+
 		return c.ResolveContract(chanPoint)
 	}
 
@@ -401,12 +437,11 @@ func (c *ChainArbitrator) getArbChannel(
 // This is only to be done once all contracts which were live on the channel
 // before hitting the chain have been resolved.
 func (c *ChainArbitrator) ResolveContract(chanPoint wire.OutPoint) error {
-
 	log.Infof("Marking ChannelPoint(%v) fully resolved", chanPoint)
 
 	// First, we'll we'll mark the channel as fully closed from the PoV of
 	// the channel source.
-	err := c.chanSource.MarkChanFullyClosed(&chanPoint)
+	err := c.chanSource.ChannelStateDB().MarkChanFullyClosed(&chanPoint)
 	if err != nil {
 		log.Errorf("ChainArbitrator: unable to mark ChannelPoint(%v) "+
 			"fully closed: %v", chanPoint, err)
@@ -460,11 +495,11 @@ func (c *ChainArbitrator) Start() error {
 		return nil
 	}
 
-	log.Tracef("Starting ChainArbitrator")
+	log.Info("ChainArbitrator starting")
 
 	// First, we'll fetch all the channels that are still open, in order to
 	// collect them within our set of active contracts.
-	openChannels, err := c.chanSource.FetchAllChannels()
+	openChannels, err := c.chanSource.ChannelStateDB().FetchAllChannels()
 	if err != nil {
 		return err
 	}
@@ -482,15 +517,17 @@ func (c *ChainArbitrator) Start() error {
 
 		// First, we'll create an active chainWatcher for this channel
 		// to ensure that we detect any relevant on chain events.
+		breachClosure := func(ret *lnwallet.BreachRetribution) error {
+			return c.cfg.ContractBreach(chanPoint, ret)
+		}
+
 		chainWatcher, err := newChainWatcher(
 			chainWatcherConfig{
-				chanState: channel,
-				notifier:  c.cfg.Notifier,
-				signer:    c.cfg.Signer,
-				isOurAddr: c.cfg.IsOurAddress,
-				contractBreach: func(retInfo *lnwallet.BreachRetribution) error {
-					return c.cfg.ContractBreach(chanPoint, retInfo)
-				},
+				chanState:           channel,
+				notifier:            c.cfg.Notifier,
+				signer:              c.cfg.Signer,
+				isOurAddr:           c.cfg.IsOurAddress,
+				contractBreach:      breachClosure,
 				extractStateNumHint: lnwallet.GetStateNumHint,
 			},
 		)
@@ -518,7 +555,9 @@ func (c *ChainArbitrator) Start() error {
 	// In addition to the channels that we know to be open, we'll also
 	// launch arbitrators to finishing resolving any channels that are in
 	// the pending close state.
-	closingChannels, err := c.chanSource.FetchClosedChannels(true)
+	closingChannels, err := c.chanSource.ChannelStateDB().FetchClosedChannels(
+		true,
+	)
 	if err != nil {
 		return err
 	}
@@ -551,6 +590,10 @@ func (c *ChainArbitrator) Start() error {
 					tx, c.cfg.ChainHash, &chanPoint, report,
 				)
 			},
+			FetchHistoricalChannel: func() (*channeldb.OpenChannel, error) {
+				chanStateDB := c.chanSource.ChannelStateDB()
+				return chanStateDB.FetchHistoricalChannel(&chanPoint)
+			},
 		}
 		chanLog, err := newBoltArbitratorLog(
 			c.chanSource.Backend, arbCfg, c.cfg.ChainHash, chanPoint,
@@ -559,14 +602,20 @@ func (c *ChainArbitrator) Start() error {
 			return err
 		}
 		arbCfg.MarkChannelResolved = func() error {
+			if c.cfg.NotifyFullyResolvedChannel != nil {
+				c.cfg.NotifyFullyResolvedChannel(chanPoint)
+			}
+
 			return c.ResolveContract(chanPoint)
 		}
 
-		// We can also leave off the set of HTLC's here as since the
-		// channel is already in the process of being full resolved, no
-		// new HTLC's will be added.
+		// We create an empty map of HTLC's here since it's possible
+		// that the channel is in StateDefault and updateActiveHTLCs is
+		// called. We want to avoid writing to an empty map. Since the
+		// channel is already in the process of being resolved, no new
+		// HTLCs will be added.
 		c.activeChannels[chanPoint] = NewChannelArbitrator(
-			arbCfg, nil, chanLog,
+			arbCfg, make(map[HtlcSetKey]htlcSet), chanLog,
 		)
 	}
 
@@ -808,8 +857,8 @@ func (c *ChainArbitrator) publishClosingTxs(
 // rebroadcast is a helper method which will republish the unilateral or
 // cooperative close transaction or a channel in a particular state.
 //
-// NOTE: There is no risk to caling this method if the channel isn't in either
-// CommimentBroadcasted or CoopBroadcasted, but the logs will be misleading.
+// NOTE: There is no risk to calling this method if the channel isn't in either
+// CommitmentBroadcasted or CoopBroadcasted, but the logs will be misleading.
 func (c *ChainArbitrator) rebroadcast(channel *channeldb.OpenChannel,
 	state channeldb.ChannelStatus) error {
 
@@ -834,7 +883,6 @@ func (c *ChainArbitrator) rebroadcast(channel *channeldb.OpenChannel,
 	}
 
 	switch {
-
 	// This can happen for channels that had their closing tx published
 	// before we started storing it to disk.
 	case err == channeldb.ErrNoCloseTx:
@@ -869,7 +917,7 @@ func (c *ChainArbitrator) Stop() error {
 		return nil
 	}
 
-	log.Infof("Stopping ChainArbitrator")
+	log.Info("ChainArbitrator shutting down")
 
 	close(c.quit)
 
@@ -926,16 +974,9 @@ type ContractUpdate struct {
 	Htlcs []channeldb.HTLC
 }
 
-// ContractSignals wraps the two signals that affect the state of a channel
-// being watched by an arbitrator. The two signals we care about are: the
-// channel has a new set of HTLC's, and the remote party has just broadcast
-// their version of the commitment transaction.
+// ContractSignals is used by outside subsystems to notify a channel arbitrator
+// of its ShortChannelID.
 type ContractSignals struct {
-	// HtlcUpdates is a channel that the link will use to update the
-	// designated channel arbitrator when the set of HTLCs on any valid
-	// commitment changes.
-	HtlcUpdates chan *ContractUpdate
-
 	// ShortChanID is the up to date short channel ID for a contract. This
 	// can change either if when the contract was added it didn't yet have
 	// a stable identifier, or in the case of a reorg.
@@ -960,6 +1001,26 @@ func (c *ChainArbitrator) UpdateContractSignals(chanPoint wire.OutPoint,
 
 	arbitrator.UpdateContractSignals(signals)
 
+	return nil
+}
+
+// NotifyContractUpdate lets a channel arbitrator know that a new
+// ContractUpdate is available. This calls the ChannelArbitrator's internal
+// method NotifyContractUpdate which waits for a response on a done chan before
+// returning. This method will return an error if the ChannelArbitrator is not
+// in the activeChannels map. However, this only happens if the arbitrator is
+// resolved and the related link would already be shut down.
+func (c *ChainArbitrator) NotifyContractUpdate(chanPoint wire.OutPoint,
+	update *ContractUpdate) error {
+
+	c.Lock()
+	arbitrator, ok := c.activeChannels[chanPoint]
+	c.Unlock()
+	if !ok {
+		return fmt.Errorf("can't find arbitrator for %v", chanPoint)
+	}
+
+	arbitrator.notifyContractUpdate(update)
 	return nil
 }
 
@@ -1078,8 +1139,12 @@ func (c *ChainArbitrator) WatchNewChannel(newChan *channeldb.OpenChannel) error 
 			notifier:  c.cfg.Notifier,
 			signer:    c.cfg.Signer,
 			isOurAddr: c.cfg.IsOurAddress,
-			contractBreach: func(retInfo *lnwallet.BreachRetribution) error {
-				return c.cfg.ContractBreach(chanPoint, retInfo)
+			contractBreach: func(
+				retInfo *lnwallet.BreachRetribution) error {
+
+				return c.cfg.ContractBreach(
+					chanPoint, retInfo,
+				)
 			},
 			extractStateNumHint: lnwallet.GetStateNumHint,
 		},

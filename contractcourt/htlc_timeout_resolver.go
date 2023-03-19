@@ -6,8 +6,8 @@ import (
 	"io"
 	"sync"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
@@ -57,6 +57,8 @@ type htlcTimeoutResolver struct {
 	reportLock sync.Mutex
 
 	contractResolverKit
+
+	htlcLeaseResolver
 }
 
 // newTimeoutResolver instantiates a new timeout htlc resolver.
@@ -315,7 +317,6 @@ func (h *htlcTimeoutResolver) Resolve() (ContractResolver, error) {
 // transaction.
 func (h *htlcTimeoutResolver) spendHtlcOutput() (*chainntnfs.SpendDetail, error) {
 	switch {
-
 	// If we have non-nil SignDetails, this means that have a 2nd level
 	// HTLC transaction that is signed using sighash SINGLE|ANYONECANPAY
 	// (the case for anchor type channels). In this case we can re-sign it
@@ -345,7 +346,7 @@ func (h *htlcTimeoutResolver) spendHtlcOutput() (*chainntnfs.SpendDetail, error)
 	// If we have no SignDetails, and we haven't already sent the output to
 	// the utxo nursery, then we'll do so now.
 	case h.htlcResolution.SignDetails == nil && !h.outputIncubating:
-		log.Tracef("%T(%v): incubating htlc output", h,
+		log.Debugf("%T(%v): incubating htlc output", h,
 			h.htlcResolution.ClaimOutpoint)
 
 		err := h.IncubateOutputs(
@@ -373,7 +374,7 @@ func (h *htlcTimeoutResolver) spendHtlcOutput() (*chainntnfs.SpendDetail, error)
 		return nil, err
 	}
 
-	log.Infof("%T(%v): waiting for HTLC output %v to be spent"+
+	log.Infof("%T(%v): waiting for spent of HTLC output %v to be "+
 		"fully confirmed", h, h.htlcResolution.ClaimOutpoint,
 		outpointToWatch)
 
@@ -427,21 +428,27 @@ func (h *htlcTimeoutResolver) handleCommitSpend(
 	)
 
 	switch {
-
 	// If the sweeper is handling the second level transaction, wait for
-	// the CSV lock to expire, before sweeping the output on the
-	// second-level.
+	// the CSV and possible CLTV lock to expire, before sweeping the output
+	// on the second-level.
 	case h.htlcResolution.SignDetails != nil:
-		waitHeight := uint32(commitSpend.SpendingHeight) +
-			h.htlcResolution.CsvDelay - 1
+		waitHeight := h.deriveWaitHeight(
+			h.htlcResolution.CsvDelay, commitSpend,
+		)
 
 		h.reportLock.Lock()
 		h.currentReport.Stage = 2
 		h.currentReport.MaturityHeight = waitHeight
 		h.reportLock.Unlock()
 
-		log.Infof("%T(%x): waiting for CSV lock to expire at height %v",
-			h, h.htlc.RHash[:], waitHeight)
+		if h.hasCLTV() {
+			log.Infof("%T(%x): waiting for CSV and CLTV lock to "+
+				"expire at height %v", h, h.htlc.RHash[:],
+				waitHeight)
+		} else {
+			log.Infof("%T(%x): waiting for CSV lock to expire at "+
+				"height %v", h, h.htlc.RHash[:], waitHeight)
+		}
 
 		err := waitForHeight(waitHeight, h.Notifier, h.quit)
 		if err != nil {
@@ -459,15 +466,13 @@ func (h *htlcTimeoutResolver) handleCommitSpend(
 		}
 
 		// Let the sweeper sweep the second-level output now that the
-		// CSV delay has passed.
-		log.Infof("%T(%x): CSV lock expired, offering second-layer "+
-			"output to sweeper: %v", h, h.htlc.RHash[:], op)
-
-		inp := input.NewCsvInput(
+		// CSV/CLTV locks have expired.
+		inp := h.makeSweepInput(
 			op, input.HtlcOfferedTimeoutSecondLevel,
+			input.LeaseHtlcOfferedTimeoutSecondLevel,
 			&h.htlcResolution.SweepSignDesc,
-			h.broadcastHeight,
-			h.htlcResolution.CsvDelay,
+			h.htlcResolution.CsvDelay, h.broadcastHeight,
+			h.htlc.RHash,
 		)
 		_, err = h.Sweeper.SweepInput(
 			inp,
@@ -492,7 +497,7 @@ func (h *htlcTimeoutResolver) handleCommitSpend(
 	case h.htlcResolution.SignedTimeoutTx != nil:
 		log.Infof("%T(%v): waiting for nursery/sweeper to spend CSV "+
 			"delayed output", h, claimOutpoint)
-		sweep, err := waitForSpend(
+		sweepTx, err := waitForSpend(
 			&claimOutpoint,
 			h.htlcResolution.SweepSignDesc.Output.PkScript,
 			h.broadcastHeight, h.Notifier, h.quit,
@@ -502,7 +507,7 @@ func (h *htlcTimeoutResolver) handleCommitSpend(
 		}
 
 		// Update the spend txid to the hash of the sweep transaction.
-		spendTxID = sweep.SpenderTxHash
+		spendTxID = sweepTx.SpenderTxHash
 
 		// Once our sweep of the timeout tx has confirmed, we add a
 		// resolution for our timeoutTx tx first stage transaction.
@@ -566,8 +571,8 @@ func (h *htlcTimeoutResolver) report() *ContractReport {
 
 	h.reportLock.Lock()
 	defer h.reportLock.Unlock()
-	copy := h.currentReport
-	return &copy
+	cpy := h.currentReport
+	return &cpy
 }
 
 func (h *htlcTimeoutResolver) initReport() {

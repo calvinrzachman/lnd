@@ -58,6 +58,7 @@ func NewHostAnnouncer(cfg HostAnnouncerConfig) *HostAnnouncer {
 // Start starts the HostAnnouncer.
 func (h *HostAnnouncer) Start() error {
 	h.startOnce.Do(func() {
+		log.Info("HostAnnouncer starting")
 		h.wg.Add(1)
 		go h.hostWatcher()
 	})
@@ -68,6 +69,7 @@ func (h *HostAnnouncer) Start() error {
 // Stop signals the HostAnnouncer for a graceful stop.
 func (h *HostAnnouncer) Stop() error {
 	h.stopOnce.Do(func() {
+		log.Info("HostAnnouncer shutting down")
 		close(h.quit)
 		h.wg.Wait()
 	})
@@ -82,7 +84,6 @@ func (h *HostAnnouncer) hostWatcher() {
 
 	ipMapping := make(map[string]net.Addr)
 	refreshHosts := func() {
-
 		// We'll now run through each of our hosts to check if they had
 		// their backing IPs changed. If so, we'll want to re-announce
 		// them.

@@ -1,6 +1,6 @@
 package channeldb
 
-import "github.com/lightningnetwork/lnd/channeldb/kvdb"
+import "github.com/lightningnetwork/lnd/kvdb"
 
 type paginator struct {
 	// cursor is the cursor which we are using to iterate through a bucket.
@@ -69,7 +69,6 @@ func (p paginator) cursorStart() ([]byte, []byte) {
 	// handle a few offset cases.
 	if p.reversed {
 		switch {
-
 		// This indicates the default case, where no offset was
 		// specified. In that case we just start from the last
 		// entry.

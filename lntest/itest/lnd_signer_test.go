@@ -1,13 +1,20 @@
 package itest
 
 import (
-	"context"
-	"fmt"
+	"bytes"
+	"crypto/sha256"
 
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/keychain"
+	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/signrpc"
-	"github.com/lightningnetwork/lnd/lntest"
+	"github.com/lightningnetwork/lnd/lnrpc/walletrpc"
+	"github.com/lightningnetwork/lnd/lntemp"
+	"github.com/lightningnetwork/lnd/lntemp/node"
 	"github.com/stretchr/testify/require"
 )
 
@@ -15,13 +22,19 @@ import (
 // DeriveSharedKey. It creates an ephemeral private key, performing an ECDH with
 // the node's pubkey and a customized public key to check the validity of the
 // result.
-func testDeriveSharedKey(net *lntest.NetworkHarness, t *harnessTest) {
-	ctxb := context.Background()
+func testDeriveSharedKey(ht *lntemp.HarnessTest) {
+	runDeriveSharedKey(ht, ht.Alice)
+}
 
+// runDeriveSharedKey checks the ECDH performed by the endpoint
+// DeriveSharedKey. It creates an ephemeral private key, performing an ECDH with
+// the node's pubkey and a customized public key to check the validity of the
+// result.
+func runDeriveSharedKey(ht *lntemp.HarnessTest, alice *node.HarnessNode) {
 	// Create an ephemeral key, extracts its public key, and make a
 	// PrivKeyECDH using the ephemeral key.
-	ephemeralPriv, err := btcec.NewPrivateKey(btcec.S256())
-	require.NoError(t.t, err, "failed to create ephemeral key")
+	ephemeralPriv, err := btcec.NewPrivateKey()
+	require.NoError(ht, err, "failed to create ephemeral key")
 
 	ephemeralPubBytes := ephemeralPriv.PubKey().SerializeCompressed()
 	privKeyECDH := &keychain.PrivKeyECDH{PrivKey: ephemeralPriv}
@@ -31,26 +44,27 @@ func testDeriveSharedKey(net *lntest.NetworkHarness, t *harnessTest) {
 	assertECDHMatch := func(pub *btcec.PublicKey,
 		req *signrpc.SharedKeyRequest) {
 
-		ctxt, _ := context.WithTimeout(ctxb, defaultTimeout)
-		resp, err := net.Alice.SignerClient.DeriveSharedKey(ctxt, req)
-		require.NoError(t.t, err, "calling DeriveSharedKey failed")
+		resp := alice.RPC.DeriveSharedKey(req)
 
 		sharedKey, _ := privKeyECDH.ECDH(pub)
-		require.Equal(
-			t.t, sharedKey[:], resp.SharedKey,
-			"failed to derive the expected key",
-		)
+		require.Equal(ht, sharedKey[:], resp.SharedKey,
+			"failed to derive the expected key")
 	}
 
-	nodePub, err := btcec.ParsePubKey(net.Alice.PubKey[:], btcec.S256())
-	require.NoError(t.t, err, "failed to parse node pubkey")
+	nodePub, err := btcec.ParsePubKey(alice.PubKey[:])
+	require.NoError(ht, err, "failed to parse node pubkey")
 
 	customizedKeyFamily := int32(keychain.KeyFamilyMultiSig)
 	customizedIndex := int32(1)
-	customizedPub, err := deriveCustomizedKey(
-		ctxb, net.Alice, customizedKeyFamily, customizedIndex,
-	)
-	require.NoError(t.t, err, "failed to create customized pubkey")
+
+	// Derive a customized key.
+	deriveReq := &signrpc.KeyLocator{
+		KeyFamily: customizedKeyFamily,
+		KeyIndex:  customizedIndex,
+	}
+	resp := alice.RPC.DeriveKey(deriveReq)
+	customizedPub, err := btcec.ParsePubKey(resp.RawKeyBytes)
+	require.NoError(ht, err, "failed to parse node pubkey")
 
 	// Test DeriveSharedKey with no optional arguments. It will result in
 	// performing an ECDH between the ephemeral key and the node's pubkey.
@@ -85,7 +99,7 @@ func testDeriveSharedKey(net *lntest.NetworkHarness, t *harnessTest) {
 	req = &signrpc.SharedKeyRequest{
 		EphemeralPubkey: ephemeralPubBytes,
 		KeyDesc: &signrpc.KeyDescriptor{
-			RawKeyBytes: net.Alice.PubKey[:],
+			RawKeyBytes: alice.PubKey[:],
 			KeyLoc: &signrpc.KeyLocator{
 				KeyFamily: int32(keychain.KeyFamilyNodeKey),
 			},
@@ -134,12 +148,8 @@ func testDeriveSharedKey(net *lntest.NetworkHarness, t *harnessTest) {
 	// assertErrorMatch checks when calling DeriveSharedKey with invalid
 	// params, the expected error is returned.
 	assertErrorMatch := func(match string, req *signrpc.SharedKeyRequest) {
-		ctxt, _ := context.WithTimeout(ctxb, defaultTimeout)
-		_, err := net.Alice.SignerClient.DeriveSharedKey(ctxt, req)
-		require.Error(t.t, err, "expected to have an error")
-		require.Contains(
-			t.t, err.Error(), match, "error failed to match",
-		)
+		err := alice.RPC.DeriveSharedKeyErr(req)
+		require.Contains(ht, err.Error(), match, "error not match")
 	}
 
 	// Test that EphemeralPubkey must be supplied.
@@ -163,7 +173,7 @@ func testDeriveSharedKey(net *lntest.NetworkHarness, t *harnessTest) {
 	req = &signrpc.SharedKeyRequest{
 		EphemeralPubkey: ephemeralPubBytes,
 		KeyDesc: &signrpc.KeyDescriptor{
-			RawKeyBytes: net.Alice.PubKey[:],
+			RawKeyBytes: alice.PubKey[:],
 		},
 	}
 	assertErrorMatch("key_desc.key_loc must also be set", req)
@@ -182,23 +192,270 @@ func testDeriveSharedKey(net *lntest.NetworkHarness, t *harnessTest) {
 	assertErrorMatch("use either raw_key_bytes or key_index", req)
 }
 
-// deriveCustomizedKey uses the family and index to derive a public key from
-// the node's walletkit client.
-func deriveCustomizedKey(ctx context.Context, node *lntest.HarnessNode,
-	family, index int32) (*btcec.PublicKey, error) {
+// testSignOutputRaw makes sure that the SignOutputRaw RPC can be used with all
+// custom ways of specifying the signing key in the key descriptor/locator.
+func testSignOutputRaw(ht *lntemp.HarnessTest) {
+	runSignOutputRaw(ht, ht.Alice)
+}
 
-	ctxt, _ := context.WithTimeout(ctx, defaultTimeout)
-	req := &signrpc.KeyLocator{
-		KeyFamily: family,
-		KeyIndex:  index,
+// runSignOutputRaw makes sure that the SignOutputRaw RPC can be used with all
+// custom ways of specifying the signing key in the key descriptor/locator.
+func runSignOutputRaw(ht *lntemp.HarnessTest, alice *node.HarnessNode) {
+	// For the next step, we need a public key. Let's use a special family
+	// for this. We want this to be an index of zero.
+	const testCustomKeyFamily = 44
+	req := &walletrpc.KeyReq{
+		KeyFamily: testCustomKeyFamily,
 	}
-	resp, err := node.WalletKitClient.DeriveKey(ctxt, req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to derive key: %v", err)
+	keyDesc := alice.RPC.DeriveNextKey(req)
+	require.Equal(ht, int32(0), keyDesc.KeyLoc.KeyIndex)
+
+	targetPubKey, err := btcec.ParsePubKey(keyDesc.RawKeyBytes)
+	require.NoError(ht, err)
+
+	// First, try with a key descriptor that only sets the public key.
+	assertSignOutputRaw(
+		ht, alice, targetPubKey, &signrpc.KeyDescriptor{
+			RawKeyBytes: keyDesc.RawKeyBytes,
+		}, txscript.SigHashAll,
+	)
+
+	// Now try again, this time only with the (0 index!) key locator.
+	assertSignOutputRaw(
+		ht, alice, targetPubKey, &signrpc.KeyDescriptor{
+			KeyLoc: &signrpc.KeyLocator{
+				KeyFamily: keyDesc.KeyLoc.KeyFamily,
+				KeyIndex:  keyDesc.KeyLoc.KeyIndex,
+			},
+		}, txscript.SigHashAll,
+	)
+
+	// And now test everything again with a new key where we know the index
+	// is not 0.
+	req = &walletrpc.KeyReq{
+		KeyFamily: testCustomKeyFamily,
 	}
-	pub, err := btcec.ParsePubKey(resp.RawKeyBytes, btcec.S256())
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse node pubkey: %v", err)
+	keyDesc = alice.RPC.DeriveNextKey(req)
+	require.Equal(ht, int32(1), keyDesc.KeyLoc.KeyIndex)
+
+	targetPubKey, err = btcec.ParsePubKey(keyDesc.RawKeyBytes)
+	require.NoError(ht, err)
+
+	// First, try with a key descriptor that only sets the public key.
+	assertSignOutputRaw(
+		ht, alice, targetPubKey, &signrpc.KeyDescriptor{
+			RawKeyBytes: keyDesc.RawKeyBytes,
+		}, txscript.SigHashAll,
+	)
+
+	// Now try again, this time only with the key locator.
+	assertSignOutputRaw(
+		ht, alice, targetPubKey, &signrpc.KeyDescriptor{
+			KeyLoc: &signrpc.KeyLocator{
+				KeyFamily: keyDesc.KeyLoc.KeyFamily,
+				KeyIndex:  keyDesc.KeyLoc.KeyIndex,
+			},
+		}, txscript.SigHashAll,
+	)
+
+	// Finally, we'll try again, but this time with a non-default sighash.
+	assertSignOutputRaw(
+		ht, alice, targetPubKey, &signrpc.KeyDescriptor{
+			KeyLoc: &signrpc.KeyLocator{
+				KeyFamily: keyDesc.KeyLoc.KeyFamily,
+				KeyIndex:  keyDesc.KeyLoc.KeyIndex,
+			},
+		}, txscript.SigHashSingle,
+	)
+}
+
+// assertSignOutputRaw sends coins to a p2wkh address derived from the given
+// target public key and then tries to spend that output again by invoking the
+// SignOutputRaw RPC with the key descriptor provided.
+func assertSignOutputRaw(ht *lntemp.HarnessTest,
+	alice *node.HarnessNode, targetPubKey *btcec.PublicKey,
+	keyDesc *signrpc.KeyDescriptor,
+	sigHash txscript.SigHashType) {
+
+	pubKeyHash := btcutil.Hash160(targetPubKey.SerializeCompressed())
+	targetAddr, err := btcutil.NewAddressWitnessPubKeyHash(
+		pubKeyHash, harnessNetParams,
+	)
+	require.NoError(ht, err)
+	targetScript, err := txscript.PayToAddrScript(targetAddr)
+	require.NoError(ht, err)
+
+	// Send some coins to the generated p2wpkh address.
+	req := &lnrpc.SendCoinsRequest{
+		Addr:   targetAddr.String(),
+		Amount: 800_000,
 	}
-	return pub, nil
+	alice.RPC.SendCoins(req)
+
+	// Wait until the TX is found in the mempool.
+	txid := ht.Miner.AssertNumTxsInMempool(1)[0]
+
+	targetOutputIndex := ht.GetOutputIndex(txid, targetAddr.String())
+
+	// Clear the mempool.
+	ht.MineBlocksAndAssertNumTxes(1, 1)
+
+	// Try to spend the output now to a new p2wkh address.
+	addrReq := &lnrpc.NewAddressRequest{Type: AddrTypeWitnessPubkeyHash}
+	p2wkhResp := alice.RPC.NewAddress(addrReq)
+
+	p2wkhAdrr, err := btcutil.DecodeAddress(
+		p2wkhResp.Address, harnessNetParams,
+	)
+	require.NoError(ht, err)
+
+	p2wkhPkScript, err := txscript.PayToAddrScript(p2wkhAdrr)
+	require.NoError(ht, err)
+
+	tx := wire.NewMsgTx(2)
+	tx.TxIn = []*wire.TxIn{{
+		PreviousOutPoint: wire.OutPoint{
+			Hash:  *txid,
+			Index: uint32(targetOutputIndex),
+		},
+	}}
+	value := int64(800_000 - 200)
+	tx.TxOut = []*wire.TxOut{{
+		PkScript: p2wkhPkScript,
+		Value:    value,
+	}}
+
+	var buf bytes.Buffer
+	require.NoError(ht, tx.Serialize(&buf))
+
+	signReq := &signrpc.SignReq{
+		RawTxBytes: buf.Bytes(),
+		SignDescs: []*signrpc.SignDescriptor{{
+			Output: &signrpc.TxOut{
+				PkScript: targetScript,
+				Value:    800_000,
+			},
+			InputIndex:    0,
+			KeyDesc:       keyDesc,
+			Sighash:       uint32(sigHash),
+			WitnessScript: targetScript,
+		}},
+	}
+	signResp := alice.RPC.SignOutputRaw(signReq)
+
+	tx.TxIn[0].Witness = wire.TxWitness{
+		append(signResp.RawSigs[0], byte(sigHash)),
+		targetPubKey.SerializeCompressed(),
+	}
+
+	buf.Reset()
+	require.NoError(ht, tx.Serialize(&buf))
+
+	alice.RPC.PublishTransaction(&walletrpc.Transaction{
+		TxHex: buf.Bytes(),
+	})
+
+	// Wait until the spending tx is found.
+	txid = ht.Miner.AssertNumTxsInMempool(1)[0]
+	p2wkhOutputIndex := ht.GetOutputIndex(txid, p2wkhAdrr.String())
+
+	op := &lnrpc.OutPoint{
+		TxidBytes:   txid[:],
+		OutputIndex: uint32(p2wkhOutputIndex),
+	}
+	ht.AssertUTXOInWallet(alice, op, "")
+
+	// Mine another block to clean up the mempool and to make sure the
+	// spend tx is actually included in a block.
+	ht.MineBlocksAndAssertNumTxes(1, 1)
+}
+
+// testSignVerifyMessage makes sure that the SignMessage RPC can be used with
+// all custom flags by verifying with VerifyMessage. Tests both ECDSA and
+// Schnorr signatures.
+func testSignVerifyMessage(ht *lntemp.HarnessTest) {
+	runSignVerifyMessage(ht, ht.Alice)
+}
+
+// runSignVerifyMessage makes sure that the SignMessage RPC can be used with
+// all custom flags by verifying with VerifyMessage. Tests both ECDSA and
+// Schnorr signatures.
+func runSignVerifyMessage(ht *lntemp.HarnessTest, alice *node.HarnessNode) {
+	aliceMsg := []byte("alice msg")
+	keyLoc := &signrpc.KeyLocator{
+		KeyFamily: int32(keychain.KeyFamilyNodeKey),
+		KeyIndex:  1,
+	}
+
+	// Sign a message with the default ECDSA.
+	signMsgReq := &signrpc.SignMessageReq{
+		Msg:        aliceMsg,
+		KeyLoc:     keyLoc,
+		SchnorrSig: false,
+	}
+
+	signMsgResp := alice.RPC.SignMessageSigner(signMsgReq)
+
+	deriveCustomizedKey := func() *btcec.PublicKey {
+		resp := alice.RPC.DeriveKey(keyLoc)
+		pub, err := btcec.ParsePubKey(resp.RawKeyBytes)
+		require.NoError(ht, err, "failed to parse node pubkey")
+
+		return pub
+	}
+
+	customPubKey := deriveCustomizedKey()
+
+	verifyReq := &signrpc.VerifyMessageReq{
+		Msg:          aliceMsg,
+		Signature:    signMsgResp.Signature,
+		Pubkey:       customPubKey.SerializeCompressed(),
+		IsSchnorrSig: false,
+	}
+	verifyResp := alice.RPC.VerifyMessageSigner(verifyReq)
+	require.True(ht, verifyResp.Valid, "failed to verify message")
+
+	// Use a different key locator.
+	keyLoc = &signrpc.KeyLocator{
+		KeyFamily: int32(keychain.KeyFamilyNodeKey),
+		KeyIndex:  2,
+	}
+
+	// Sign a message with Schnorr signature.
+	signMsgReq = &signrpc.SignMessageReq{
+		Msg:        aliceMsg,
+		KeyLoc:     keyLoc,
+		SchnorrSig: true,
+	}
+	signMsgResp = alice.RPC.SignMessageSigner(signMsgReq)
+	customPubKey = deriveCustomizedKey()
+
+	// Verify the Schnorr signature.
+	verifyReq = &signrpc.VerifyMessageReq{
+		Msg:          aliceMsg,
+		Signature:    signMsgResp.Signature,
+		Pubkey:       schnorr.SerializePubKey(customPubKey),
+		IsSchnorrSig: true,
+	}
+	verifyResp = alice.RPC.VerifyMessageSigner(verifyReq)
+	require.True(ht, verifyResp.Valid, "failed to verify message")
+
+	// Also test that we can tweak a private key and verify the message
+	// against the tweaked public key.
+	tweakBytes := sha256.Sum256([]byte("some text"))
+	tweakedPubKey := txscript.ComputeTaprootOutputKey(
+		customPubKey, tweakBytes[:],
+	)
+
+	signMsgReq.SchnorrSigTapTweak = tweakBytes[:]
+	signMsgResp = alice.RPC.SignMessageSigner(signMsgReq)
+
+	verifyReq = &signrpc.VerifyMessageReq{
+		Msg:          aliceMsg,
+		Signature:    signMsgResp.Signature,
+		Pubkey:       schnorr.SerializePubKey(tweakedPubKey),
+		IsSchnorrSig: true,
+	}
+	verifyResp = alice.RPC.VerifyMessageSigner(verifyReq)
+	require.True(ht, verifyResp.Valid, "failed to verify message")
 }

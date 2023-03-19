@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lightningnetwork/lnd/channeldb/kvdb"
+	"github.com/lightningnetwork/lnd/kvdb"
 )
 
 // TimeScheduler is a batching engine that executes requests within a fixed
@@ -60,6 +60,12 @@ func (s *TimeScheduler) Execute(r *Request) error {
 		time.AfterFunc(s.duration, s.b.trigger)
 	}
 	s.b.reqs = append(s.b.reqs, &req)
+
+	// If this is a non-lazy request, we'll execute the batch immediately.
+	if !r.lazy {
+		go s.b.trigger()
+	}
+
 	s.mu.Unlock()
 
 	// Wait for the batch to process the request. If the batch didn't

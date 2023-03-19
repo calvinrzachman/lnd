@@ -1,6 +1,7 @@
 package lnwire
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 )
@@ -14,15 +15,10 @@ const (
 	// active pending channels exceeds their maximum policy limit.
 	ErrMaxPendingChannels FundingError = 1
 
-	// ErrSynchronizingChain is returned by a remote peer that receives a
-	// channel update or a funding request while it's still syncing to the
-	// latest state of the blockchain.
-	ErrSynchronizingChain FundingError = 2
-
 	// ErrChanTooLarge is returned by a remote peer that receives a
 	// FundingOpen request for a channel that is above their current
 	// soft-limit.
-	ErrChanTooLarge FundingError = 3
+	ErrChanTooLarge FundingError = 2
 )
 
 // String returns a human readable version of the target FundingError.
@@ -30,8 +26,6 @@ func (e FundingError) String() string {
 	switch e {
 	case ErrMaxPendingChannels:
 		return "Number of pending channels exceed maximum"
-	case ErrSynchronizingChain:
-		return "Synchronizing blockchain"
 	case ErrChanTooLarge:
 		return "channel too large"
 	default:
@@ -103,11 +97,12 @@ func (c *Error) Decode(r io.Reader, pver uint32) error {
 // protocol version specified.
 //
 // This is part of the lnwire.Message interface.
-func (c *Error) Encode(w io.Writer, pver uint32) error {
-	return WriteElements(w,
-		c.ChanID,
-		c.Data,
-	)
+func (c *Error) Encode(w *bytes.Buffer, pver uint32) error {
+	if err := WriteBytes(w, c.ChanID[:]); err != nil {
+		return err
+	}
+
+	return WriteErrorData(w, c.Data)
 }
 
 // MsgType returns the integer uniquely identifying an Error message on the
@@ -116,15 +111,6 @@ func (c *Error) Encode(w io.Writer, pver uint32) error {
 // This is part of the lnwire.Message interface.
 func (c *Error) MsgType() MessageType {
 	return MsgError
-}
-
-// MaxPayloadLength returns the maximum allowed payload size for an Error
-// complete message observing the specified protocol version.
-//
-// This is part of the lnwire.Message interface.
-func (c *Error) MaxPayloadLength(uint32) uint32 {
-	// 32 + 2 + 65501
-	return MaxMessagePayload
 }
 
 // isASCII is a helper method that checks whether all bytes in `data` would be

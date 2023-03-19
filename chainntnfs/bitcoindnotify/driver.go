@@ -6,15 +6,16 @@ import (
 
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcwallet/chain"
+	"github.com/lightningnetwork/lnd/blockcache"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 )
 
 // createNewNotifier creates a new instance of the ChainNotifier interface
 // implemented by BitcoindNotifier.
 func createNewNotifier(args ...interface{}) (chainntnfs.ChainNotifier, error) {
-	if len(args) != 4 {
+	if len(args) != 5 {
 		return nil, fmt.Errorf("incorrect number of arguments to "+
-			".New(...), expected 4, instead passed %v", len(args))
+			".New(...), expected 5, instead passed %v", len(args))
 	}
 
 	chainConn, ok := args[0].(*chain.BitcoindConn)
@@ -41,20 +42,35 @@ func createNewNotifier(args ...interface{}) (chainntnfs.ChainNotifier, error) {
 			"is incorrect, expected a chainntnfs.ConfirmHintCache")
 	}
 
-	return New(chainConn, chainParams, spendHintCache, confirmHintCache), nil
+	blockCache, ok := args[4].(*blockcache.BlockCache)
+	if !ok {
+		return nil, errors.New("fifth argument to bitcoindnotify.New " +
+			"is incorrect, expected a *blockcache.BlockCache")
+	}
+
+	return New(chainConn, chainParams, spendHintCache,
+		confirmHintCache, blockCache), nil
 }
 
 // init registers a driver for the BtcdNotifier concrete implementation of the
 // chainntnfs.ChainNotifier interface.
 func init() {
 	// Register the driver.
-	notifier := &chainntnfs.NotifierDriver{
-		NotifierType: notifierType,
+	notifierZMQ := &chainntnfs.NotifierDriver{
+		NotifierType: notifierTypeZMQ,
 		New:          createNewNotifier,
 	}
-
-	if err := chainntnfs.RegisterNotifier(notifier); err != nil {
+	if err := chainntnfs.RegisterNotifier(notifierZMQ); err != nil {
 		panic(fmt.Sprintf("failed to register notifier driver '%s': %v",
-			notifierType, err))
+			notifierTypeZMQ, err))
+	}
+
+	notifierRPC := &chainntnfs.NotifierDriver{
+		NotifierType: notifierTypeRPCPolling,
+		New:          createNewNotifier,
+	}
+	if err := chainntnfs.RegisterNotifier(notifierRPC); err != nil {
+		panic(fmt.Sprintf("failed to register notifier driver '%s': %v",
+			notifierTypeRPCPolling, err))
 	}
 }

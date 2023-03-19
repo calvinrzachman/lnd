@@ -1,12 +1,13 @@
 package channeldb
 
 import (
+	"reflect"
 	"testing"
 
-	"reflect"
-
+	"github.com/davecgh/go-spew/spew"
 	"github.com/go-errors/errors"
 	"github.com/lightningnetwork/lnd/lnwire"
+	"github.com/stretchr/testify/require"
 )
 
 // TestWaitingProofStore tests add/get/remove functions of the waiting proof
@@ -14,15 +15,13 @@ import (
 func TestWaitingProofStore(t *testing.T) {
 	t.Parallel()
 
-	db, cleanup, err := MakeTestDB()
-	if err != nil {
-		t.Fatalf("failed to make test database: %s", err)
-	}
-	defer cleanup()
+	db, err := MakeTestDB(t)
+	require.NoError(t, err, "failed to make test database")
 
 	proof1 := NewWaitingProof(true, &lnwire.AnnounceSignatures{
 		NodeSignature:    wireSig,
 		BitcoinSignature: wireSig,
+		ExtraOpaqueData:  make([]byte, 0),
 	})
 
 	store, err := NewWaitingProofStore(db)
@@ -36,11 +35,10 @@ func TestWaitingProofStore(t *testing.T) {
 	}
 
 	proof2, err := store.Get(proof1.Key())
-	if err != nil {
-		t.Fatalf("unable retrieve proof from storage: %v", err)
-	}
+	require.NoError(t, err, "unable retrieve proof from storage")
 	if !reflect.DeepEqual(proof1, proof2) {
-		t.Fatal("wrong proof retrieved")
+		t.Fatalf("wrong proof retrieved: expected %v, got %v",
+			spew.Sdump(proof1), spew.Sdump(proof2))
 	}
 
 	if _, err := store.Get(proof1.OppositeKey()); err != ErrWaitingProofNotFound {

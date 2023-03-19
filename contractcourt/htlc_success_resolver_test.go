@@ -6,14 +6,14 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
-	"github.com/lightningnetwork/lnd/channeldb/kvdb"
 	"github.com/lightningnetwork/lnd/input"
+	"github.com/lightningnetwork/lnd/kvdb"
 	"github.com/lightningnetwork/lnd/lntest/mock"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwire"
@@ -30,6 +30,8 @@ type htlcResolverTestContext struct {
 	notifier           *mock.ChainNotifier
 	resolverResultChan chan resolveResult
 	resolutionChan     chan ResolutionMsg
+
+	finalHtlcOutcomeStored bool
 
 	t *testing.T
 }
@@ -51,6 +53,8 @@ func newHtlcResolverTestContext(t *testing.T,
 		t:              t,
 	}
 
+	htlcNotifier := &mockHTLCNotifier{}
+
 	witnessBeacon := newMockWitnessBeacon()
 	chainCfg := ChannelArbitratorConfig{
 		ChainArbitratorConfig: ChainArbitratorConfig{
@@ -62,6 +66,7 @@ func newHtlcResolverTestContext(t *testing.T,
 			Sweeper: newMockSweeper(),
 			IncubateOutputs: func(wire.OutPoint, *lnwallet.OutgoingHtlcResolution,
 				*lnwallet.IncomingHtlcResolution, uint32) error {
+
 				return nil
 			},
 			DeliverResolutionMsg: func(msgs ...ResolutionMsg) error {
@@ -74,6 +79,14 @@ func newHtlcResolverTestContext(t *testing.T,
 				testCtx.resolutionChan <- msgs[0]
 				return nil
 			},
+			PutFinalHtlcOutcome: func(chanId lnwire.ShortChannelID,
+				htlcId uint64, settled bool) error {
+
+				testCtx.finalHtlcOutcomeStored = true
+
+				return nil
+			},
+			HtlcNotifier: htlcNotifier,
 		},
 		PutResolverReport: func(_ kvdb.RwTx,
 			report *channeldb.ResolverReport) error {
@@ -86,6 +99,7 @@ func newHtlcResolverTestContext(t *testing.T,
 	// this so set nolint directive.
 	checkpointFunc := func(c ContractResolver, // nolint
 		r ...*channeldb.ResolverReport) error {
+
 		return testCtx.checkpoint(c, r...)
 	}
 
@@ -184,6 +198,7 @@ func TestHtlcSuccessSingleStage(t *testing.T) {
 			reports: []*channeldb.ResolverReport{
 				claim,
 			},
+			finalHtlcStored: true,
 		},
 	}
 
@@ -253,6 +268,7 @@ func TestHtlcSuccessSecondStageResolution(t *testing.T) {
 			// to resolve our htlc.
 			preCheckpoint: func(ctx *htlcResolverTestContext,
 				_ bool) error {
+
 				ctx.notifier.SpendChan <- &chainntnfs.SpendDetail{
 					SpendingTx:    sweepTx,
 					SpenderTxHash: &sweepHash,
@@ -266,6 +282,7 @@ func TestHtlcSuccessSecondStageResolution(t *testing.T) {
 				secondStage,
 				firstStage,
 			},
+			finalHtlcStored: true,
 		},
 	}
 
@@ -389,7 +406,6 @@ func TestHtlcSuccessSecondStageResolutionSweeper(t *testing.T) {
 					SpendingHeight:    10,
 				}
 				return nil
-
 			},
 			// incubating=true is used to signal that the
 			// second-level transaction was confirmed.
@@ -448,6 +464,7 @@ func TestHtlcSuccessSecondStageResolutionSweeper(t *testing.T) {
 				secondStage,
 				firstStage,
 			},
+			finalHtlcStored: true,
 		},
 	}
 
@@ -463,9 +480,10 @@ type checkpoint struct {
 	preCheckpoint func(*htlcResolverTestContext, bool) error
 
 	// data we expect the resolver to be checkpointed with next.
-	incubating bool
-	resolved   bool
-	reports    []*channeldb.ResolverReport
+	incubating      bool
+	resolved        bool
+	reports         []*channeldb.ResolverReport
+	finalHtlcStored bool
 }
 
 // testHtlcSuccess tests resolution of a success resolver. It takes a a list of
@@ -475,7 +493,7 @@ type checkpoint struct {
 func testHtlcSuccess(t *testing.T, resolution lnwallet.IncomingHtlcResolution,
 	checkpoints []checkpoint) {
 
-	defer timeout(t)()
+	defer timeout()()
 
 	// We first run the resolver from start to finish, ensuring it gets
 	// checkpointed at every expected stage. We store the checkpointed data
@@ -519,7 +537,7 @@ func testHtlcSuccess(t *testing.T, resolution lnwallet.IncomingHtlcResolution,
 func runFromCheckpoint(t *testing.T, ctx *htlcResolverTestContext,
 	expectedCheckpoints []checkpoint) [][]byte {
 
-	defer timeout(t)()
+	defer timeout()()
 
 	var checkpointedState [][]byte
 
@@ -555,7 +573,6 @@ func runFromCheckpoint(t *testing.T, ctx *htlcResolverTestContext,
 			t.Fatalf("expected checkpoint to be have "+
 				"incubating=%v, had %v", cp.incubating,
 				incubating)
-
 		}
 
 		// Check we go the expected reports.
@@ -570,6 +587,11 @@ func runFromCheckpoint(t *testing.T, ctx *htlcResolverTestContext,
 					spew.Sdump(cp.reports[i]),
 					spew.Sdump(report))
 			}
+		}
+
+		// Check that the final htlc outcome is stored.
+		if cp.finalHtlcStored != ctx.finalHtlcOutcomeStored {
+			t.Fatal("final htlc store expectation failed")
 		}
 
 		// Finally encode the resolver, and store it for later use.
@@ -595,7 +617,6 @@ func runFromCheckpoint(t *testing.T, ctx *htlcResolverTestContext,
 			if err := cp.preCheckpoint(ctx, resumed); err != nil {
 				t.Fatalf("failure at stage %d: %v", i, err)
 			}
-
 		}
 		resumed = false
 

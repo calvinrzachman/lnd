@@ -10,9 +10,9 @@ import (
 type ClientStats struct {
 	mu sync.Mutex
 
-	// NumTasksReceived is the total number of backups that are pending to
+	// NumTasksPending is the total number of backups that are pending to
 	// be acknowledged by all active and exhausted watchtower sessions.
-	NumTasksReceived int
+	NumTasksPending int
 
 	// NumTasksAccepted is the total number of backups made to all active
 	// and exhausted watchtower sessions.
@@ -31,12 +31,12 @@ type ClientStats struct {
 	NumSessionsExhausted int
 }
 
-// taskReceived increments the number to backup requests the client has received
+// taskReceived increments the number of backup requests the client has received
 // from active channels.
 func (s *ClientStats) taskReceived() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.NumTasksReceived++
+	s.NumTasksPending++
 }
 
 // taskAccepted increments the number of tasks that have been assigned to active
@@ -45,6 +45,7 @@ func (s *ClientStats) taskAccepted() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.NumTasksAccepted++
+	s.NumTasksPending--
 }
 
 // taskIneligible increments the number of tasks that were unable to satisfy the
@@ -73,12 +74,12 @@ func (s *ClientStats) sessionExhausted() {
 	s.NumSessionsExhausted++
 }
 
-// String returns a human readable summary of the client's metrics.
+// String returns a human-readable summary of the client's metrics.
 func (s *ClientStats) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return fmt.Sprintf("tasks(received=%d accepted=%d ineligible=%d) "+
-		"sessions(acquired=%d exhausted=%d)", s.NumTasksReceived,
+		"sessions(acquired=%d exhausted=%d)", s.NumTasksPending,
 		s.NumTasksAccepted, s.NumTasksIneligible, s.NumSessionsAcquired,
 		s.NumSessionsExhausted)
 }
@@ -88,7 +89,7 @@ func (s *ClientStats) Copy() ClientStats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return ClientStats{
-		NumTasksReceived:     s.NumTasksReceived,
+		NumTasksPending:      s.NumTasksPending,
 		NumTasksAccepted:     s.NumTasksAccepted,
 		NumTasksIneligible:   s.NumTasksIneligible,
 		NumSessionsAcquired:  s.NumSessionsAcquired,

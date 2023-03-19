@@ -37,7 +37,7 @@ First, you'll want to run `tor` locally before starting up `lnd`. Depending on
 how you installed Tor, you'll find the configuration file at
 `/usr/local/etc/tor/torrc`. Here's an example configuration file that we'll be
 using for the remainder of the tutorial:
-```
+```text
 SOCKSPort 9050
 Log notice stdout
 ControlPort 9051
@@ -45,8 +45,8 @@ CookieAuthentication 1
 ```
 
 With the configuration file created, you'll then want to start the Tor daemon:
-```
-⛰  tor
+```shell
+$  tor
 Feb 05 17:02:06.501 [notice] Tor 0.3.1.8 (git-ad5027f7dc790624) running on Darwin with Libevent 2.1.8-stable, OpenSSL 1.0.2l, Zlib 1.2.8, Liblzma N/A, and Libzstd N/A.
 Feb 05 17:02:06.502 [notice] Tor can't help you if you use it wrong! Learn how to be safe at https://www.torproject.org/download/download#warning
 Feb 05 17:02:06.502 [notice] Read configuration file "/usr/local/etc/tor/torrc".
@@ -55,7 +55,7 @@ Feb 05 17:02:06.506 [notice] Opening Control listener on 127.0.0.1:9051
 ```
 
 Once the `tor` daemon has started and it has finished bootstrapping, you'll see this in the logs:
-```
+```text
 Feb 05 17:02:06.000 [notice] Bootstrapped 0%: Starting
 Feb 05 17:02:07.000 [notice] Starting with guard context "default"
 Feb 05 17:02:07.000 [notice] Bootstrapped 80%: Connecting to the Tor network
@@ -68,8 +68,8 @@ Feb 05 17:02:11.000 [notice] Bootstrapped 100%: Done
 This indicates the daemon is fully bootstrapped and ready to proxy connections.
 At this point, we can now start `lnd` with the relevant arguments:
 
-```
-⛰  ./lnd -h
+```shell
+$  ./lnd -h
 
 <snip>
 
@@ -106,17 +106,17 @@ Most of these arguments have defaults, so as long as they apply to you, routing
 all outbound and inbound connections through Tor can simply be done with either
 v2 or v3 onion services:
 ```shell
-⛰  ./lnd --tor.active --tor.v2
+$  ./lnd --tor.active --tor.v2
 ```
 ```shell
-⛰  ./lnd --tor.active --tor.v3
+$  ./lnd --tor.active --tor.v3
 ```
 See [Listening for Inbound Connections](#listening-for-inbound-connections) for
 more info about allowing inbound connections via Tor.
 
 Outbound support only can also be used with:
 ```shell
-⛰  ./lnd --tor.active
+$  ./lnd --tor.active
 ```
 
 This will allow you to make all outgoing connections over Tor. Listening is
@@ -132,8 +132,8 @@ circuit.
 
 Activating stream isolation is very straightforward, we only require the
 specification of an additional argument:
-```
-⛰  ./lnd --tor.active --tor.streamisolation
+```shell
+$  ./lnd --tor.active --tor.streamisolation
 ```
 
 ## Authentication
@@ -170,8 +170,8 @@ To prevent unintentional leaking of identifying information, it is also necessar
 to add the flag `listen=localhost`.  
 
 For example, v3 onion services can be used with the following flags:
-```
-⛰  ./lnd --tor.active --tor.v3 --listen=localhost
+```shell
+$  ./lnd --tor.active --tor.v3 --listen=localhost
 ```
 
 This will automatically create a hidden service for your node to use to listen
@@ -182,3 +182,8 @@ base directory. This will allow `lnd` to recreate the same hidden service upon
 restart. If you wish to generate a new onion service, you can simply delete this
 file. The path to this private key file can also be modified with the
 `--tor.privatekeypath` argument.
+
+You can optionally encrypt the Tor private key by using the `--tor.encryptkey` 
+flag. This will still write to the same private key files. However instead of 
+writing the plaintext private key, `lnd` encrypts the private key using the 
+wallet's seed and writes the encrypted blob to the file.

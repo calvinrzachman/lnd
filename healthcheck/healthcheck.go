@@ -1,4 +1,4 @@
-// Package healthcheck contains a monitor which takes a set of liveliness checks
+// Package healthcheck contains a monitor which takes a set of liveness checks
 // which it periodically checks. If a check fails after its configured number
 // of allowed call attempts, the monitor will send a request to shutdown using
 // the function is is provided in its config. Checks are dispatched in their own
@@ -30,7 +30,7 @@ type Config struct {
 // to print our reason for shutdown.
 type shutdownFunc func(format string, params ...interface{})
 
-// Monitor periodically checks a series of configured liveliness checks to
+// Monitor periodically checks a series of configured liveness checks to
 // ensure that lnd has access to all critical resources.
 type Monitor struct {
 	started int32 // To be used atomically.
@@ -71,10 +71,11 @@ func (m *Monitor) Start() error {
 		}
 
 		m.wg.Add(1)
-		go func() {
+		go func(check *Observation) {
 			defer m.wg.Done()
+
 			check.monitor(m.cfg.Shutdown, m.quit)
-		}()
+		}(check)
 	}
 
 	return nil
@@ -85,6 +86,8 @@ func (m *Monitor) Stop() error {
 	if !atomic.CompareAndSwapInt32(&m.stopped, 0, 1) {
 		return fmt.Errorf("monitor already stopped")
 	}
+
+	log.Info("Health monitor shutting down")
 
 	close(m.quit)
 	m.wg.Wait()
@@ -109,7 +112,7 @@ func CreateCheck(checkFunc func() error) func() chan error {
 	}
 }
 
-// Observation represents a liveliness check that we periodically check.
+// Observation represents a liveness check that we periodically check.
 type Observation struct {
 	// Name describes the health check.
 	Name string
@@ -166,10 +169,18 @@ func (o *Observation) monitor(shutdown shutdownFunc, quit chan struct{}) {
 	for {
 		select {
 		case <-o.Interval.Ticks():
-			o.retryCheck(quit, shutdown)
+			// retryCheck will return errMaxAttemptsReached when
+			// the max attempts are reached. In that case we will
+			// stop the ticker and quit.
+			if o.retryCheck(quit, shutdown) {
+				log.Debugf("Health check: max attempts " +
+					"failed, monitor exiting")
+				return
+			}
 
 		// Exit if we receive the instruction to shutdown.
 		case <-quit:
+			log.Debug("Health check: monitor quit")
 			return
 		}
 	}
@@ -178,8 +189,11 @@ func (o *Observation) monitor(shutdown shutdownFunc, quit chan struct{}) {
 // retryCheck calls a check function until it succeeds, or we reach our
 // configured number of attempts, waiting for our back off period between failed
 // calls. If we fail to obtain a passing health check after the allowed number
-// of calls, we will request shutdown.
-func (o *Observation) retryCheck(quit chan struct{}, shutdown shutdownFunc) {
+// of calls, we will request shutdown. It returns a bool to indicate whether
+// the max number of attempts is reached.
+func (o *Observation) retryCheck(quit chan struct{},
+	shutdown shutdownFunc) bool {
+
 	var count int
 
 	for count < o.Attempts {
@@ -197,13 +211,14 @@ func (o *Observation) retryCheck(quit chan struct{}, shutdown shutdownFunc) {
 				"%v", o, o.Timeout)
 
 		case <-quit:
-			return
+			log.Debug("Health check: monitor quit")
+			return false
 		}
 
 		// If our error is nil, we have passed our health check, so we
 		// can exit.
 		if err == nil {
-			return
+			return false
 		}
 
 		// If we have reached our allowed number of attempts, this
@@ -211,8 +226,7 @@ func (o *Observation) retryCheck(quit chan struct{}, shutdown shutdownFunc) {
 		if count == o.Attempts {
 			shutdown("Health check: %v failed after %v "+
 				"calls", o, o.Attempts)
-
-			return
+			return true
 		}
 
 		log.Infof("Health check: %v, call: %v failed with: %v, "+
@@ -225,7 +239,10 @@ func (o *Observation) retryCheck(quit chan struct{}, shutdown shutdownFunc) {
 		case <-time.After(o.Backoff):
 
 		case <-quit:
-			return
+			log.Debug("Health check: monitor quit")
+			return false
 		}
 	}
+
+	return false
 }

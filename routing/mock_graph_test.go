@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/routing/route"
@@ -13,7 +14,12 @@ import (
 
 // createPubkey return a new test pubkey.
 func createPubkey(id byte) route.Vertex {
-	pubkey := route.Vertex{id}
+	_, secpPub := btcec.PrivKeyFromBytes([]byte{id})
+
+	var bytes [33]byte
+	copy(bytes[:], secpPub.SerializeCompressed()[:33])
+
+	pubkey := route.Vertex(bytes)
 	return pubkey
 }
 
@@ -159,8 +165,7 @@ func (m *mockGraph) addChannel(id uint64, node1id, node2id byte,
 //
 // NOTE: Part of the routingGraph interface.
 func (m *mockGraph) forEachNodeChannel(nodePub route.Vertex,
-	cb func(*channeldb.ChannelEdgeInfo, *channeldb.ChannelEdgePolicy,
-		*channeldb.ChannelEdgePolicy) error) error {
+	cb func(channel *channeldb.DirectedChannel) error) error {
 
 	// Look up the mock node.
 	node, ok := m.nodes[nodePub]
@@ -171,36 +176,31 @@ func (m *mockGraph) forEachNodeChannel(nodePub route.Vertex,
 	// Iterate over all of its channels.
 	for peer, channel := range node.channels {
 		// Lexicographically sort the pubkeys.
-		var node1, node2 route.Vertex
+		var node1 route.Vertex
 		if bytes.Compare(nodePub[:], peer[:]) == -1 {
-			node1, node2 = peer, nodePub
+			node1 = peer
 		} else {
-			node1, node2 = nodePub, peer
+			node1 = nodePub
 		}
 
 		peerNode := m.nodes[peer]
 
 		// Call the per channel callback.
 		err := cb(
-			&channeldb.ChannelEdgeInfo{
-				NodeKey1Bytes: node1,
-				NodeKey2Bytes: node2,
-			},
-			&channeldb.ChannelEdgePolicy{
-				ChannelID: channel.id,
-				Node: &channeldb.LightningNode{
-					PubKeyBytes: peer,
-					Features:    lnwire.EmptyFeatureVector(),
+			&channeldb.DirectedChannel{
+				ChannelID:    channel.id,
+				IsNode1:      nodePub == node1,
+				OtherNode:    peer,
+				Capacity:     channel.capacity,
+				OutPolicySet: true,
+				InPolicy: &channeldb.CachedEdgePolicy{
+					ChannelID: channel.id,
+					ToNodePubKey: func() route.Vertex {
+						return nodePub
+					},
+					ToNodeFeatures: lnwire.EmptyFeatureVector(),
+					FeeBaseMSat:    peerNode.baseFee,
 				},
-				FeeBaseMSat: node.baseFee,
-			},
-			&channeldb.ChannelEdgePolicy{
-				ChannelID: channel.id,
-				Node: &channeldb.LightningNode{
-					PubKeyBytes: nodePub,
-					Features:    lnwire.EmptyFeatureVector(),
-				},
-				FeeBaseMSat: peerNode.baseFee,
 			},
 		)
 		if err != nil {
@@ -224,6 +224,31 @@ func (m *mockGraph) fetchNodeFeatures(nodePub route.Vertex) (
 	*lnwire.FeatureVector, error) {
 
 	return lnwire.EmptyFeatureVector(), nil
+}
+
+// FetchAmountPairCapacity returns the maximal capacity between nodes in the
+// graph.
+//
+// NOTE: Part of the routingGraph interface.
+func (m *mockGraph) FetchAmountPairCapacity(nodeFrom, nodeTo route.Vertex,
+	amount lnwire.MilliSatoshi) (btcutil.Amount, error) {
+
+	var capacity btcutil.Amount
+
+	cb := func(channel *channeldb.DirectedChannel) error {
+		if channel.OtherNode == nodeTo {
+			capacity = channel.Capacity
+		}
+
+		return nil
+	}
+
+	err := m.forEachNodeChannel(nodeFrom, cb)
+	if err != nil {
+		return 0, err
+	}
+
+	return capacity, nil
 }
 
 // htlcResult describes the resolution of an htlc. If failure is nil, the htlc

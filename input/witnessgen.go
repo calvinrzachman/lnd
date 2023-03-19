@@ -84,7 +84,7 @@ const (
 	// us to sweep an HTLC output that we extended to a party, but was
 	// never fulfilled. This _is_ the HTLC output directly on our
 	// commitment transaction, and the input to the second-level HTLC
-	// tiemout transaction. It can only be spent after CLTV expiry, and
+	// timeout transaction. It can only be spent after CLTV expiry, and
 	// commitment confirmation.
 	HtlcOfferedTimeoutSecondLevelInputConfirmed StandardWitnessType = 15
 
@@ -145,6 +145,41 @@ const (
 	// CommitmentAnchor is a witness that allows us to spend our anchor on
 	// the commitment transaction.
 	CommitmentAnchor StandardWitnessType = 14
+
+	// LeaseCommitmentTimeLock is a witness that allows us to spend our
+	// output on our local commitment transaction after a relative and
+	// absolute lock-time lockout as part of the script enforced lease
+	// commitment type.
+	LeaseCommitmentTimeLock StandardWitnessType = 17
+
+	// LeaseCommitmentToRemoteConfirmed is a witness that allows us to spend
+	// our output on the counterparty's commitment transaction after a
+	// confirmation and absolute locktime as part of the script enforced
+	// lease commitment type.
+	LeaseCommitmentToRemoteConfirmed StandardWitnessType = 18
+
+	// LeaseHtlcOfferedTimeoutSecondLevel is a witness that allows us to
+	// sweep an HTLC output that we extended to a party, but was never
+	// fulfilled. This HTLC output isn't directly on the commitment
+	// transaction, but is the result of a confirmed second-level HTLC
+	// transaction. As a result, we can only spend this after a CSV delay
+	// and CLTV locktime as part of the script enforced lease commitment
+	// type.
+	LeaseHtlcOfferedTimeoutSecondLevel StandardWitnessType = 19
+
+	// LeaseHtlcAcceptedSuccessSecondLevel is a witness that allows us to
+	// sweep an HTLC output that was offered to us, and for which we have a
+	// payment preimage. This HTLC output isn't directly on our commitment
+	// transaction, but is the result of confirmed second-level HTLC
+	// transaction. As a result, we can only spend this after a CSV delay
+	// and CLTV locktime as part of the script enforced lease commitment
+	// type.
+	LeaseHtlcAcceptedSuccessSecondLevel StandardWitnessType = 20
+
+	// TaprootPubKeySpend is a witness type that allows us to spend a
+	// regular p2tr output that's sent to an output which is under complete
+	// control of the backing wallet.
+	TaprootPubKeySpend StandardWitnessType = 21
 )
 
 // String returns a human readable version of the target WitnessType.
@@ -203,6 +238,21 @@ func (wt StandardWitnessType) String() string {
 	case NestedWitnessKeyHash:
 		return "NestedWitnessKeyHash"
 
+	case LeaseCommitmentTimeLock:
+		return "LeaseCommitmentTimeLock"
+
+	case LeaseCommitmentToRemoteConfirmed:
+		return "LeaseCommitmentToRemoteConfirmed"
+
+	case LeaseHtlcOfferedTimeoutSecondLevel:
+		return "LeaseHtlcOfferedTimeoutSecondLevel"
+
+	case LeaseHtlcAcceptedSuccessSecondLevel:
+		return "LeaseHtlcAcceptedSuccessSecondLevel"
+
+	case TaprootPubKeySpend:
+		return "TaprootPubKeySpend"
+
 	default:
 		return fmt.Sprintf("Unknown WitnessType: %v", uint32(wt))
 	}
@@ -225,7 +275,7 @@ func (wt StandardWitnessType) WitnessGenerator(signer Signer,
 		desc.InputIndex = inputIndex
 
 		switch wt {
-		case CommitmentTimeLock:
+		case CommitmentTimeLock, LeaseCommitmentTimeLock:
 			witness, err := CommitSpendTimeout(signer, desc, tx)
 			if err != nil {
 				return nil, err
@@ -235,7 +285,7 @@ func (wt StandardWitnessType) WitnessGenerator(signer Signer,
 				Witness: witness,
 			}, nil
 
-		case CommitmentToRemoteConfirmed:
+		case CommitmentToRemoteConfirmed, LeaseCommitmentToRemoteConfirmed:
 			witness, err := CommitSpendToRemoteConfirmed(
 				signer, desc, tx,
 			)
@@ -307,17 +357,11 @@ func (wt StandardWitnessType) WitnessGenerator(signer Signer,
 				Witness: witness,
 			}, nil
 
-		case HtlcOfferedTimeoutSecondLevel:
-			witness, err := HtlcSecondLevelSpend(signer, desc, tx)
-			if err != nil {
-				return nil, err
-			}
+		case HtlcOfferedTimeoutSecondLevel,
+			LeaseHtlcOfferedTimeoutSecondLevel,
+			HtlcAcceptedSuccessSecondLevel,
+			LeaseHtlcAcceptedSuccessSecondLevel:
 
-			return &Script{
-				Witness: witness,
-			}, nil
-
-		case HtlcAcceptedSuccessSecondLevel:
 			witness, err := HtlcSecondLevelSpend(signer, desc, tx)
 			if err != nil {
 				return nil, err
@@ -352,6 +396,8 @@ func (wt StandardWitnessType) WitnessGenerator(signer Signer,
 
 		case WitnessKeyHash:
 			fallthrough
+		case TaprootPubKeySpend:
+			fallthrough
 		case NestedWitnessKeyHash:
 			return signer.ComputeInputScript(tx, desc)
 
@@ -369,7 +415,6 @@ func (wt StandardWitnessType) WitnessGenerator(signer Signer,
 // NOTE: This is part of the WitnessType interface.
 func (wt StandardWitnessType) SizeUpperBound() (int, bool, error) {
 	switch wt {
-
 	// Outputs on a remote commitment transaction that pay directly to us.
 	case CommitSpendNoDelayTweakless:
 		fallthrough
@@ -382,10 +427,18 @@ func (wt StandardWitnessType) SizeUpperBound() (int, bool, error) {
 	// to us.
 	case CommitmentTimeLock:
 		return ToLocalTimeoutWitnessSize, false, nil
+	case LeaseCommitmentTimeLock:
+		size := ToLocalTimeoutWitnessSize +
+			LeaseWitnessScriptSizeOverhead
+		return size, false, nil
 
 	// 1 CSV time locked output to us on remote commitment.
 	case CommitmentToRemoteConfirmed:
 		return ToRemoteConfirmedWitnessSize, false, nil
+	case LeaseCommitmentToRemoteConfirmed:
+		size := ToRemoteConfirmedWitnessSize +
+			LeaseWitnessScriptSizeOverhead
+		return size, false, nil
 
 	// Anchor output on the commitment transaction.
 	case CommitmentAnchor:
@@ -396,6 +449,10 @@ func (wt StandardWitnessType) SizeUpperBound() (int, bool, error) {
 	// sweep.
 	case HtlcOfferedTimeoutSecondLevel:
 		return ToLocalTimeoutWitnessSize, false, nil
+	case LeaseHtlcOfferedTimeoutSecondLevel:
+		size := ToLocalTimeoutWitnessSize +
+			LeaseWitnessScriptSizeOverhead
+		return size, false, nil
 
 	// Input to the outgoing HTLC second layer timeout transaction.
 	case HtlcOfferedTimeoutSecondLevelInputConfirmed:
@@ -406,6 +463,10 @@ func (wt StandardWitnessType) SizeUpperBound() (int, bool, error) {
 	// sweep.
 	case HtlcAcceptedSuccessSecondLevel:
 		return ToLocalTimeoutWitnessSize, false, nil
+	case LeaseHtlcAcceptedSuccessSecondLevel:
+		size := ToLocalTimeoutWitnessSize +
+			LeaseWitnessScriptSizeOverhead
+		return size, false, nil
 
 	// Input to the incoming second-layer HTLC success transaction.
 	case HtlcAcceptedSuccessSecondLevelInputConfirmed:
@@ -443,6 +504,9 @@ func (wt StandardWitnessType) SizeUpperBound() (int, bool, error) {
 	// The revocation output of a second level output of an HTLC.
 	case HtlcSecondLevelRevoke:
 		return ToLocalPenaltyWitnessSize, false, nil
+
+	case TaprootPubKeySpend:
+		return TaprootKeyPathCustomSighashWitnessSize, false, nil
 	}
 
 	return 0, false, fmt.Errorf("unexpected witness type: %v", wt)

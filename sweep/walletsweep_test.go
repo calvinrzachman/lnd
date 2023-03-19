@@ -5,13 +5,14 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
 	"github.com/lightningnetwork/lnd/lntest/mock"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
+	"github.com/stretchr/testify/require"
 )
 
 // TestDetermineFeePerKw tests that given a fee preference, the
@@ -119,7 +120,7 @@ func newMockUtxoSource(utxos []*lnwallet.Utxo) *mockUtxoSource {
 	}
 }
 
-func (m *mockUtxoSource) ListUnspentWitness(minConfs int32,
+func (m *mockUtxoSource) ListUnspentWitnessFromDefaultAccount(minConfs int32,
 	maxConfs int32) ([]*lnwallet.Utxo, error) {
 
 	return m.outputs, nil
@@ -288,7 +289,8 @@ func TestCraftSweepAllTxCoinSelectFail(t *testing.T) {
 	utxoLocker := newMockOutpointLocker()
 
 	_, err := CraftSweepAllTx(
-		0, 100, 10, nil, coinSelectLocker, utxoSource, utxoLocker, nil, nil,
+		0, 10, nil, nil, coinSelectLocker, utxoSource, utxoLocker, nil,
+		nil, 0,
 	)
 
 	// Since we instructed the coin select locker to fail above, we should
@@ -313,7 +315,8 @@ func TestCraftSweepAllTxUnknownWitnessType(t *testing.T) {
 	utxoLocker := newMockOutpointLocker()
 
 	_, err := CraftSweepAllTx(
-		0, 100, 10, nil, coinSelectLocker, utxoSource, utxoLocker, nil, nil,
+		0, 10, nil, nil, coinSelectLocker, utxoSource, utxoLocker, nil,
+		nil, 0,
 	)
 
 	// Since passed in a p2wsh output, which is unknown, we should fail to
@@ -347,12 +350,10 @@ func TestCraftSweepAllTx(t *testing.T) {
 	utxoLocker := newMockOutpointLocker()
 
 	sweepPkg, err := CraftSweepAllTx(
-		0, 100, 10, deliveryAddr, coinSelectLocker, utxoSource, utxoLocker,
-		feeEstimator, signer,
+		0, 10, nil, deliveryAddr, coinSelectLocker, utxoSource,
+		utxoLocker, feeEstimator, signer, 0,
 	)
-	if err != nil {
-		t.Fatalf("unable to make sweep tx: %v", err)
-	}
+	require.NoError(t, err, "unable to make sweep tx")
 
 	// At this point, all of the UTXOs that we made above should be locked
 	// and none of them unlocked.

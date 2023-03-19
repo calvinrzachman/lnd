@@ -1,3 +1,4 @@
+//go:build invoicesrpc
 // +build invoicesrpc
 
 package invoicesrpc
@@ -44,11 +45,23 @@ type Config struct {
 	// specified.
 	DefaultCLTVExpiry uint32
 
-	// ChanDB is a global boltdb instance which is needed to access the
+	// GraphDB is a global database instance which is needed to access the
 	// channel graph.
-	ChanDB *channeldb.DB
+	GraphDB *channeldb.ChannelGraph
+
+	// ChanStateDB is a possibly replicated db instance which contains the
+	// channel state
+	ChanStateDB *channeldb.ChannelStateDB
 
 	// GenInvoiceFeatures returns a feature containing feature bits that
 	// should be advertised on freshly generated invoices.
 	GenInvoiceFeatures func() *lnwire.FeatureVector
+
+	// GenAmpInvoiceFeatures returns a feature containing feature bits that
+	// should be advertised on freshly generated AMP invoices.
+	GenAmpInvoiceFeatures func() *lnwire.FeatureVector
+
+	// GetAlias returns the peer's alias SCID if it exists given the
+	// 32-byte ChannelID.
+	GetAlias func(lnwire.ChannelID) (lnwire.ShortChannelID, error)
 }

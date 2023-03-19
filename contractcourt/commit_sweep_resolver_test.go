@@ -4,12 +4,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
-	"github.com/lightningnetwork/lnd/channeldb/kvdb"
 	"github.com/lightningnetwork/lnd/input"
+	"github.com/lightningnetwork/lnd/kvdb"
 	"github.com/lightningnetwork/lnd/lntest/mock"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
@@ -108,14 +108,17 @@ type mockSweeper struct {
 	sweepTx           *wire.MsgTx
 	sweepErr          error
 	createSweepTxChan chan *wire.MsgTx
+
+	deadlines []int
 }
 
 func newMockSweeper() *mockSweeper {
 	return &mockSweeper{
-		sweptInputs:       make(chan input.Input),
+		sweptInputs:       make(chan input.Input, 3),
 		updatedInputs:     make(chan wire.OutPoint),
 		sweepTx:           &wire.MsgTx{},
 		createSweepTxChan: make(chan *wire.MsgTx),
+		deadlines:         []int{},
 	}
 }
 
@@ -123,6 +126,11 @@ func (s *mockSweeper) SweepInput(input input.Input, params sweep.Params) (
 	chan sweep.Result, error) {
 
 	s.sweptInputs <- input
+
+	// Update the deadlines used if it's set.
+	if params.Fee.ConfTarget != 0 {
+		s.deadlines = append(s.deadlines, int(params.Fee.ConfTarget))
+	}
 
 	result := make(chan sweep.Result, 1)
 	result <- sweep.Result{
@@ -162,7 +170,7 @@ var _ UtxoSweeper = &mockSweeper{}
 // unencumbered by a time lock.
 func TestCommitSweepResolverNoDelay(t *testing.T) {
 	t.Parallel()
-	defer timeout(t)()
+	defer timeout()()
 
 	res := lnwallet.CommitOutputResolution{
 		SelfOutputSignDesc: input.SignDescriptor{
@@ -219,7 +227,7 @@ func TestCommitSweepResolverNoDelay(t *testing.T) {
 // that is encumbered by a time lock. sweepErr indicates whether the local node
 // fails to sweep the output.
 func testCommitSweepResolverDelay(t *testing.T, sweepErr error) {
-	defer timeout(t)()
+	defer timeout()()
 
 	const sweepProcessInterval = 100 * time.Millisecond
 	amt := int64(100)
@@ -339,7 +347,6 @@ func testCommitSweepResolverDelay(t *testing.T, sweepErr error) {
 		t.Fatalf("unexpected resolver report. want=%v got=%v",
 			expectedReport, report)
 	}
-
 }
 
 // TestCommitSweepResolverDelay tests resolution of a direct commitment output

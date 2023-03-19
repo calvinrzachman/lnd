@@ -8,7 +8,9 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcjson"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 )
@@ -67,6 +69,31 @@ func (t TxConfStatus) String() string {
 	}
 }
 
+// notifierOptions is a set of functional options that allow callers to further
+// modify the type of chain event notifications they receive.
+type notifierOptions struct {
+	// includeBlock if true, then the dispatched confirmation notification
+	// will include the block that mined the transaction.
+	includeBlock bool
+}
+
+// defaultNotifierOptions returns the set of default options for the notifier.
+func defaultNotifierOptions() *notifierOptions {
+	return &notifierOptions{}
+}
+
+// NotifierOption is a functional option that allows a caller to modify the
+// events received from the notifier.
+type NotifierOption func(*notifierOptions)
+
+// WithIncludeBlock is an optional argument that allows the calelr to specify
+// that the block that mined a transaction should be included in the response.
+func WithIncludeBlock() NotifierOption {
+	return func(o *notifierOptions) {
+		o.includeBlock = true
+	}
+}
+
 // ChainNotifier represents a trusted source to receive notifications concerning
 // targeted events on the Bitcoin blockchain. The interface specification is
 // intentionally general in order to support a wide array of chain notification
@@ -97,7 +124,8 @@ type ChainNotifier interface {
 	// NOTE: Dispatching notifications to multiple clients subscribed to
 	// the same (txid, numConfs) tuple MUST be supported.
 	RegisterConfirmationsNtfn(txid *chainhash.Hash, pkScript []byte,
-		numConfs, heightHint uint32) (*ConfirmationEvent, error)
+		numConfs, heightHint uint32,
+		opts ...NotifierOption) (*ConfirmationEvent, error)
 
 	// RegisterSpendNtfn registers an intent to be notified once the target
 	// outpoint is successfully spent within a transaction. The script that
@@ -166,6 +194,12 @@ type TxConfirmation struct {
 
 	// Tx is the transaction for which the notification was requested for.
 	Tx *wire.MsgTx
+
+	// Block is the block that contains the transaction referenced above.
+	//
+	// NOTE: This is only specified if the confirmation request opts to
+	// have the response include the block itself.
+	Block *wire.MsgBlock
 }
 
 // ConfirmationEvent encapsulates a confirmation notification. With this struct,
@@ -302,6 +336,9 @@ type BlockEpoch struct {
 	// Height is the height of the latest block to be added to the tip of
 	// the main chain.
 	Height int32
+
+	// BlockHeader is the block header of this new height.
+	BlockHeader *wire.BlockHeader
 }
 
 // BlockEpochEvent encapsulates an on-going stream of block epoch
@@ -489,8 +526,9 @@ func RewindChain(chainConn ChainConn, txNotifier *TxNotifier,
 	currBestBlock BlockEpoch, targetHeight int32) (BlockEpoch, error) {
 
 	newBestBlock := BlockEpoch{
-		Height: currBestBlock.Height,
-		Hash:   currBestBlock.Hash,
+		Height:      currBestBlock.Height,
+		Hash:        currBestBlock.Hash,
+		BlockHeader: currBestBlock.BlockHeader,
 	}
 
 	for height := currBestBlock.Height; height > targetHeight; height-- {
@@ -499,6 +537,11 @@ func RewindChain(chainConn ChainConn, txNotifier *TxNotifier,
 			return newBestBlock, fmt.Errorf("unable to "+
 				"find blockhash for disconnected height=%d: %v",
 				height, err)
+		}
+		header, err := chainConn.GetBlockHeader(hash)
+		if err != nil {
+			return newBestBlock, fmt.Errorf("unable to get block "+
+				"header for height=%v", height-1)
 		}
 
 		Log.Infof("Block disconnected from main chain: "+
@@ -512,7 +555,9 @@ func RewindChain(chainConn ChainConn, txNotifier *TxNotifier,
 		}
 		newBestBlock.Height = height - 1
 		newBestBlock.Hash = hash
+		newBestBlock.BlockHeader = header
 	}
+
 	return newBestBlock, nil
 }
 
@@ -536,8 +581,9 @@ func HandleMissedBlocks(chainConn ChainConn, txNotifier *TxNotifier,
 		// If a reorg causes our best hash to be incorrect, rewind the
 		// chain so our best block is set to the closest common
 		// ancestor, then dispatch notifications from there.
-		hashAtBestHeight, err :=
-			chainConn.GetBlockHash(int64(currBestBlock.Height))
+		hashAtBestHeight, err := chainConn.GetBlockHash(
+			int64(currBestBlock.Height),
+		)
 		if err != nil {
 			return currBestBlock, nil, fmt.Errorf("unable to find "+
 				"blockhash for height=%d: %v",
@@ -552,8 +598,9 @@ func HandleMissedBlocks(chainConn ChainConn, txNotifier *TxNotifier,
 				"common ancestor: %v", err)
 		}
 
-		currBestBlock, err = RewindChain(chainConn, txNotifier,
-			currBestBlock, startingHeight)
+		currBestBlock, err = RewindChain(
+			chainConn, txNotifier, currBestBlock, startingHeight,
+		)
 		if err != nil {
 			return currBestBlock, nil, fmt.Errorf("unable to "+
 				"rewind chain: %v", err)
@@ -589,8 +636,20 @@ func getMissedBlocks(chainConn ChainConn, startingHeight,
 			return nil, fmt.Errorf("unable to find blockhash for "+
 				"height=%d: %v", height, err)
 		}
-		missedBlocks = append(missedBlocks,
-			BlockEpoch{Hash: hash, Height: height})
+		header, err := chainConn.GetBlockHeader(hash)
+		if err != nil {
+			return nil, fmt.Errorf("unable to find block header "+
+				"for height=%d: %v", height, err)
+		}
+
+		missedBlocks = append(
+			missedBlocks,
+			BlockEpoch{
+				Hash:        hash,
+				Height:      height,
+				BlockHeader: header,
+			},
+		)
 	}
 
 	return missedBlocks, nil
@@ -603,9 +662,8 @@ type TxIndexConn interface {
 	// block that the transaction confirmed.
 	GetRawTransactionVerbose(*chainhash.Hash) (*btcjson.TxRawResult, error)
 
-	// GetBlockVerbose returns the block identified by the chain hash along
-	// with additional information such as the block's height in the chain.
-	GetBlockVerbose(*chainhash.Hash) (*btcjson.GetBlockVerboseResult, error)
+	// GetBlock returns the block identified by the chain hash.
+	GetBlock(*chainhash.Hash) (*wire.MsgBlock, error)
 }
 
 // ConfDetailsFromTxIndex looks up whether a transaction is already included in
@@ -675,26 +733,38 @@ func ConfDetailsFromTxIndex(chainConn TxIndexConn, r ConfRequest,
 			fmt.Errorf("unable to get block hash %v for "+
 				"historical dispatch: %v", rawTxRes.BlockHash, err)
 	}
-	block, err := chainConn.GetBlockVerbose(blockHash)
+	block, err := chainConn.GetBlock(blockHash)
 	if err != nil {
 		return nil, TxNotFoundIndex,
 			fmt.Errorf("unable to get block with hash %v for "+
 				"historical dispatch: %v", blockHash, err)
 	}
 
+	// In the modern chain (the only one we really care about for LN), the
+	// coinbase transaction of all blocks will include the block height.
+	// Therefore we can save another query, and just use that height
+	// directly.
+	blockHeight, err := blockchain.ExtractCoinbaseHeight(
+		btcutil.NewTx(block.Transactions[0]),
+	)
+	if err != nil {
+		return nil, TxNotFoundIndex, fmt.Errorf("unable to extract "+
+			"coinbase height: %w", err)
+	}
+
 	// If the block was obtained, locate the transaction's index within the
 	// block so we can give the subscriber full confirmation details.
-	txidStr := r.TxID.String()
-	for txIndex, txHash := range block.Tx {
-		if txHash != txidStr {
+	for txIndex, blockTx := range block.Transactions {
+		if blockTx.TxHash() != r.TxID {
 			continue
 		}
 
 		return &TxConfirmation{
 			Tx:          &tx,
 			BlockHash:   blockHash,
-			BlockHeight: uint32(block.Height),
+			BlockHeight: uint32(blockHeight),
 			TxIndex:     uint32(txIndex),
+			Block:       block,
 		}, TxFoundIndex, nil
 	}
 
@@ -702,4 +772,39 @@ func ConfDetailsFromTxIndex(chainConn TxIndexConn, r ConfRequest,
 	// within the block, but didn't.
 	return nil, TxNotFoundIndex, fmt.Errorf("unable to locate "+
 		"tx %v in block %v", r.TxID, blockHash)
+}
+
+// SpendHintCache is an interface whose duty is to cache spend hints for
+// outpoints. A spend hint is defined as the earliest height in the chain at
+// which an outpoint could have been spent within.
+type SpendHintCache interface {
+	// CommitSpendHint commits a spend hint for the outpoints to the cache.
+	CommitSpendHint(height uint32, spendRequests ...SpendRequest) error
+
+	// QuerySpendHint returns the latest spend hint for an outpoint.
+	// ErrSpendHintNotFound is returned if a spend hint does not exist
+	// within the cache for the outpoint.
+	QuerySpendHint(spendRequest SpendRequest) (uint32, error)
+
+	// PurgeSpendHint removes the spend hint for the outpoints from the
+	// cache.
+	PurgeSpendHint(spendRequests ...SpendRequest) error
+}
+
+// ConfirmHintCache is an interface whose duty is to cache confirm hints for
+// transactions. A confirm hint is defined as the earliest height in the chain
+// at which a transaction could have been included in a block.
+type ConfirmHintCache interface {
+	// CommitConfirmHint commits a confirm hint for the transactions to the
+	// cache.
+	CommitConfirmHint(height uint32, confRequests ...ConfRequest) error
+
+	// QueryConfirmHint returns the latest confirm hint for a transaction
+	// hash. ErrConfirmHintNotFound is returned if a confirm hint does not
+	// exist within the cache for the transaction hash.
+	QueryConfirmHint(confRequest ConfRequest) (uint32, error)
+
+	// PurgeConfirmHint removes the confirm hint for the transactions from
+	// the cache.
+	PurgeConfirmHint(confRequests ...ConfRequest) error
 }

@@ -4,13 +4,12 @@ import (
 	"testing"
 
 	"github.com/lightningnetwork/lnd/channeldb"
-	"github.com/lightningnetwork/lnd/channeldb/kvdb"
+	"github.com/lightningnetwork/lnd/kvdb"
 	"github.com/stretchr/testify/require"
 )
 
 // TestDefaultOptions tests the default options are created as intended.
 func TestDefaultOptions(t *testing.T) {
-
 	opts := channeldb.DefaultOptions()
 
 	require.True(t, opts.NoFreelistSync)

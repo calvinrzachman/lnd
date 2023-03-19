@@ -1,9 +1,10 @@
+//go:build !dev
 // +build !dev
 
 package lncfg
 
 // Legacy is a sub-config that houses all the legacy protocol options.  These
-// are mostly used for integration tests as most modern nodes shuld always run
+// are mostly used for integration tests as most modern nodes should always run
 // with them on by default.
 type LegacyProtocol struct {
 }
@@ -18,10 +19,5 @@ func (l *LegacyProtocol) LegacyOnion() bool {
 // NoStaticRemoteKey returns true if the old commitment format with a tweaked
 // remote key should be used for new funded channels.
 func (l *LegacyProtocol) NoStaticRemoteKey() bool {
-	return false
-}
-
-// NoGossipThrottle returns true if gossip updates shouldn't be throttled.
-func (l *LegacyProtocol) NoGossipThrottle() bool {
 	return false
 }

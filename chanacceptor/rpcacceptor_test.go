@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcutil"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnwallet/chancloser"
@@ -20,14 +20,14 @@ func TestValidateAcceptorResponse(t *testing.T) {
 		customError = errors.New("custom error")
 		validAddr   = "bcrt1qwrmq9uca0t3dy9t9wtuq5tm4405r7tfzyqn9pp"
 		addr, _     = chancloser.ParseUpfrontShutdownAddress(
-			validAddr, &chaincfg.TestNet3Params,
+			validAddr, &chaincfg.RegressionNetParams,
 		)
 	)
 
 	tests := []struct {
 		name        string
 		dustLimit   btcutil.Amount
-		response    lnrpc.ChannelAcceptResponse
+		response    *lnrpc.ChannelAcceptResponse
 		accept      bool
 		acceptorErr error
 		error       error
@@ -35,7 +35,7 @@ func TestValidateAcceptorResponse(t *testing.T) {
 	}{
 		{
 			name: "accepted with error",
-			response: lnrpc.ChannelAcceptResponse{
+			response: &lnrpc.ChannelAcceptResponse{
 				Accept: true,
 				Error:  customError.Error(),
 			},
@@ -45,7 +45,7 @@ func TestValidateAcceptorResponse(t *testing.T) {
 		},
 		{
 			name: "custom error too long",
-			response: lnrpc.ChannelAcceptResponse{
+			response: &lnrpc.ChannelAcceptResponse{
 				Accept: false,
 				Error:  strings.Repeat(" ", maxErrorLength+1),
 			},
@@ -55,7 +55,7 @@ func TestValidateAcceptorResponse(t *testing.T) {
 		},
 		{
 			name: "accepted",
-			response: lnrpc.ChannelAcceptResponse{
+			response: &lnrpc.ChannelAcceptResponse{
 				Accept:          true,
 				UpfrontShutdown: validAddr,
 			},
@@ -66,7 +66,7 @@ func TestValidateAcceptorResponse(t *testing.T) {
 		},
 		{
 			name: "rejected with error",
-			response: lnrpc.ChannelAcceptResponse{
+			response: &lnrpc.ChannelAcceptResponse{
 				Accept: false,
 				Error:  customError.Error(),
 			},
@@ -76,7 +76,7 @@ func TestValidateAcceptorResponse(t *testing.T) {
 		},
 		{
 			name: "rejected with no error",
-			response: lnrpc.ChannelAcceptResponse{
+			response: &lnrpc.ChannelAcceptResponse{
 				Accept: false,
 			},
 			accept:      false,
@@ -85,7 +85,7 @@ func TestValidateAcceptorResponse(t *testing.T) {
 		},
 		{
 			name: "invalid upfront shutdown",
-			response: lnrpc.ChannelAcceptResponse{
+			response: &lnrpc.ChannelAcceptResponse{
 				Accept:          true,
 				UpfrontShutdown: "invalid addr",
 			},
@@ -96,7 +96,7 @@ func TestValidateAcceptorResponse(t *testing.T) {
 		{
 			name:      "reserve too low",
 			dustLimit: 100,
-			response: lnrpc.ChannelAcceptResponse{
+			response: &lnrpc.ChannelAcceptResponse{
 				Accept:     true,
 				ReserveSat: 10,
 			},
@@ -107,7 +107,7 @@ func TestValidateAcceptorResponse(t *testing.T) {
 		{
 			name:      "max htlcs too high",
 			dustLimit: 100,
-			response: lnrpc.ChannelAcceptResponse{
+			response: &lnrpc.ChannelAcceptResponse{
 				Accept:       true,
 				MaxHtlcCount: 1 + input.MaxHTLCNumber/2,
 			},
@@ -124,7 +124,7 @@ func TestValidateAcceptorResponse(t *testing.T) {
 			// Create an acceptor, everything can be nil because
 			// we just need the params.
 			acceptor := NewRPCAcceptor(
-				nil, nil, 0, &chaincfg.TestNet3Params, nil,
+				nil, nil, 0, &chaincfg.RegressionNetParams, nil,
 			)
 
 			accept, acceptErr, shutdown, err := acceptor.validateAcceptorResponse(

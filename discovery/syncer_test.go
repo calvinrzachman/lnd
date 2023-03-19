@@ -189,6 +189,7 @@ func newTestSyncer(hID lnwire.ShortChannelID,
 		bestHeight: func() uint32 {
 			return latestKnownHeight
 		},
+		markGraphSynced:          func() {},
 		maxQueryChanRangeReplies: maxQueryChanRangeReplies,
 	}
 	syncer := newGossipSyncer(cfg)
@@ -488,9 +489,7 @@ func TestGossipSyncerApplyGossipFilter(t *testing.T) {
 
 	// We'll now attempt to apply the gossip filter for the remote peer.
 	err := syncer.ApplyGossipFilter(remoteHorizon)
-	if err != nil {
-		t.Fatalf("unable to apply filter: %v", err)
-	}
+	require.NoError(t, err, "unable to apply filter")
 
 	// There should be no messages in the message queue as we didn't send
 	// the syncer and messages within the horizon.
@@ -538,9 +537,7 @@ func TestGossipSyncerApplyGossipFilter(t *testing.T) {
 		}
 	}()
 	err = syncer.ApplyGossipFilter(remoteHorizon)
-	if err != nil {
-		t.Fatalf("unable to apply filter: %v", err)
-	}
+	require.NoError(t, err, "unable to apply filter")
 
 	// We should get back the exact same message.
 	select {
@@ -586,9 +583,7 @@ func TestGossipSyncerQueryChannelRangeWrongChainHash(t *testing.T) {
 		NumBlocks:        math.MaxUint32,
 	}
 	err := syncer.replyChanRangeQuery(query)
-	if err != nil {
-		t.Fatalf("unable to process short chan ID's: %v", err)
-	}
+	require.NoError(t, err, "unable to process short chan ID's")
 
 	select {
 	case <-time.After(time.Second * 15):
@@ -608,10 +603,9 @@ func TestGossipSyncerQueryChannelRangeWrongChainHash(t *testing.T) {
 			t.Fatalf("expected lnwire.ReplyChannelRange, got %T", msg)
 		}
 
-		if msg.QueryChannelRange != *query {
-			t.Fatalf("wrong query channel range in reply: "+
-				"expected: %v\ngot: %v", spew.Sdump(*query),
-				spew.Sdump(msg.QueryChannelRange))
+		if msg.ChainHash != query.ChainHash {
+			t.Fatalf("wrong chain hash: expected %v got %v",
+				query.ChainHash, msg.ChainHash)
 		}
 		if msg.Complete != 0 {
 			t.Fatalf("expected complete set to 0, got %v",
@@ -638,9 +632,7 @@ func TestGossipSyncerReplyShortChanIDsWrongChainHash(t *testing.T) {
 	err := syncer.replyShortChanIDs(&lnwire.QueryShortChanIDs{
 		ChainHash: *chaincfg.SimNetParams.GenesisHash,
 	})
-	if err != nil {
-		t.Fatalf("unable to process short chan ID's: %v", err)
-	}
+	require.NoError(t, err, "unable to process short chan ID's")
 
 	select {
 	case <-time.After(time.Second * 15):
@@ -729,9 +721,7 @@ func TestGossipSyncerReplyShortChanIDs(t *testing.T) {
 	err := syncer.replyShortChanIDs(&lnwire.QueryShortChanIDs{
 		ShortChanIDs: queryChanIDs,
 	})
-	if err != nil {
-		t.Fatalf("unable to query for chan IDs: %v", err)
-	}
+	require.NoError(t, err, "unable to query for chan IDs")
 
 	for i := 0; i < len(queryReply)+1; i++ {
 		select {
@@ -951,7 +941,7 @@ func TestGossipSyncerReplyChanRangeQuery(t *testing.T) {
 
 // TestGossipSyncerReplyChanRangeQuery tests a variety of
 // QueryChannelRange messages to ensure the underlying queries are
-// executed with the correct block range
+// executed with the correct block range.
 func TestGossipSyncerReplyChanRangeQueryBlockRange(t *testing.T) {
 	t.Parallel()
 
@@ -1027,7 +1017,6 @@ func TestGossipSyncerReplyChanRangeQueryBlockRange(t *testing.T) {
 				resultsCh <- capFilterReqs
 				return
 			}
-
 		}
 	}()
 
@@ -1158,9 +1147,7 @@ func TestGossipSyncerGenChanRangeQuery(t *testing.T) {
 	// should return a start height that's back chanRangeQueryBuffer
 	// blocks.
 	rangeQuery, err := syncer.genChanRangeQuery(false)
-	if err != nil {
-		t.Fatalf("unable to resp: %v", err)
-	}
+	require.NoError(t, err, "unable to resp")
 
 	firstHeight := uint32(startingHeight - chanRangeQueryBuffer)
 	if rangeQuery.FirstBlockHeight != firstHeight {
@@ -1176,9 +1163,7 @@ func TestGossipSyncerGenChanRangeQuery(t *testing.T) {
 	// Generating a historical range query should result in a start height
 	// of 0.
 	rangeQuery, err = syncer.genChanRangeQuery(true)
-	if err != nil {
-		t.Fatalf("unable to resp: %v", err)
-	}
+	require.NoError(t, err, "unable to resp")
 	if rangeQuery.FirstBlockHeight != 0 {
 		t.Fatalf("incorrect chan range query: expected %v, %v", 0,
 			rangeQuery.FirstBlockHeight)
@@ -1222,38 +1207,15 @@ func testGossipSyncerProcessChanRangeReply(t *testing.T, legacy bool) {
 	startingState := syncer.state
 
 	query, err := syncer.genChanRangeQuery(true)
-	if err != nil {
-		t.Fatalf("unable to generate channel range query: %v", err)
-	}
+	require.NoError(t, err, "unable to generate channel range query")
 
-	var replyQueries []*lnwire.QueryChannelRange
-	if legacy {
-		// Each reply query is the same as the original query in the
-		// legacy mode.
-		replyQueries = []*lnwire.QueryChannelRange{query, query, query}
-	} else {
-		// When interpreting block ranges, the first reply should start
-		// from our requested first block, and the last should end at
-		// our requested last block.
-		replyQueries = []*lnwire.QueryChannelRange{
-			{
-				FirstBlockHeight: 0,
-				NumBlocks:        11,
-			},
-			{
-				FirstBlockHeight: 11,
-				NumBlocks:        1,
-			},
-			{
-				FirstBlockHeight: 12,
-				NumBlocks:        query.NumBlocks - 12,
-			},
-		}
-	}
-
+	// When interpreting block ranges, the first reply should start from
+	// our requested first block, and the last should end at our requested
+	// last block.
 	replies := []*lnwire.ReplyChannelRange{
 		{
-			QueryChannelRange: *replyQueries[0],
+			FirstBlockHeight: 0,
+			NumBlocks:        11,
 			ShortChanIDs: []lnwire.ShortChannelID{
 				{
 					BlockHeight: 10,
@@ -1261,7 +1223,8 @@ func testGossipSyncerProcessChanRangeReply(t *testing.T, legacy bool) {
 			},
 		},
 		{
-			QueryChannelRange: *replyQueries[1],
+			FirstBlockHeight: 11,
+			NumBlocks:        1,
 			ShortChanIDs: []lnwire.ShortChannelID{
 				{
 					BlockHeight: 11,
@@ -1269,14 +1232,28 @@ func testGossipSyncerProcessChanRangeReply(t *testing.T, legacy bool) {
 			},
 		},
 		{
-			QueryChannelRange: *replyQueries[2],
-			Complete:          1,
+			FirstBlockHeight: 12,
+			NumBlocks:        query.NumBlocks - 12,
+			Complete:         1,
 			ShortChanIDs: []lnwire.ShortChannelID{
 				{
 					BlockHeight: 12,
 				},
 			},
 		},
+	}
+
+	// Each reply query is the same as the original query in the legacy
+	// mode.
+	if legacy {
+		replies[0].FirstBlockHeight = query.FirstBlockHeight
+		replies[0].NumBlocks = query.NumBlocks
+
+		replies[1].FirstBlockHeight = query.FirstBlockHeight
+		replies[1].NumBlocks = query.NumBlocks
+
+		replies[2].FirstBlockHeight = query.FirstBlockHeight
+		replies[2].NumBlocks = query.NumBlocks
 	}
 
 	// We'll begin by sending the syncer a set of non-complete channel
@@ -1438,9 +1415,7 @@ func TestGossipSyncerSynchronizeChanIDs(t *testing.T) {
 
 	// If we issue another query, the syncer should tell us that it's done.
 	done, err := syncer.synchronizeChanIDs()
-	if err != nil {
-		t.Fatalf("unable to sync chan IDs: %v", err)
-	}
+	require.NoError(t, err, "unable to sync chan IDs")
 	if done {
 		t.Fatalf("syncer should be finished!")
 	}
@@ -1633,13 +1608,15 @@ func TestGossipSyncerDelayDOS(t *testing.T) {
 // rate-limiting. The provided chanSeries should belong to syncer2.
 //
 // The state transition performed is the following:
-//   syncer1  -- QueryShortChanIDs -->   syncer2
-//                                       chanSeries.FetchChanAnns()
-//   syncer1 <-- ReplyShortChanIDsEnd -- syncer2
+//
+//	syncer1  -- QueryShortChanIDs -->   syncer2
+//	                                    chanSeries.FetchChanAnns()
+//	syncer1 <-- ReplyShortChanIDsEnd -- syncer2
 //
 // If expDelayResponse is true, this method will assert that the call the
 // FetchChanAnns happens between:
-//   [delayedQueryInterval-delayTolerance, delayedQueryInterval+delayTolerance].
+//
+//	[delayedQueryInterval-delayTolerance, delayedQueryInterval+delayTolerance].
 func queryBatch(t *testing.T,
 	msgChan1, msgChan2 chan []lnwire.Message,
 	syncer1, syncer2 *GossipSyncer,
@@ -2132,7 +2109,7 @@ func TestGossipSyncerSyncTransitions(t *testing.T) {
 		select {
 		case msgs := <-msgChan:
 			if len(msgs) != 1 {
-				t.Fatal("expected to send a single message at "+
+				t.Fatalf("expected to send a single message at "+
 					"a time, got %d", len(msgs))
 			}
 			msgSent = msgs[0]
@@ -2376,7 +2353,9 @@ func TestGossipSyncerMaxChannelRangeReplies(t *testing.T) {
 	// order to transition the syncer's state.
 	for i := uint32(0); i < syncer.cfg.maxQueryChanRangeReplies; i++ {
 		reply := &lnwire.ReplyChannelRange{
-			QueryChannelRange: *query,
+			ChainHash:        query.ChainHash,
+			FirstBlockHeight: query.FirstBlockHeight,
+			NumBlocks:        query.NumBlocks,
 			ShortChanIDs: []lnwire.ShortChannelID{
 				{
 					BlockHeight: query.FirstBlockHeight + i,
@@ -2407,7 +2386,9 @@ func TestGossipSyncerMaxChannelRangeReplies(t *testing.T) {
 	// Finally, attempting to process another reply for the same query
 	// should result in an error.
 	require.Error(t, syncer.ProcessQueryMsg(&lnwire.ReplyChannelRange{
-		QueryChannelRange: *query,
+		ChainHash:        query.ChainHash,
+		FirstBlockHeight: query.FirstBlockHeight,
+		NumBlocks:        query.NumBlocks,
 		ShortChanIDs: []lnwire.ShortChannelID{
 			{
 				BlockHeight: query.LastBlockHeight() + 1,

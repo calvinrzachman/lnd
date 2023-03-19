@@ -6,36 +6,32 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLinkNodeEncodeDecode(t *testing.T) {
 	t.Parallel()
 
-	cdb, cleanUp, err := MakeTestDB()
-	if err != nil {
-		t.Fatalf("unable to make test database: %v", err)
-	}
-	defer cleanUp()
+	fullDB, err := MakeTestDB(t)
+	require.NoError(t, err, "unable to make test database")
+
+	cdb := fullDB.ChannelStateDB()
 
 	// First we'll create some initial data to use for populating our test
 	// LinkNode instances.
-	_, pub1 := btcec.PrivKeyFromBytes(btcec.S256(), key[:])
-	_, pub2 := btcec.PrivKeyFromBytes(btcec.S256(), rev[:])
+	_, pub1 := btcec.PrivKeyFromBytes(key[:])
+	_, pub2 := btcec.PrivKeyFromBytes(rev[:])
 	addr1, err := net.ResolveTCPAddr("tcp", "10.0.0.1:9000")
-	if err != nil {
-		t.Fatalf("unable to create test addr: %v", err)
-	}
+	require.NoError(t, err, "unable to create test addr")
 	addr2, err := net.ResolveTCPAddr("tcp", "10.0.0.2:9000")
-	if err != nil {
-		t.Fatalf("unable to create test addr: %v", err)
-	}
+	require.NoError(t, err, "unable to create test addr")
 
 	// Create two fresh link node instances with the above dummy data, then
 	// fully sync both instances to disk.
-	node1 := cdb.NewLinkNode(wire.MainNet, pub1, addr1)
-	node2 := cdb.NewLinkNode(wire.TestNet3, pub2, addr2)
+	node1 := NewLinkNode(cdb.linkNodeDB, wire.MainNet, pub1, addr1)
+	node2 := NewLinkNode(cdb.linkNodeDB, wire.TestNet3, pub2, addr2)
 	if err := node1.Sync(); err != nil {
 		t.Fatalf("unable to sync node: %v", err)
 	}
@@ -46,10 +42,8 @@ func TestLinkNodeEncodeDecode(t *testing.T) {
 	// Fetch all current link nodes from the database, they should exactly
 	// match the two created above.
 	originalNodes := []*LinkNode{node2, node1}
-	linkNodes, err := cdb.FetchAllLinkNodes()
-	if err != nil {
-		t.Fatalf("unable to fetch nodes: %v", err)
-	}
+	linkNodes, err := cdb.linkNodeDB.FetchAllLinkNodes()
+	require.NoError(t, err, "unable to fetch nodes")
 	for i, node := range linkNodes {
 		if originalNodes[i].Network != node.Network {
 			t.Fatalf("node networks don't match: expected %v, got %v",
@@ -82,10 +76,8 @@ func TestLinkNodeEncodeDecode(t *testing.T) {
 	}
 
 	// Fetch the same node from the database according to its public key.
-	node1DB, err := cdb.FetchLinkNode(pub1)
-	if err != nil {
-		t.Fatalf("unable to find node: %v", err)
-	}
+	node1DB, err := cdb.linkNodeDB.FetchLinkNode(pub1)
+	require.NoError(t, err, "unable to find node")
 
 	// Both the last seen timestamp and the list of reachable addresses for
 	// the node should be updated.
@@ -110,31 +102,30 @@ func TestLinkNodeEncodeDecode(t *testing.T) {
 func TestDeleteLinkNode(t *testing.T) {
 	t.Parallel()
 
-	cdb, cleanUp, err := MakeTestDB()
-	if err != nil {
-		t.Fatalf("unable to make test database: %v", err)
-	}
-	defer cleanUp()
+	fullDB, err := MakeTestDB(t)
+	require.NoError(t, err, "unable to make test database")
 
-	_, pubKey := btcec.PrivKeyFromBytes(btcec.S256(), key[:])
+	cdb := fullDB.ChannelStateDB()
+
+	_, pubKey := btcec.PrivKeyFromBytes(key[:])
 	addr := &net.TCPAddr{
 		IP:   net.ParseIP("127.0.0.1"),
 		Port: 1337,
 	}
-	linkNode := cdb.NewLinkNode(wire.TestNet3, pubKey, addr)
+	linkNode := NewLinkNode(cdb.linkNodeDB, wire.TestNet3, pubKey, addr)
 	if err := linkNode.Sync(); err != nil {
 		t.Fatalf("unable to write link node to db: %v", err)
 	}
 
-	if _, err := cdb.FetchLinkNode(pubKey); err != nil {
+	if _, err := cdb.linkNodeDB.FetchLinkNode(pubKey); err != nil {
 		t.Fatalf("unable to find link node: %v", err)
 	}
 
-	if err := cdb.DeleteLinkNode(pubKey); err != nil {
+	if err := cdb.linkNodeDB.DeleteLinkNode(pubKey); err != nil {
 		t.Fatalf("unable to delete link node from db: %v", err)
 	}
 
-	if _, err := cdb.FetchLinkNode(pubKey); err == nil {
+	if _, err := cdb.linkNodeDB.FetchLinkNode(pubKey); err == nil {
 		t.Fatal("should not have found link node in db, but did")
 	}
 }

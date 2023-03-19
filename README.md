@@ -2,7 +2,7 @@
 
 [![Build Status](https://img.shields.io/travis/lightningnetwork/lnd.svg)](https://travis-ci.org/lightningnetwork/lnd)
 [![MIT licensed](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/lightningnetwork/lnd/blob/master/LICENSE)
-[![Irc](https://img.shields.io/badge/chat-on%20freenode-brightgreen.svg)](https://webchat.freenode.net/?channels=lnd)
+[![Irc](https://img.shields.io/badge/chat-on%20libera-brightgreen.svg)](https://web.libera.chat/#lnd)
 [![Godoc](https://godoc.org/github.com/lightningnetwork/lnd?status.svg)](https://godoc.org/github.com/lightningnetwork/lnd)
 
 <img src="logo.png">
@@ -55,8 +55,8 @@ drastically in the near future.
 
 An automatically generated set of documentation for the RPC APIs can be found
 at [api.lightning.community](https://api.lightning.community). A set of developer
-resources including talks, articles, and example applications can be found at:
-[dev.lightning.community](https://dev.lightning.community).
+resources including guides, articles, example applications and community resources can be found at:
+[docs.lightning.engineering](https://docs.lightning.engineering).
 
 Finally, we also have an active
 [Slack](https://lightning.engineering/slack.html) where protocol developers, application developers, testers and users gather to
@@ -70,14 +70,14 @@ discuss various aspects of `lnd` and also Lightning in general.
   To run lnd from Docker, please see the main [Docker instructions](docs/DOCKER.md)
 
 ## IRC
-  * irc.freenode.net
+  * irc.libera.chat
   * channel #lnd
-  * [webchat](https://webchat.freenode.net/?channels=lnd)
+  * [webchat](https://web.libera.chat/#lnd)
 
 ## Safety
 
 When operating a mainnet `lnd` node, please refer to our [operational safety
-guildelines](docs/safety.md). It is important to note that `lnd` is still
+guidelines](docs/safety.md). It is important to note that `lnd` is still
 **beta** software and that ignoring these operational guidelines can lead to
 loss of funds.
 

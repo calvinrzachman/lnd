@@ -42,6 +42,13 @@ const (
 	// They are started in a chansSynced state in order to accomplish their
 	// responsibilities above.
 	PassiveSync
+
+	// PinnedSync denotes an ActiveSync that doesn't count towards the
+	// default active syncer limits and is always active throughout the
+	// duration of the peer's connection. Each pinned syncer will begin by
+	// performing a historical sync to ensure we are well synchronized with
+	// their routing table.
+	PinnedSync
 )
 
 // String returns a human readable string describing the target SyncerType.
@@ -51,8 +58,21 @@ func (t SyncerType) String() string {
 		return "ActiveSync"
 	case PassiveSync:
 		return "PassiveSync"
+	case PinnedSync:
+		return "PinnedSync"
 	default:
 		return fmt.Sprintf("unknown sync type %d", t)
+	}
+}
+
+// IsActiveSync returns true if the SyncerType should set a GossipTimestampRange
+// allowing new gossip messages to be received from the peer.
+func (t SyncerType) IsActiveSync() bool {
+	switch t {
+	case ActiveSync, PinnedSync:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -95,6 +115,12 @@ const (
 	// AuthenticatedGossiper, and decide if we should forward them to our
 	// target peer based on its update horizon.
 	chansSynced
+
+	// syncerIdle is a state in which the gossip syncer can handle external
+	// requests to transition or perform historical syncs. It is used as the
+	// initial state for pinned syncers, as well as a fallthrough case for
+	// chansSynced allowing fully synced peers to facilitate requests.
+	syncerIdle
 )
 
 // String returns a human readable string describing the target syncerState.
@@ -114,6 +140,9 @@ func (s syncerState) String() string {
 
 	case chansSynced:
 		return "chansSynced"
+
+	case syncerIdle:
+		return "syncerIdle"
 
 	default:
 		return "UNKNOWN STATE"
@@ -250,6 +279,10 @@ type gossipSyncerCfg struct {
 
 	// bestHeight returns the latest height known of the chain.
 	bestHeight func() uint32
+
+	// markGraphSynced updates the SyncManager's perception of whether we
+	// have completed at least one historical sync.
+	markGraphSynced func()
 
 	// maxQueryChanRangeReplies is the maximum number of replies we'll allow
 	// for a single QueryChannelRange request.
@@ -417,6 +450,9 @@ func (g *GossipSyncer) Start() {
 // exited.
 func (g *GossipSyncer) Stop() {
 	g.stopped.Do(func() {
+		log.Debugf("Stopping GossipSyncer(%x)", g.cfg.peerPub[:])
+		defer log.Debugf("GossipSyncer(%x) stopped", g.cfg.peerPub[:])
+
 		close(g.quit)
 		g.wg.Wait()
 	})
@@ -521,6 +557,11 @@ func (g *GossipSyncer) channelGraphSyncer() {
 			// to our terminal state.
 			g.setSyncState(chansSynced)
 
+			// Ensure that the sync manager becomes aware that the
+			// historical sync completed so synced_to_graph is
+			// updated over rpc.
+			g.cfg.markGraphSynced()
+
 		// In this state, we've just sent off a new query for channels
 		// that we don't yet know of. We'll remain in this state until
 		// the remote party signals they've responded to our query in
@@ -560,7 +601,9 @@ func (g *GossipSyncer) channelGraphSyncer() {
 			// If we haven't yet sent out our update horizon, and
 			// we want to receive real-time channel updates, we'll
 			// do so now.
-			if g.localUpdateHorizon == nil && syncType == ActiveSync {
+			if g.localUpdateHorizon == nil &&
+				syncType.IsActiveSync() {
+
 				err := g.sendGossipTimestampRange(
 					time.Now(), math.MaxUint32,
 				)
@@ -570,10 +613,16 @@ func (g *GossipSyncer) channelGraphSyncer() {
 						g.cfg.peerPub, err)
 				}
 			}
-
 			// With our horizon set, we'll simply reply to any new
 			// messages or process any state transitions and exit if
 			// needed.
+			fallthrough
+
+		// Pinned peers will begin in this state, since they will
+		// immediately receive a request to perform a historical sync.
+		// Otherwise, we fall through after ending in chansSynced to
+		// facilitate new requests.
+		case syncerIdle:
 			select {
 			case req := <-g.syncTransitionReqs:
 				req.errChan <- g.handleSyncTransition(req)
@@ -707,7 +756,9 @@ func (g *GossipSyncer) synchronizeChanIDs() (bool, error) {
 func isLegacyReplyChannelRange(query *lnwire.QueryChannelRange,
 	reply *lnwire.ReplyChannelRange) bool {
 
-	return reply.QueryChannelRange == *query
+	return (reply.ChainHash == query.ChainHash &&
+		reply.FirstBlockHeight == query.FirstBlockHeight &&
+		reply.NumBlocks == query.NumBlocks)
 }
 
 // processChanRangeReply is called each time the GossipSyncer receives a new
@@ -727,7 +778,7 @@ func (g *GossipSyncer) processChanRangeReply(msg *lnwire.ReplyChannelRange) erro
 		// The last block should also be. We don't need to check the
 		// intermediate ones because they should already be in sorted
 		// order.
-		replyLastHeight := msg.QueryChannelRange.LastBlockHeight()
+		replyLastHeight := msg.LastBlockHeight()
 		queryLastHeight := g.curQueryRangeMsg.LastBlockHeight()
 		if replyLastHeight > queryLastHeight {
 			return fmt.Errorf("reply includes channels for height "+
@@ -786,7 +837,7 @@ func (g *GossipSyncer) processChanRangeReply(msg *lnwire.ReplyChannelRange) erro
 
 	// Otherwise, we'll look at the reply's height range.
 	default:
-		replyLastHeight := msg.QueryChannelRange.LastBlockHeight()
+		replyLastHeight := msg.LastBlockHeight()
 		queryLastHeight := g.curQueryRangeMsg.LastBlockHeight()
 
 		// TODO(wilmer): This might require some padding if the remote
@@ -794,6 +845,7 @@ func (g *GossipSyncer) processChanRangeReply(msg *lnwire.ReplyChannelRange) erro
 		// behind a few blocks from us.
 		if replyLastHeight < queryLastHeight &&
 			g.numChanRangeRepliesRcvd < maxReplies {
+
 			return nil
 		}
 	}
@@ -825,6 +877,11 @@ func (g *GossipSyncer) processChanRangeReply(msg *lnwire.ReplyChannelRange) erro
 			g.cfg.peerPub[:])
 
 		g.setSyncState(chansSynced)
+
+		// Ensure that the sync manager becomes aware that the
+		// historical sync completed so synced_to_graph is updated over
+		// rpc.
+		g.cfg.markGraphSynced()
 		return nil
 	}
 
@@ -946,10 +1003,12 @@ func (g *GossipSyncer) replyChanRangeQuery(query *lnwire.QueryChannelRange) erro
 			g.cfg.chainHash)
 
 		return g.cfg.sendToPeerSync(&lnwire.ReplyChannelRange{
-			QueryChannelRange: *query,
-			Complete:          0,
-			EncodingType:      g.cfg.encodingType,
-			ShortChanIDs:      nil,
+			ChainHash:        query.ChainHash,
+			FirstBlockHeight: query.FirstBlockHeight,
+			NumBlocks:        query.NumBlocks,
+			Complete:         0,
+			EncodingType:     g.cfg.encodingType,
+			ShortChanIDs:     nil,
 		})
 	}
 
@@ -989,14 +1048,12 @@ func (g *GossipSyncer) replyChanRangeQuery(query *lnwire.QueryChannelRange) erro
 		}
 
 		return g.cfg.sendToPeerSync(&lnwire.ReplyChannelRange{
-			QueryChannelRange: lnwire.QueryChannelRange{
-				ChainHash:        query.ChainHash,
-				NumBlocks:        numBlocks,
-				FirstBlockHeight: firstHeight,
-			},
-			Complete:     complete,
-			EncodingType: g.cfg.encodingType,
-			ShortChanIDs: channelChunk,
+			ChainHash:        query.ChainHash,
+			NumBlocks:        numBlocks,
+			FirstBlockHeight: firstHeight,
+			Complete:         complete,
+			EncodingType:     g.cfg.encodingType,
+			ShortChanIDs:     channelChunk,
 		})
 	}
 
@@ -1324,6 +1381,7 @@ func (g *GossipSyncer) ProcessQueryMsg(msg lnwire.Message, peerQuit <-chan struc
 		syncState := g.syncState()
 		if syncState != waitingQueryRangeReply &&
 			syncState != waitingQueryChanReply {
+
 			return fmt.Errorf("received unexpected query reply "+
 				"message %T", msg)
 		}
@@ -1418,7 +1476,7 @@ func (g *GossipSyncer) handleSyncTransition(req *syncTransitionReq) error {
 	switch req.newSyncType {
 	// If an active sync has been requested, then we should resume receiving
 	// new graph updates from the remote peer.
-	case ActiveSync:
+	case ActiveSync, PinnedSync:
 		firstTimestamp = time.Now()
 		timestampRange = math.MaxUint32
 

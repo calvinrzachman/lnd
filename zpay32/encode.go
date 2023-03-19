@@ -5,9 +5,10 @@ import (
 	"encoding/binary"
 	"fmt"
 
+	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/bech32"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/bech32"
 	"github.com/lightningnetwork/lnd/lnwire"
 )
 
@@ -51,8 +52,16 @@ func (invoice *Invoice) Encode(signer MessageSigner) (string, error) {
 		return "", err
 	}
 
-	// The human-readable part (hrp) is "ln" + net hrp + optional amount.
+	// The human-readable part (hrp) is "ln" + net hrp + optional amount,
+	// except for signet where we add an additional "s" to differentiate it
+	// from the older testnet3 (Core devs decided to use the same hrp for
+	// signet as for testnet3 which is not optimal for LN). See
+	// https://github.com/lightningnetwork/lightning-rfc/pull/844 for more
+	// information.
 	hrp := "ln" + invoice.Net.Bech32HRPSegwit
+	if invoice.Net.Name == chaincfg.SigNetParams.Name {
+		hrp = "lntbs"
+	}
 	if invoice.MilliSat != nil {
 		// Encode the amount using the fewest possible characters.
 		am, err := encodeAmount(*invoice.MilliSat)
@@ -150,6 +159,17 @@ func writeTaggedFields(bufferBase32 *bytes.Buffer, invoice *Invoice) error {
 		err := writeBytes32(
 			bufferBase32, fieldTypeH, *invoice.DescriptionHash,
 		)
+		if err != nil {
+			return err
+		}
+	}
+
+	if invoice.Metadata != nil {
+		base32, err := bech32.ConvertBits(invoice.Metadata, 8, 5, true)
+		if err != nil {
+			return err
+		}
+		err = writeTaggedField(bufferBase32, fieldTypeM, base32)
 		if err != nil {
 			return err
 		}

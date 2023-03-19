@@ -6,14 +6,12 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"github.com/btcsuite/btcutil"
-	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/btcsuite/btcd/btcutil"
+	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnwire"
-	"github.com/lightningnetwork/lnd/record"
 	"github.com/lightningnetwork/lnd/routing"
 	"github.com/lightningnetwork/lnd/routing/route"
-
-	"github.com/lightningnetwork/lnd/lnrpc"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -36,17 +34,22 @@ var (
 // and passed onto path finding.
 func TestQueryRoutes(t *testing.T) {
 	t.Run("no mission control", func(t *testing.T) {
-		testQueryRoutes(t, false, false)
+		testQueryRoutes(t, false, false, true)
 	})
 	t.Run("no mission control and msat", func(t *testing.T) {
-		testQueryRoutes(t, false, true)
+		testQueryRoutes(t, false, true, true)
 	})
 	t.Run("with mission control", func(t *testing.T) {
-		testQueryRoutes(t, true, false)
+		testQueryRoutes(t, true, false, true)
+	})
+	t.Run("no mission control bad cltv limit", func(t *testing.T) {
+		testQueryRoutes(t, false, false, false)
 	})
 }
 
-func testQueryRoutes(t *testing.T, useMissionControl bool, useMsat bool) {
+func testQueryRoutes(t *testing.T, useMissionControl bool, useMsat bool,
+	setTimelock bool) {
+
 	ignoreNodeBytes, err := hex.DecodeString(ignoreNodeKey)
 	if err != nil {
 		t.Fatal(err)
@@ -117,41 +120,39 @@ func testQueryRoutes(t *testing.T, useMissionControl bool, useMsat bool) {
 		}
 	}
 
-	findRoute := func(source, target route.Vertex,
-		amt lnwire.MilliSatoshi, restrictions *routing.RestrictParams,
-		_ record.CustomSet,
-		routeHints map[route.Vertex][]*channeldb.ChannelEdgePolicy,
-		finalExpiry uint16) (*route.Route, error) {
+	findRoute := func(req *routing.RouteRequest) (*route.Route, float64,
+		error) {
 
-		if int64(amt) != amtSat*1000 {
+		if int64(req.Amount) != amtSat*1000 {
 			t.Fatal("unexpected amount")
 		}
 
-		if source != sourceKey {
+		if req.Source != sourceKey {
 			t.Fatal("unexpected source key")
 		}
 
-		if !bytes.Equal(target[:], destNodeBytes) {
+		if !bytes.Equal(req.Target[:], destNodeBytes) {
 			t.Fatal("unexpected target key")
 		}
 
+		restrictions := req.Restrictions
 		if restrictions.FeeLimit != 250*1000 {
 			t.Fatal("unexpected fee limit")
 		}
 
 		if restrictions.ProbabilitySource(route.Vertex{2},
-			route.Vertex{1}, 0,
+			route.Vertex{1}, 0, 0,
 		) != 0 {
 			t.Fatal("expecting 0% probability for ignored edge")
 		}
 
 		if restrictions.ProbabilitySource(ignoreNodeVertex,
-			route.Vertex{6}, 0,
+			route.Vertex{6}, 0, 0,
 		) != 0 {
 			t.Fatal("expecting 0% probability for ignored node")
 		}
 
-		if restrictions.ProbabilitySource(node1, node2, 0) != 0 {
+		if restrictions.ProbabilitySource(node1, node2, 0, 0) != 0 {
 			t.Fatal("expecting 0% probability for ignored pair")
 		}
 
@@ -167,7 +168,7 @@ func testQueryRoutes(t *testing.T, useMissionControl bool, useMsat bool) {
 			t.Fatal("unexpected dest features")
 		}
 
-		if _, ok := routeHints[hintNode]; !ok {
+		if _, ok := req.RouteHints[hintNode]; !ok {
 			t.Fatal("expected route hint")
 		}
 
@@ -176,13 +177,17 @@ func testQueryRoutes(t *testing.T, useMissionControl bool, useMsat bool) {
 			expectedProb = testMissionControlProb
 		}
 		if restrictions.ProbabilitySource(route.Vertex{4},
-			route.Vertex{5}, 0,
+			route.Vertex{5}, 0, 0,
 		) != expectedProb {
 			t.Fatal("expecting 100% probability")
 		}
 
 		hops := []*route.Hop{{}}
-		return route.NewRouteFromHops(amt, 144, source, hops)
+		route, err := route.NewRouteFromHops(
+			req.Amount, 144, req.Source, hops,
+		)
+
+		return route, expectedProb, err
 	}
 
 	backend := &RouterBackend{
@@ -193,12 +198,17 @@ func testQueryRoutes(t *testing.T, useMissionControl bool, useMsat bool) {
 
 			return 1, nil
 		},
+		FetchAmountPairCapacity: func(nodeFrom, nodeTo route.Vertex,
+			amount lnwire.MilliSatoshi) (btcutil.Amount, error) {
+
+			return 1, nil
+		},
 		MissionControl: &mockMissionControl{},
 		FetchChannelEndpoints: func(chanID uint64) (route.Vertex,
 			route.Vertex, error) {
 
 			if chanID != 555 {
-				t.Fatal("expected endpoints to be fetched for "+
+				t.Fatalf("expected endpoints to be fetched for "+
 					"channel 555, but got %v instead",
 					chanID)
 			}
@@ -206,7 +216,21 @@ func testQueryRoutes(t *testing.T, useMissionControl bool, useMsat bool) {
 		},
 	}
 
+	// If this is set, we'll populate MaxTotalTimelock. If this is not set,
+	// the test will fail as CltvLimit will be 0.
+	if setTimelock {
+		backend.MaxTotalTimelock = 1000
+	}
+
 	resp, err := backend.QueryRoutes(context.Background(), request)
+
+	// If no MaxTotalTimelock was set for the QueryRoutes request, make
+	// sure an error was returned.
+	if !setTimelock {
+		require.NotEmpty(t, err)
+		return
+	}
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,10 +240,11 @@ func testQueryRoutes(t *testing.T, useMissionControl bool, useMsat bool) {
 }
 
 type mockMissionControl struct {
+	MissionControl
 }
 
 func (m *mockMissionControl) GetProbability(fromNode, toNode route.Vertex,
-	amt lnwire.MilliSatoshi) float64 {
+	amt lnwire.MilliSatoshi, capacity btcutil.Amount) float64 {
 
 	return testMissionControlProb
 }
@@ -238,18 +263,18 @@ func (m *mockMissionControl) GetPairHistorySnapshot(fromNode,
 	return routing.TimedPairResult{}
 }
 
-type mppOutcome byte
+type recordParseOutcome byte
 
 const (
-	valid mppOutcome = iota
+	valid recordParseOutcome = iota
 	invalid
-	nompp
+	norecord
 )
 
 type unmarshalMPPTest struct {
 	name    string
 	mpp     *lnrpc.MPPRecord
-	outcome mppOutcome
+	outcome recordParseOutcome
 }
 
 // TestUnmarshalMPP checks both positive and negative cases of UnmarshalMPP to
@@ -261,7 +286,7 @@ func TestUnmarshalMPP(t *testing.T) {
 		{
 			name:    "nil record",
 			mpp:     nil,
-			outcome: nompp,
+			outcome: norecord,
 		},
 		{
 			name: "invalid total or addr",
@@ -316,7 +341,6 @@ func TestUnmarshalMPP(t *testing.T) {
 func testUnmarshalMPP(t *testing.T, test unmarshalMPPTest) {
 	mpp, err := UnmarshalMPP(test.mpp)
 	switch test.outcome {
-
 	// Valid arguments should result in no error, a non-nil MPP record, and
 	// the fields should be set correctly.
 	case valid:
@@ -345,13 +369,105 @@ func testUnmarshalMPP(t *testing.T, test unmarshalMPPTest) {
 
 	// Arguments that produce no MPP field should return no error and no MPP
 	// record.
-	case nompp:
+	case norecord:
 		if err != nil {
 			t.Fatalf("failure for args resulting for no-mpp")
 		}
 		if mpp != nil {
 			t.Fatalf("mpp payload should be nil for no-mpp")
 		}
+
+	default:
+		t.Fatalf("test case has non-standard outcome")
+	}
+}
+
+type unmarshalAMPTest struct {
+	name    string
+	amp     *lnrpc.AMPRecord
+	outcome recordParseOutcome
+}
+
+// TestUnmarshalAMP asserts the behavior of decoding an RPC AMPRecord.
+func TestUnmarshalAMP(t *testing.T) {
+	rootShare := bytes.Repeat([]byte{0x01}, 32)
+	setID := bytes.Repeat([]byte{0x02}, 32)
+
+	// All child indexes are valid.
+	childIndex := uint32(3)
+
+	tests := []unmarshalAMPTest{
+		{
+			name:    "nil record",
+			amp:     nil,
+			outcome: norecord,
+		},
+		{
+			name: "invalid root share invalid set id",
+			amp: &lnrpc.AMPRecord{
+				RootShare:  []byte{0x01},
+				SetId:      []byte{0x02},
+				ChildIndex: childIndex,
+			},
+			outcome: invalid,
+		},
+		{
+			name: "valid root share invalid set id",
+			amp: &lnrpc.AMPRecord{
+				RootShare:  rootShare,
+				SetId:      []byte{0x02},
+				ChildIndex: childIndex,
+			},
+			outcome: invalid,
+		},
+		{
+			name: "invalid root share valid set id",
+			amp: &lnrpc.AMPRecord{
+				RootShare:  []byte{0x01},
+				SetId:      setID,
+				ChildIndex: childIndex,
+			},
+			outcome: invalid,
+		},
+		{
+			name: "valid root share valid set id",
+			amp: &lnrpc.AMPRecord{
+				RootShare:  rootShare,
+				SetId:      setID,
+				ChildIndex: childIndex,
+			},
+			outcome: valid,
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			testUnmarshalAMP(t, test)
+		})
+	}
+}
+
+func testUnmarshalAMP(t *testing.T, test unmarshalAMPTest) {
+	amp, err := UnmarshalAMP(test.amp)
+	switch test.outcome {
+	case valid:
+		require.NoError(t, err)
+		require.NotNil(t, amp)
+
+		rootShare := amp.RootShare()
+		setID := amp.SetID()
+		require.Equal(t, test.amp.RootShare, rootShare[:])
+		require.Equal(t, test.amp.SetId, setID[:])
+		require.Equal(t, test.amp.ChildIndex, amp.ChildIndex())
+
+	case invalid:
+		require.Error(t, err)
+		require.Nil(t, amp)
+
+	case norecord:
+		require.NoError(t, err)
+		require.Nil(t, amp)
 
 	default:
 		t.Fatalf("test case has non-standard outcome")

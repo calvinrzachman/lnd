@@ -5,8 +5,75 @@ import (
 	"errors"
 	"sort"
 
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/lightningnetwork/lnd/lnwallet"
 )
+
+const (
+	// RegisterRPCMiddlewareURI is the full RPC method URI for the
+	// middleware registration call. This is declared here rather than where
+	// it's mainly used to avoid circular package dependencies.
+	RegisterRPCMiddlewareURI = "/lnrpc.Lightning/RegisterRPCMiddleware"
+)
+
+// RPCTransaction returns a rpc transaction.
+func RPCTransaction(tx *lnwallet.TransactionDetail) *Transaction {
+	var destAddresses []string
+	// Re-package destination output information.
+	var outputDetails []*OutputDetail
+	for _, o := range tx.OutputDetails {
+		// Note: DestAddresses is deprecated but we keep
+		// populating it with addresses for backwards
+		// compatibility.
+		for _, a := range o.Addresses {
+			destAddresses = append(destAddresses,
+				a.EncodeAddress())
+		}
+
+		var address string
+		if len(o.Addresses) == 1 {
+			address = o.Addresses[0].EncodeAddress()
+		}
+
+		outputDetails = append(outputDetails, &OutputDetail{
+			OutputType:   MarshallOutputType(o.OutputType),
+			Address:      address,
+			PkScript:     hex.EncodeToString(o.PkScript),
+			OutputIndex:  int64(o.OutputIndex),
+			Amount:       int64(o.Value),
+			IsOurAddress: o.IsOurAddress,
+		})
+	}
+
+	previousOutpoints := make([]*PreviousOutPoint, len(tx.PreviousOutpoints))
+	for idx, previousOutPoint := range tx.PreviousOutpoints {
+		previousOutpoints[idx] = &PreviousOutPoint{
+			Outpoint:    previousOutPoint.OutPoint,
+			IsOurOutput: previousOutPoint.IsOurOutput,
+		}
+	}
+
+	// We also get unconfirmed transactions, so BlockHash can be nil.
+	blockHash := ""
+	if tx.BlockHash != nil {
+		blockHash = tx.BlockHash.String()
+	}
+
+	return &Transaction{
+		TxHash:            tx.Hash.String(),
+		Amount:            int64(tx.Value),
+		NumConfirmations:  tx.NumConfirmations,
+		BlockHash:         blockHash,
+		BlockHeight:       tx.BlockHeight,
+		TimeStamp:         tx.Timestamp,
+		TotalFees:         tx.TotalFees,
+		DestAddresses:     destAddresses,
+		OutputDetails:     outputDetails,
+		RawTxHex:          hex.EncodeToString(tx.RawTx),
+		Label:             tx.Label,
+		PreviousOutpoints: previousOutpoints,
+	}
+}
 
 // RPCTransactionDetails returns a set of rpc transaction details.
 func RPCTransactionDetails(txns []*lnwallet.TransactionDetail) *TransactionDetails {
@@ -15,30 +82,7 @@ func RPCTransactionDetails(txns []*lnwallet.TransactionDetail) *TransactionDetai
 	}
 
 	for i, tx := range txns {
-		var destAddresses []string
-		for _, destAddress := range tx.DestAddresses {
-			destAddresses = append(destAddresses, destAddress.EncodeAddress())
-		}
-
-		// We also get unconfirmed transactions, so BlockHash can be
-		// nil.
-		blockHash := ""
-		if tx.BlockHash != nil {
-			blockHash = tx.BlockHash.String()
-		}
-
-		txDetails.Transactions[i] = &Transaction{
-			TxHash:           tx.Hash.String(),
-			Amount:           int64(tx.Value),
-			NumConfirmations: tx.NumConfirmations,
-			BlockHash:        blockHash,
-			BlockHeight:      tx.BlockHeight,
-			TimeStamp:        tx.Timestamp,
-			TotalFees:        tx.TotalFees,
-			DestAddresses:    destAddresses,
-			RawTxHex:         hex.EncodeToString(tx.RawTx),
-			Label:            tx.Label,
-		}
+		txDetails.Transactions[i] = RPCTransaction(tx)
 	}
 
 	// Sort transactions by number of confirmations rather than height so
@@ -87,4 +131,27 @@ func ExtractMinConfs(minConfs int32, spendUnconfirmed bool) (int32, error) {
 	default:
 		return minConfs, nil
 	}
+}
+
+// GetChanPointFundingTxid returns the given channel point's funding txid in
+// raw bytes.
+func GetChanPointFundingTxid(chanPoint *ChannelPoint) (*chainhash.Hash, error) {
+	var txid []byte
+
+	// A channel point's funding txid can be get/set as a byte slice or a
+	// string. In the case it is a string, decode it.
+	switch chanPoint.GetFundingTxid().(type) {
+	case *ChannelPoint_FundingTxidBytes:
+		txid = chanPoint.GetFundingTxidBytes()
+	case *ChannelPoint_FundingTxidStr:
+		s := chanPoint.GetFundingTxidStr()
+		h, err := chainhash.NewHashFromStr(s)
+		if err != nil {
+			return nil, err
+		}
+
+		txid = h[:]
+	}
+
+	return chainhash.NewHash(txid)
 }

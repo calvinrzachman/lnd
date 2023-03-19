@@ -1,3 +1,4 @@
+//go:build signrpc
 // +build signrpc
 
 package signrpc
@@ -13,7 +14,7 @@ import (
 // config that is meant for us in the config dispatcher, then we'll exit with
 // an error.
 func createNewSubServer(configRegistry lnrpc.SubServerConfigDispatcher) (
-	lnrpc.SubServer, lnrpc.MacaroonPerms, error) {
+	*Server, lnrpc.MacaroonPerms, error) {
 
 	// We'll attempt to look up the config that we expect, according to our
 	// subServerName name. If we can't find this, then we'll exit with an
@@ -35,7 +36,7 @@ func createNewSubServer(configRegistry lnrpc.SubServerConfigDispatcher) (
 	}
 
 	// Before we try to make the new signer service instance, we'll perform
-	// some sanity checks on the arguments to ensure that they're useable.
+	// some sanity checks on the arguments to ensure that they're usable.
 
 	switch {
 	// If the macaroon service is set (we should use macaroons), then
@@ -55,10 +56,8 @@ func createNewSubServer(configRegistry lnrpc.SubServerConfigDispatcher) (
 func init() {
 	subServer := &lnrpc.SubServerDriver{
 		SubServerName: subServerName,
-		New: func(c lnrpc.SubServerConfigDispatcher) (
-			lnrpc.SubServer, lnrpc.MacaroonPerms, error) {
-
-			return createNewSubServer(c)
+		NewGrpcHandler: func() lnrpc.GrpcHandler {
+			return &ServerShell{}
 		},
 	}
 

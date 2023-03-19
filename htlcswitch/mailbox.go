@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/lightningnetwork/lnd/clock"
+	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 	"github.com/lightningnetwork/lnd/lnwire"
 )
 
@@ -24,7 +25,7 @@ var (
 
 // MailBox is an interface which represents a concurrent-safe, in-order
 // delivery queue for messages from the network and also from the main switch.
-// This struct servers as a buffer between incoming messages, and messages to
+// This struct serves as a buffer between incoming messages, and messages to
 // the handled by the link. Each of the mutating methods within this interface
 // should be implemented in a non-blocking manner.
 type MailBox interface {
@@ -66,6 +67,17 @@ type MailBox interface {
 	// Reset the packet head to point at the first element in the list.
 	ResetPackets() error
 
+	// SetDustClosure takes in a closure that is used to evaluate whether
+	// mailbox HTLC's are dust.
+	SetDustClosure(isDust dustClosure)
+
+	// SetFeeRate sets the feerate to be used when evaluating dust.
+	SetFeeRate(feerate chainfee.SatPerKWeight)
+
+	// DustPackets returns the dust sum for Adds in the mailbox for the
+	// local and remote commitments.
+	DustPackets() (lnwire.MilliSatoshi, lnwire.MilliSatoshi)
+
 	// Start starts the mailbox and any goroutines it needs to operate
 	// properly.
 	Start()
@@ -79,10 +91,6 @@ type mailBoxConfig struct {
 	// belongs to.
 	shortChanID lnwire.ShortChannelID
 
-	// fetchUpdate retreives the most recent channel update for the channel
-	// this mailbox belongs to.
-	fetchUpdate func(lnwire.ShortChannelID) (*lnwire.ChannelUpdate, error)
-
 	// forwardPackets send a varidic number of htlcPackets to the switch to
 	// be routed. A quit channel should be provided so that the call can
 	// properly exit during shutdown.
@@ -95,6 +103,11 @@ type mailBoxConfig struct {
 	// have not been yet been delivered. The computed deadline will expiry
 	// this long after the Adds are added via AddPacket.
 	expiry time.Duration
+
+	// failMailboxUpdate is used to fail an expired HTLC and use the
+	// correct SCID if the underlying channel uses aliases.
+	failMailboxUpdate func(outScid,
+		mailboxScid lnwire.ShortChannelID) lnwire.FailureMessage
 }
 
 // memoryMailBox is an implementation of the MailBox struct backed by purely
@@ -131,6 +144,17 @@ type memoryMailBox struct {
 	wireShutdown chan struct{}
 	pktShutdown  chan struct{}
 	quit         chan struct{}
+
+	// feeRate is set when the link receives or sends out fee updates. It
+	// is refreshed when AttachMailBox is called in case a fee update did
+	// not get committed. In some cases it may be out of sync with the
+	// channel's feerate, but it should eventually get back in sync.
+	feeRate chainfee.SatPerKWeight
+
+	// isDust is set when AttachMailBox is called and serves to evaluate
+	// the outstanding dust in the memoryMailBox given the current set
+	// feeRate.
+	isDust dustClosure
 }
 
 // newMemoryMailBox creates a new instance of the memoryMailBox.
@@ -524,6 +548,8 @@ func (m *memoryMailBox) mailCourier(cType courierType) {
 				m.pktCond.L.Unlock()
 
 			case <-deadline:
+				log.Debugf("Expiring add htlc with "+
+					"keystone=%v", add.keystone())
 				m.FailAdd(add)
 
 			case pktDone := <-m.pktReset:
@@ -567,7 +593,6 @@ func (m *memoryMailBox) AddMessage(msg lnwire.Message) error {
 func (m *memoryMailBox) AddPacket(pkt *htlcPacket) error {
 	m.pktCond.L.Lock()
 	switch htlc := pkt.htlc.(type) {
-
 	// Split off Settle/Fail packets into the repPkts queue.
 	case *lnwire.UpdateFulfillHTLC, *lnwire.UpdateFailHTLC:
 		if _, ok := m.repIndex[pkt.inKey()]; ok {
@@ -610,6 +635,63 @@ func (m *memoryMailBox) AddPacket(pkt *htlcPacket) error {
 	return nil
 }
 
+// SetFeeRate sets the memoryMailBox's feerate for use in DustPackets.
+func (m *memoryMailBox) SetFeeRate(feeRate chainfee.SatPerKWeight) {
+	m.pktCond.L.Lock()
+	defer m.pktCond.L.Unlock()
+
+	m.feeRate = feeRate
+}
+
+// SetDustClosure sets the memoryMailBox's dustClosure for use in DustPackets.
+func (m *memoryMailBox) SetDustClosure(isDust dustClosure) {
+	m.pktCond.L.Lock()
+	defer m.pktCond.L.Unlock()
+
+	m.isDust = isDust
+}
+
+// DustPackets returns the dust sum for add packets in the mailbox. The first
+// return value is the local dust sum and the second is the remote dust sum.
+// This will keep track of a given dust HTLC from the time it is added via
+// AddPacket until it is removed via AckPacket.
+func (m *memoryMailBox) DustPackets() (lnwire.MilliSatoshi,
+	lnwire.MilliSatoshi) {
+
+	m.pktCond.L.Lock()
+	defer m.pktCond.L.Unlock()
+
+	var (
+		localDustSum  lnwire.MilliSatoshi
+		remoteDustSum lnwire.MilliSatoshi
+	)
+
+	// Run through the map of HTLC's and determine the dust sum with calls
+	// to the memoryMailBox's isDust closure. Note that all mailbox packets
+	// are outgoing so the second argument to isDust will be false.
+	for _, e := range m.addIndex {
+		addPkt := e.Value.(*pktWithExpiry).pkt
+
+		// Evaluate whether this HTLC is dust on the local commitment.
+		if m.isDust(
+			m.feeRate, false, true, addPkt.amount.ToSatoshis(),
+		) {
+
+			localDustSum += addPkt.amount
+		}
+
+		// Evaluate whether this HTLC is dust on the remote commitment.
+		if m.isDust(
+			m.feeRate, false, false, addPkt.amount.ToSatoshis(),
+		) {
+
+			remoteDustSum += addPkt.amount
+		}
+	}
+
+	return localDustSum, remoteDustSum
+}
+
 // FailAdd fails an UpdateAddHTLC that exists within the mailbox, removing it
 // from the in-memory replay buffer. This will prevent the packet from being
 // delivered after the link restarts if the switch has remained online. The
@@ -631,13 +713,9 @@ func (m *memoryMailBox) FailAdd(pkt *htlcPacket) {
 	// Create a temporary channel failure which we will send back to our
 	// peer if this is a forward, or report to the user if the failed
 	// payment was locally initiated.
-	var failure lnwire.FailureMessage
-	update, err := m.cfg.fetchUpdate(m.cfg.shortChanID)
-	if err != nil {
-		failure = &lnwire.FailTemporaryNodeFailure{}
-	} else {
-		failure = lnwire.NewTemporaryChannelFailure(update)
-	}
+	failure := m.cfg.failMailboxUpdate(
+		pkt.originalOutgoingChanID, m.cfg.shortChanID,
+	)
 
 	// If the payment was locally initiated (which is indicated by a nil
 	// obfuscator), we do not need to encrypt it back to the sender.
@@ -725,7 +803,7 @@ type mailOrchestrator struct {
 	//   chan_id -> short_chan_id
 	//   short_chan_id -> mailbox
 	// so that Deliver can lookup mailbox directly once live,
-	// but still queriable by channel_id.
+	// but still queryable by channel_id.
 
 	// unclaimedPackets maps a live short chan id to queue of packets if no
 	// mailbox has been created.
@@ -738,10 +816,6 @@ type mailOrchConfig struct {
 	// properly exit during shutdown.
 	forwardPackets func(chan struct{}, ...*htlcPacket) error
 
-	// fetchUpdate retreives the most recent channel update for the channel
-	// this mailbox belongs to.
-	fetchUpdate func(lnwire.ShortChannelID) (*lnwire.ChannelUpdate, error)
-
 	// clock is a time source for the generated mailboxes.
 	clock clock.Clock
 
@@ -749,6 +823,11 @@ type mailOrchConfig struct {
 	// have not been yet been delivered. The computed deadline will expiry
 	// this long after the Adds are added to a mailbox via AddPacket.
 	expiry time.Duration
+
+	// failMailboxUpdate is used to fail an expired HTLC and use the
+	// correct SCID if the underlying channel uses aliases.
+	failMailboxUpdate func(outScid,
+		mailboxScid lnwire.ShortChannelID) lnwire.FailureMessage
 }
 
 // newMailOrchestrator initializes a fresh mailOrchestrator.
@@ -802,11 +881,11 @@ func (mo *mailOrchestrator) exclusiveGetOrCreateMailBox(
 	mailbox, ok := mo.mailboxes[chanID]
 	if !ok {
 		mailbox = newMemoryMailBox(&mailBoxConfig{
-			shortChanID:    shortChanID,
-			fetchUpdate:    mo.cfg.fetchUpdate,
-			forwardPackets: mo.cfg.forwardPackets,
-			clock:          mo.cfg.clock,
-			expiry:         mo.cfg.expiry,
+			shortChanID:       shortChanID,
+			forwardPackets:    mo.cfg.forwardPackets,
+			clock:             mo.cfg.clock,
+			expiry:            mo.cfg.expiry,
+			failMailboxUpdate: mo.cfg.failMailboxUpdate,
 		})
 		mailbox.Start()
 		mo.mailboxes[chanID] = mailbox

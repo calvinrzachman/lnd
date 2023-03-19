@@ -8,11 +8,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
+	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/bech32"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/bech32"
 	"github.com/lightningnetwork/lnd/lnwire"
 )
 
@@ -45,8 +46,17 @@ func Decode(invoice string, net *chaincfg.Params) (*Invoice, error) {
 	}
 
 	// The next characters should be a valid prefix for a segwit BIP173
-	// address that match the active network.
-	if !strings.HasPrefix(hrp[2:], net.Bech32HRPSegwit) {
+	// address that match the active network except for signet where we add
+	// an additional "s" to differentiate it from the older testnet3 (Core
+	// devs decided to use the same hrp for signet as for testnet3 which is
+	// not optimal for LN). See
+	// https://github.com/lightningnetwork/lightning-rfc/pull/844 for more
+	// information.
+	expectedPrefix := net.Bech32HRPSegwit
+	if net.Name == chaincfg.SigNetParams.Name {
+		expectedPrefix = "tbs"
+	}
+	if !strings.HasPrefix(hrp[2:], expectedPrefix) {
 		return nil, fmt.Errorf(
 			"invoice not for current active network '%s'", net.Name)
 	}
@@ -54,7 +64,7 @@ func Decode(invoice string, net *chaincfg.Params) (*Invoice, error) {
 
 	// Optionally, if there's anything left of the HRP after ln + the segwit
 	// prefix, we try to decode this as the payment amount.
-	var netPrefixLength = len(net.Bech32HRPSegwit) + 2
+	var netPrefixLength = len(expectedPrefix) + 2
 	if len(hrp) > netPrefixLength {
 		amount, err := decodeAmount(hrp[netPrefixLength:])
 		if err != nil {
@@ -112,8 +122,7 @@ func Decode(invoice string, net *chaincfg.Params) (*Invoice, error) {
 	} else {
 		headerByte := recoveryID + 27 + 4
 		compactSign := append([]byte{headerByte}, sig[:]...)
-		pubkey, _, err := btcec.RecoverCompact(btcec.S256(),
-			compactSign, hash)
+		pubkey, _, err := ecdsa.RecoverCompact(compactSign, hash)
 		if err != nil {
 			return nil, err
 		}
@@ -220,6 +229,15 @@ func parseTaggedFields(invoice *Invoice, fields []byte, net *chaincfg.Params) er
 			}
 
 			invoice.Description, err = parseDescription(base32Data)
+		case fieldTypeM:
+			if invoice.Metadata != nil {
+				// We skip the field if we have already seen a
+				// supported one.
+				continue
+			}
+
+			invoice.Metadata, err = parseMetadata(base32Data)
+
 		case fieldTypeN:
 			if invoice.Destination != nil {
 				// We skip the field if we have already seen a
@@ -336,6 +354,12 @@ func parseDescription(data []byte) (*string, error) {
 	return &description, nil
 }
 
+// parseMetadata converts the data (encoded in base32) into a byte slice to use
+// as the metadata.
+func parseMetadata(data []byte) ([]byte, error) {
+	return bech32.ConvertBits(data, 5, 8, false)
+}
+
 // parseDestination converts the data (encoded in base32) into a 33-byte public
 // key of the payee node.
 func parseDestination(data []byte) (*btcec.PublicKey, error) {
@@ -350,7 +374,7 @@ func parseDestination(data []byte) (*btcec.PublicKey, error) {
 		return nil, err
 	}
 
-	return btcec.ParsePubKey(base256Data, btcec.S256())
+	return btcec.ParsePubKey(base256Data)
 }
 
 // parseExpiry converts the data (encoded in base32) into the expiry time.
@@ -378,7 +402,7 @@ func parseMinFinalCLTVExpiry(data []byte) (*uint64, error) {
 
 // parseFallbackAddr converts the data (encoded in base32) into a fallback
 // on-chain address.
-func parseFallbackAddr(data []byte, net *chaincfg.Params) (btcutil.Address, error) {
+func parseFallbackAddr(data []byte, net *chaincfg.Params) (btcutil.Address, error) { // nolint:dupl
 	// Checks if the data is empty or contains a version without an address.
 	if len(data) < 2 {
 		return nil, fmt.Errorf("empty fallback address field")
@@ -452,7 +476,7 @@ func parseRouteHint(data []byte) ([]HopHint, error) {
 
 	for len(base256Data) > 0 {
 		hopHint := HopHint{}
-		hopHint.NodeID, err = btcec.ParsePubKey(base256Data[:33], btcec.S256())
+		hopHint.NodeID, err = btcec.ParsePubKey(base256Data[:33])
 		if err != nil {
 			return nil, err
 		}

@@ -4,10 +4,9 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
@@ -109,9 +108,6 @@ func (t *txInputSetState) clone() txInputSetState {
 type txInputSet struct {
 	txInputSetState
 
-	// dustLimit is the minimum output value of the tx.
-	dustLimit btcutil.Amount
-
 	// maxInputs is the maximum number of inputs that will be accepted in
 	// the set.
 	maxInputs int
@@ -121,25 +117,15 @@ type txInputSet struct {
 	wallet Wallet
 }
 
-func dustLimit(relayFee chainfee.SatPerKWeight) btcutil.Amount {
-	return txrules.GetDustThreshold(
-		input.P2WPKHSize,
-		btcutil.Amount(relayFee.FeePerKVByte()),
-	)
-}
-
 // newTxInputSet constructs a new, empty input set.
-func newTxInputSet(wallet Wallet, feePerKW,
-	relayFee chainfee.SatPerKWeight, maxInputs int) *txInputSet {
-
-	dustLimit := dustLimit(relayFee)
+func newTxInputSet(wallet Wallet, feePerKW chainfee.SatPerKWeight,
+	maxInputs int) *txInputSet {
 
 	state := txInputSetState{
 		feeRate: feePerKW,
 	}
 
 	b := txInputSet{
-		dustLimit:       dustLimit,
 		maxInputs:       maxInputs,
 		wallet:          wallet,
 		txInputSetState: state,
@@ -153,7 +139,7 @@ func newTxInputSet(wallet Wallet, feePerKW,
 func (t *txInputSet) enoughInput() bool {
 	// If we have a change output above dust, then we certainly have enough
 	// inputs to the transaction.
-	if t.changeOutput >= t.dustLimit {
+	if t.changeOutput >= lnwallet.DustLimitForSize(input.P2TRSize) {
 		return true
 	}
 
@@ -192,8 +178,12 @@ func (t *txInputSet) addToState(inp input.Input, constraints addConstraints) *tx
 	// If the input comes with a required tx out that is below dust, we
 	// won't add it.
 	reqOut := inp.RequiredTxOut()
-	if reqOut != nil && btcutil.Amount(reqOut.Value) < t.dustLimit {
-		return nil
+	if reqOut != nil {
+		// Fetch the dust limit for this output.
+		dustLimit := lnwallet.DustLimitForSize(len(reqOut.PkScript))
+		if btcutil.Amount(reqOut.Value) < dustLimit {
+			return nil
+		}
 	}
 
 	// Clone the current set state.
@@ -220,7 +210,6 @@ func (t *txInputSet) addToState(inp input.Input, constraints addConstraints) *tx
 	inputYield := s.totalOutput() - t.totalOutput()
 
 	switch constraints {
-
 	// Don't sweep inputs that cost us more to sweep than they give us.
 	case constraintsRegular:
 		if inputYield <= 0 {
@@ -332,8 +321,11 @@ func (t *txInputSet) tryAddWalletInputsIfNeeded() error {
 	}
 
 	// Retrieve wallet utxos. Only consider confirmed utxos to prevent
-	// problems around RBF rules for unconfirmed inputs.
-	utxos, err := t.wallet.ListUnspentWitness(1, math.MaxInt32)
+	// problems around RBF rules for unconfirmed inputs. This currently
+	// ignores the configured coin selection strategy.
+	utxos, err := t.wallet.ListUnspentWitnessFromDefaultAccount(
+		1, math.MaxInt32,
+	)
 	if err != nil {
 		return err
 	}
@@ -363,23 +355,26 @@ func (t *txInputSet) tryAddWalletInputsIfNeeded() error {
 // createWalletTxInput converts a wallet utxo into an object that can be added
 // to the other inputs to sweep.
 func createWalletTxInput(utxo *lnwallet.Utxo) (input.Input, error) {
-	var witnessType input.WitnessType
-	switch utxo.AddressType {
-	case lnwallet.WitnessPubKey:
-		witnessType = input.WitnessKeyHash
-	case lnwallet.NestedWitnessPubKey:
-		witnessType = input.NestedWitnessKeyHash
-	default:
-		return nil, fmt.Errorf("unknown address type %v",
-			utxo.AddressType)
-	}
-
 	signDesc := &input.SignDescriptor{
 		Output: &wire.TxOut{
 			PkScript: utxo.PkScript,
 			Value:    int64(utxo.Value),
 		},
 		HashType: txscript.SigHashAll,
+	}
+
+	var witnessType input.WitnessType
+	switch utxo.AddressType {
+	case lnwallet.WitnessPubKey:
+		witnessType = input.WitnessKeyHash
+	case lnwallet.NestedWitnessPubKey:
+		witnessType = input.NestedWitnessKeyHash
+	case lnwallet.TaprootPubkey:
+		witnessType = input.TaprootPubKeySpend
+		signDesc.HashType = txscript.SigHashDefault
+	default:
+		return nil, fmt.Errorf("unknown address type %v",
+			utxo.AddressType)
 	}
 
 	// A height hint doesn't need to be set, because we don't monitor these

@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcutil"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnwallet/chancloser"
@@ -107,7 +107,7 @@ func (r *RPCAcceptor) Accept(req *ChannelAcceptRequest) *ChannelAcceptResponse {
 	// Create a rejection response which we can use for the cases where we
 	// reject the channel.
 	rejectChannel := NewChannelAcceptResponse(
-		false, errChannelRejected, nil, 0, 0, 0, 0, 0, 0,
+		false, errChannelRejected, nil, 0, 0, 0, 0, 0, 0, false,
 	)
 
 	// Send the request to the newRequests channel.
@@ -169,7 +169,7 @@ func (r *RPCAcceptor) Run() error {
 	defer r.wg.Wait()
 
 	// Create a channel that responses from acceptors are sent into.
-	responses := make(chan lnrpc.ChannelAcceptResponse)
+	responses := make(chan *lnrpc.ChannelAcceptResponse)
 
 	// errChan is used by the receive loop to signal any errors that occur
 	// during reading from the stream. This is primarily used to shutdown
@@ -193,7 +193,7 @@ func (r *RPCAcceptor) Run() error {
 // dispatches them into the responses channel provided, sending any errors that
 // occur into the error channel provided.
 func (r *RPCAcceptor) receiveResponses(errChan chan error,
-	responses chan lnrpc.ChannelAcceptResponse) {
+	responses chan *lnrpc.ChannelAcceptResponse) {
 
 	for {
 		resp, err := r.receive()
@@ -205,7 +205,7 @@ func (r *RPCAcceptor) receiveResponses(errChan chan error,
 		var pendingID [32]byte
 		copy(pendingID[:], resp.PendingChanId)
 
-		openChanResp := lnrpc.ChannelAcceptResponse{
+		openChanResp := &lnrpc.ChannelAcceptResponse{
 			Accept:          resp.Accept,
 			PendingChanId:   pendingID[:],
 			Error:           resp.Error,
@@ -216,6 +216,7 @@ func (r *RPCAcceptor) receiveResponses(errChan chan error,
 			MaxHtlcCount:    resp.MaxHtlcCount,
 			MinHtlcIn:       resp.MinHtlcIn,
 			MinAcceptDepth:  resp.MinAcceptDepth,
+			ZeroConf:        resp.ZeroConf,
 		}
 
 		// We have received a decision for one of our channel
@@ -236,14 +237,14 @@ func (r *RPCAcceptor) receiveResponses(errChan chan error,
 // Accept() function, dispatching them to our acceptor stream and coordinating
 // return of responses to their callers.
 func (r *RPCAcceptor) sendAcceptRequests(errChan chan error,
-	responses chan lnrpc.ChannelAcceptResponse) error {
+	responses chan *lnrpc.ChannelAcceptResponse) error {
 
 	// Close the done channel to indicate that the acceptor is no longer
 	// listening and any in-progress requests should be terminated.
 	defer close(r.done)
 
 	// Create a map of pending channel IDs to our original open channel
-	// request and a response channel. We keep the original chanel open
+	// request and a response channel. We keep the original channel open
 	// message so that we can validate our response against it.
 	acceptRequests := make(map[[32]byte]*chanAcceptInfo)
 
@@ -255,6 +256,109 @@ func (r *RPCAcceptor) sendAcceptRequests(errChan chan error,
 
 			req := newRequest.request
 			pendingChanID := req.OpenChanMsg.PendingChannelID
+
+			// Map the channel commitment type to its RPC
+			// counterpart. Also determine whether the zero-conf or
+			// scid-alias channel types are set.
+			var (
+				commitmentType lnrpc.CommitmentType
+				wantsZeroConf  bool
+				wantsScidAlias bool
+			)
+
+			if req.OpenChanMsg.ChannelType != nil {
+				channelFeatures := lnwire.RawFeatureVector(
+					*req.OpenChanMsg.ChannelType,
+				)
+				switch {
+				case channelFeatures.OnlyContains(
+					lnwire.ZeroConfRequired,
+					lnwire.ScidAliasRequired,
+					lnwire.ScriptEnforcedLeaseRequired,
+					lnwire.AnchorsZeroFeeHtlcTxRequired,
+					lnwire.StaticRemoteKeyRequired,
+				):
+					commitmentType = lnrpc.CommitmentType_SCRIPT_ENFORCED_LEASE
+
+				case channelFeatures.OnlyContains(
+					lnwire.ZeroConfRequired,
+					lnwire.ScriptEnforcedLeaseRequired,
+					lnwire.AnchorsZeroFeeHtlcTxRequired,
+					lnwire.StaticRemoteKeyRequired,
+				):
+					commitmentType = lnrpc.CommitmentType_SCRIPT_ENFORCED_LEASE
+
+				case channelFeatures.OnlyContains(
+					lnwire.ScidAliasRequired,
+					lnwire.ScriptEnforcedLeaseRequired,
+					lnwire.AnchorsZeroFeeHtlcTxRequired,
+					lnwire.StaticRemoteKeyRequired,
+				):
+					commitmentType = lnrpc.CommitmentType_SCRIPT_ENFORCED_LEASE
+
+				case channelFeatures.OnlyContains(
+					lnwire.ScriptEnforcedLeaseRequired,
+					lnwire.AnchorsZeroFeeHtlcTxRequired,
+					lnwire.StaticRemoteKeyRequired,
+				):
+					commitmentType = lnrpc.CommitmentType_SCRIPT_ENFORCED_LEASE
+
+				case channelFeatures.OnlyContains(
+					lnwire.ZeroConfRequired,
+					lnwire.ScidAliasRequired,
+					lnwire.AnchorsZeroFeeHtlcTxRequired,
+					lnwire.StaticRemoteKeyRequired,
+				):
+					commitmentType = lnrpc.CommitmentType_ANCHORS
+
+				case channelFeatures.OnlyContains(
+					lnwire.ZeroConfRequired,
+					lnwire.AnchorsZeroFeeHtlcTxRequired,
+					lnwire.StaticRemoteKeyRequired,
+				):
+					commitmentType = lnrpc.CommitmentType_ANCHORS
+
+				case channelFeatures.OnlyContains(
+					lnwire.ScidAliasRequired,
+					lnwire.AnchorsZeroFeeHtlcTxRequired,
+					lnwire.StaticRemoteKeyRequired,
+				):
+					commitmentType = lnrpc.CommitmentType_ANCHORS
+
+				case channelFeatures.OnlyContains(
+					lnwire.AnchorsZeroFeeHtlcTxRequired,
+					lnwire.StaticRemoteKeyRequired,
+				):
+					commitmentType = lnrpc.CommitmentType_ANCHORS
+
+				case channelFeatures.OnlyContains(
+					lnwire.StaticRemoteKeyRequired,
+				):
+					commitmentType = lnrpc.CommitmentType_STATIC_REMOTE_KEY
+
+				case channelFeatures.OnlyContains():
+					commitmentType = lnrpc.CommitmentType_LEGACY
+
+				default:
+					log.Warnf("Unhandled commitment type "+
+						"in channel acceptor request: %v",
+						req.OpenChanMsg.ChannelType)
+				}
+
+				if channelFeatures.IsSet(
+					lnwire.ZeroConfRequired,
+				) {
+
+					wantsZeroConf = true
+				}
+
+				if channelFeatures.IsSet(
+					lnwire.ScidAliasRequired,
+				) {
+
+					wantsScidAlias = true
+				}
+			}
 
 			acceptRequests[pendingChanID] = newRequest
 
@@ -273,6 +377,9 @@ func (r *RPCAcceptor) sendAcceptRequests(errChan chan error,
 				CsvDelay:         uint32(req.OpenChanMsg.CsvDelay),
 				MaxAcceptedHtlcs: uint32(req.OpenChanMsg.MaxAcceptedHTLCs),
 				ChannelFlags:     uint32(req.OpenChanMsg.ChannelFlags),
+				CommitmentType:   commitmentType,
+				WantsZeroConf:    wantsZeroConf,
+				WantsScidAlias:   wantsScidAlias,
 			}
 
 			if err := r.send(chanAcceptReq); err != nil {
@@ -311,6 +418,7 @@ func (r *RPCAcceptor) sendAcceptRequests(errChan chan error,
 				btcutil.Amount(resp.ReserveSat),
 				lnwire.MilliSatoshi(resp.InFlightMaxMsat),
 				lnwire.MilliSatoshi(resp.MinHtlcIn),
+				resp.ZeroConf,
 			)
 
 			// Delete the channel from the acceptRequests map.
@@ -332,7 +440,7 @@ func (r *RPCAcceptor) sendAcceptRequests(errChan chan error,
 // acceptor, returning a boolean indicating whether to accept the channel, an
 // error to send to the peer, and any validation errors that occurred.
 func (r *RPCAcceptor) validateAcceptorResponse(dustLimit btcutil.Amount,
-	req lnrpc.ChannelAcceptResponse) (bool, error, lnwire.DeliveryAddress,
+	req *lnrpc.ChannelAcceptResponse) (bool, error, lnwire.DeliveryAddress,
 	error) {
 
 	channelStr := hex.EncodeToString(req.PendingChanId)

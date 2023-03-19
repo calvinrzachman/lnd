@@ -4,8 +4,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcutil"
 	"github.com/lightningnetwork/lnd/lnwire"
 )
 
@@ -149,6 +149,14 @@ func ErrChanTooLarge(chanSize, maxChanSize btcutil.Amount) ReservationError {
 	return ReservationError{
 		fmt.Errorf("chan size of %v exceeds maximum chan size of %v",
 			chanSize, maxChanSize),
+	}
+}
+
+// ErrInvalidDustLimit returns an error indicating that a proposed DustLimit
+// was rejected.
+func ErrInvalidDustLimit(dustLimit btcutil.Amount) ReservationError {
+	return ReservationError{
+		fmt.Errorf("dust limit %v is invalid", dustLimit),
 	}
 }
 

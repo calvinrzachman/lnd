@@ -1,5 +1,5 @@
 DEV_TAGS = dev
-RPC_TAGS = autopilotrpc chainrpc invoicesrpc routerrpc signrpc verrpc walletrpc watchtowerrpc wtclientrpc
+RPC_TAGS = autopilotrpc chainrpc invoicesrpc neutrinorpc peersrpc routerrpc signrpc verrpc walletrpc watchtowerrpc wtclientrpc
 LOG_TAGS =
 TEST_FLAGS =
 ITEST_FLAGS = 
@@ -7,6 +7,12 @@ EXEC_SUFFIX =
 COVER_PKG = $$(go list -deps -tags="$(DEV_TAGS)" ./... | grep '$(PKG)' | grep -v lnrpc)
 NUM_ITEST_TRANCHES = 4
 ITEST_PARALLELISM = $(NUM_ITEST_TRANCHES)
+POSTGRES_START_DELAY = 5
+
+# Build temp tests only. TODO(yy): remove.
+ifneq ($(temptest),)
+ITEST_FLAGS += -temptest=$(temptest)
+endif
 
 # If rpc option is set also add all extra RPC tags to DEV_TAGS
 ifneq ($(with-rpc),)
@@ -46,13 +52,24 @@ endif
 
 # Define the integration test.run filter if the icase argument was provided.
 ifneq ($(icase),)
-TEST_FLAGS += -test.run="TestLightningNetworkDaemon/.*-of-.*/.*/$(icase)"
+TEST_FLAGS += -test.run="TestLightningNetworkDaemon/tranche.*/.*-of-.*/.*/$(icase)"
 endif
 
-# Run itests with etcd backend.
-ifeq ($(etcd),1)
-ITEST_FLAGS += -etcd
+# Run itests with specified db backend.
+ifneq ($(dbbackend),)
+ITEST_FLAGS += -dbbackend=$(dbbackend)
+endif
+
+ifeq ($(dbbackend),etcd)
 DEV_TAGS += kvdb_etcd
+endif
+
+ifeq ($(dbbackend),postgres)
+DEV_TAGS += kvdb_postgres
+endif
+
+ifeq ($(dbbackend),sqlite)
+DEV_TAGS += kvdb_sqlite
 endif
 
 ifneq ($(tags),)
@@ -68,11 +85,11 @@ LOG_TAGS := nolog
 endif
 
 # If a timeout was requested, construct initialize the proper flag for the go
-# test command. If not, we set 20m (up from the default 10m).
+# test command. If not, we set 120m (up from the default 10m).
 ifneq ($(timeout),)
 TEST_FLAGS += -test.timeout=$(timeout)
 else
-TEST_FLAGS += -test.timeout=40m
+TEST_FLAGS += -test.timeout=120m
 endif
 
 GOLIST := go list -tags="$(DEV_TAGS)" -deps $(PKG)/... | grep '$(PKG)'| grep -v '/vendor/'
@@ -86,11 +103,13 @@ UNIT_TARGETED ?= no
 # targeted case. Otherwise, default to running all tests.
 ifeq ($(UNIT_TARGETED), yes)
 UNIT := $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS) $(UNITPKG)
+UNIT_DEBUG := $(GOTEST) -v -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS) $(UNITPKG)
 UNIT_RACE := $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS) lowscrypt" $(TEST_FLAGS) -race $(UNITPKG)
 endif
 
 ifeq ($(UNIT_TARGETED), no)
 UNIT := $(GOLIST) | $(XARGS) env $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS)
+UNIT_DEBUG := $(GOLIST) | $(XARGS) env $(GOTEST) -v -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS)
 UNIT_RACE := $(UNIT) -race
 endif
 

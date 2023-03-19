@@ -2,31 +2,39 @@ package routing
 
 import (
 	"bytes"
+	goErrors "errors"
 	"fmt"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/go-errors/errors"
-
 	sphinx "github.com/lightningnetwork/lightning-onion"
+	"github.com/lightningnetwork/lnd/amp"
+	"github.com/lightningnetwork/lnd/batch"
+	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
-	"github.com/lightningnetwork/lnd/channeldb/kvdb"
 	"github.com/lightningnetwork/lnd/clock"
 	"github.com/lightningnetwork/lnd/htlcswitch"
 	"github.com/lightningnetwork/lnd/input"
+	"github.com/lightningnetwork/lnd/kvdb"
 	"github.com/lightningnetwork/lnd/lntypes"
+	"github.com/lightningnetwork/lnd/lnutils"
 	"github.com/lightningnetwork/lnd/lnwallet"
+	"github.com/lightningnetwork/lnd/lnwallet/btcwallet"
 	"github.com/lightningnetwork/lnd/lnwallet/chanvalidate"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/multimutex"
 	"github.com/lightningnetwork/lnd/record"
 	"github.com/lightningnetwork/lnd/routing/chainview"
 	"github.com/lightningnetwork/lnd/routing/route"
+	"github.com/lightningnetwork/lnd/routing/shards"
 	"github.com/lightningnetwork/lnd/ticker"
 	"github.com/lightningnetwork/lnd/zpay32"
 )
@@ -40,6 +48,12 @@ const (
 	// DefaultChannelPruneExpiry is the default duration used to determine
 	// if a channel should be pruned or not.
 	DefaultChannelPruneExpiry = time.Duration(time.Hour * 24 * 14)
+
+	// DefaultFirstTimePruneDelay is the time we'll wait after startup
+	// before attempting to prune the graph for zombie channels. We don't
+	// do it immediately after startup to allow lnd to start up without
+	// getting blocked by this job.
+	DefaultFirstTimePruneDelay = 30 * time.Second
 
 	// defaultStatInterval governs how often the router will log non-empty
 	// stats related to processing new channels, updates, or node
@@ -82,12 +96,12 @@ type ChannelGraphSource interface {
 	// AddNode is used to add information about a node to the router
 	// database. If the node with this pubkey is not present in an existing
 	// channel, it will be ignored.
-	AddNode(node *channeldb.LightningNode) error
+	AddNode(node *channeldb.LightningNode, op ...batch.SchedulerOption) error
 
 	// AddEdge is used to add edge/channel to the topology of the router,
 	// after all information about channel will be gathered this
 	// edge/channel might be used in construction of payment path.
-	AddEdge(edge *channeldb.ChannelEdgeInfo) error
+	AddEdge(edge *channeldb.ChannelEdgeInfo, op ...batch.SchedulerOption) error
 
 	// AddProof updates the channel edge info with proof which is needed to
 	// properly announce the edge to the rest of the network.
@@ -95,7 +109,7 @@ type ChannelGraphSource interface {
 
 	// UpdateEdge is used to update edge information, without this message
 	// edge considered as not fully constructed.
-	UpdateEdge(policy *channeldb.ChannelEdgePolicy) error
+	UpdateEdge(policy *channeldb.ChannelEdgePolicy, op ...batch.SchedulerOption) error
 
 	// IsStaleNode returns true if the graph source has a node announcement
 	// for the target node with a more recent timestamp. This method will
@@ -124,7 +138,8 @@ type ChannelGraphSource interface {
 	// ForAllOutgoingChannels is used to iterate over all channels
 	// emanating from the "source" node which is the center of the
 	// star-graph.
-	ForAllOutgoingChannels(cb func(c *channeldb.ChannelEdgeInfo,
+	ForAllOutgoingChannels(cb func(tx kvdb.RTx,
+		c *channeldb.ChannelEdgeInfo,
 		e *channeldb.ChannelEdgePolicy) error) error
 
 	// CurrentBlockHeight returns the block height from POV of the router
@@ -142,11 +157,6 @@ type ChannelGraphSource interface {
 
 	// ForEachNode is used to iterate over every node in the known graph.
 	ForEachNode(func(node *channeldb.LightningNode) error) error
-
-	// ForEachChannel is used to iterate over every channel in the known
-	// graph.
-	ForEachChannel(func(chanInfo *channeldb.ChannelEdgeInfo,
-		e1, e2 *channeldb.ChannelEdgePolicy) error) error
 }
 
 // PaymentAttemptDispatcher is used by the router to send payment attempts onto
@@ -157,23 +167,27 @@ type PaymentAttemptDispatcher interface {
 	// denoted by its public key. A non-nil error is to be returned if the
 	// payment was unsuccessful.
 	SendHTLC(firstHop lnwire.ShortChannelID,
-		paymentID uint64,
+		attemptID uint64,
 		htlcAdd *lnwire.UpdateAddHTLC) error
 
-	// GetPaymentResult returns the the result of the payment attempt with
-	// the given paymentID. The method returns a channel where the payment
-	// result will be sent when available, or an error is encountered
-	// during forwarding. When a result is received on the channel, the
-	// HTLC is guaranteed to no longer be in flight. The switch shutting
-	// down is signaled by closing the channel. If the paymentID is
-	// unknown, ErrPaymentIDNotFound will be returned.
-	GetPaymentResult(paymentID uint64, paymentHash lntypes.Hash,
+	// GetAttemptResult returns the result of the payment attempt with
+	// the given attemptID. The paymentHash should be set to the payment's
+	// overall hash, or in case of AMP payments the payment's unique
+	// identifier.
+	//
+	// The method returns a channel where the payment result will be sent
+	// when available, or an error is encountered during forwarding. When a
+	// result is received on the channel, the HTLC is guaranteed to no
+	// longer be in flight.  The switch shutting down is signaled by
+	// closing the channel. If the attemptID is unknown,
+	// ErrPaymentIDNotFound will be returned.
+	GetAttemptResult(attemptID uint64, paymentHash lntypes.Hash,
 		deobfuscator htlcswitch.ErrorDecrypter) (
 		<-chan *htlcswitch.PaymentResult, error)
 
 	// CleanStore calls the underlying result store, telling it is safe to
 	// delete all entries except the ones in the keepPids map. This should
-	// be called preiodically to let the switch clean up payment results
+	// be called periodically to let the switch clean up payment results
 	// that we have handled.
 	// NOTE: New payment attempts MUST NOT be made after the keepPids map
 	// has been created and this method has returned.
@@ -181,7 +195,7 @@ type PaymentAttemptDispatcher interface {
 }
 
 // PaymentSessionSource is an interface that defines a source for the router to
-// retrive new payment sessions.
+// retrieve new payment sessions.
 type PaymentSessionSource interface {
 	// NewPaymentSession creates a new payment session that will produce
 	// routes to the given target. An optional set of routing hints can be
@@ -203,18 +217,18 @@ type MissionController interface {
 	// input for future probability estimates. It returns a bool indicating
 	// whether this error is a final error and no further payment attempts
 	// need to be made.
-	ReportPaymentFail(paymentID uint64, rt *route.Route,
+	ReportPaymentFail(attemptID uint64, rt *route.Route,
 		failureSourceIdx *int, failure lnwire.FailureMessage) (
 		*channeldb.FailureReason, error)
 
 	// ReportPaymentSuccess reports a successful payment to mission control as input
 	// for future probability estimates.
-	ReportPaymentSuccess(paymentID uint64, rt *route.Route) error
+	ReportPaymentSuccess(attemptID uint64, rt *route.Route) error
 
 	// GetProbability is expected to return the success probability of a
 	// payment from fromNode along edge.
 	GetProbability(fromNode, toNode route.Vertex,
-		amt lnwire.MilliSatoshi) float64
+		amt lnwire.MilliSatoshi, capacity btcutil.Amount) float64
 }
 
 // FeeSchema is the set fee configuration for a Lightning Node on the network.
@@ -272,6 +286,10 @@ type Config struct {
 	// we need in order to properly maintain the channel graph.
 	ChainView chainview.FilteredChainView
 
+	// Notifier is a reference to the ChainNotifier, used to grab
+	// the latest blocks if the router is missing any.
+	Notifier chainntnfs.ChainNotifier
+
 	// Payer is an instance of a PaymentAttemptDispatcher and is used by
 	// the router to send payment attempts onto the network, and receive
 	// their results.
@@ -304,13 +322,19 @@ type Config struct {
 	// should examine the channel graph to garbage collect zombie channels.
 	GraphPruneInterval time.Duration
 
+	// FirstTimePruneDelay is the time we'll wait after startup before
+	// attempting to prune the graph for zombie channels. We don't do it
+	// immediately after startup to allow lnd to start up without getting
+	// blocked by this job.
+	FirstTimePruneDelay time.Duration
+
 	// QueryBandwidth is a method that allows the router to query the lower
 	// link layer to determine the up to date available bandwidth at a
 	// prospective link to be traversed. If the  link isn't available, then
 	// a value of zero should be returned. Otherwise, the current up to
 	// date knowledge of the available bandwidth of the link should be
 	// returned.
-	QueryBandwidth func(edge *channeldb.ChannelEdgeInfo) lnwire.MilliSatoshi
+	GetLink getLinkQuery
 
 	// NextPaymentID is a method that guarantees to return a new, unique ID
 	// each time it is called. This is used by the router to generate a
@@ -328,6 +352,17 @@ type Config struct {
 
 	// Clock is mockable time provider.
 	Clock clock.Clock
+
+	// StrictZombiePruning determines if we attempt to prune zombie
+	// channels according to a stricter criteria. If true, then we'll prune
+	// a channel if only *one* of the edges is considered a zombie.
+	// Otherwise, we'll only prune the channel when both edges have a very
+	// dated last update.
+	StrictZombiePruning bool
+
+	// IsAlias returns whether a passed ShortChannelID is an alias. This is
+	// only used for our local channels.
+	IsAlias func(scid lnwire.ShortChannelID) bool
 }
 
 // EdgeLocator is a struct used to identify a specific edge.
@@ -370,12 +405,16 @@ type ChannelRouter struct {
 	// when doing any path finding.
 	selfNode *channeldb.LightningNode
 
+	// cachedGraph is an instance of routingGraph that caches the source node as
+	// well as the channel graph itself in memory.
+	cachedGraph routingGraph
+
 	// newBlocks is a channel in which new blocks connected to the end of
 	// the main chain are sent over, and blocks updated after a call to
 	// UpdateFilter.
 	newBlocks <-chan *chainview.FilteredBlock
 
-	// staleBlocks is a channel in which blocks disconnected fromt the end
+	// staleBlocks is a channel in which blocks disconnected from the end
 	// of our currently known best chain are sent over.
 	staleBlocks <-chan *chainview.FilteredBlock
 
@@ -387,7 +426,7 @@ type ChannelRouter struct {
 	// topologyClients maps a client's unique notification ID to a
 	// topologyClient client that contains its notification dispatch
 	// channel.
-	topologyClients map[uint64]*topologyClient
+	topologyClients *lnutils.SyncMap[uint64, *topologyClient]
 
 	// ntfnClientUpdates is a channel that's used to send new updates to
 	// topology notification clients to the ChannelRouter. Updates either
@@ -408,8 +447,6 @@ type ChannelRouter struct {
 	// announcements over a window of defaultStatInterval.
 	stats *routerStats
 
-	sync.RWMutex
-
 	quit chan struct{}
 	wg   sync.WaitGroup
 }
@@ -424,16 +461,19 @@ var _ ChannelGraphSource = (*ChannelRouter)(nil)
 // channel graph is a subset of the UTXO set) set, then the router will proceed
 // to fully sync to the latest state of the UTXO set.
 func New(cfg Config) (*ChannelRouter, error) {
-
 	selfNode, err := cfg.Graph.SourceNode()
 	if err != nil {
 		return nil, err
 	}
 
 	r := &ChannelRouter{
-		cfg:               &cfg,
+		cfg: &cfg,
+		cachedGraph: &CachedGraph{
+			graph:  cfg.Graph,
+			source: selfNode.PubKeyBytes,
+		},
 		networkUpdates:    make(chan *routingMsg),
-		topologyClients:   make(map[uint64]*topologyClient),
+		topologyClients:   &lnutils.SyncMap[uint64, *topologyClient]{},
 		ntfnClientUpdates: make(chan *topologyClientUpdate),
 		channelEdgeMtx:    multimutex.NewMutex(),
 		selfNode:          selfNode,
@@ -453,7 +493,7 @@ func (r *ChannelRouter) Start() error {
 		return nil
 	}
 
-	log.Tracef("Channel Router starting")
+	log.Info("Channel Router starting")
 
 	bestHash, bestHeight, err := r.cfg.Chain.GetBestBlock()
 	if err != nil {
@@ -483,11 +523,21 @@ func (r *ChannelRouter) Start() error {
 
 	// If AssumeChannelValid is present, then we won't rely on pruning
 	// channels from the graph based on their spentness, but whether they
-	// are considered zombies or not.
+	// are considered zombies or not. We will start zombie pruning after a
+	// small delay, to avoid slowing down startup of lnd.
 	if r.cfg.AssumeChannelValid {
-		if err := r.pruneZombieChans(); err != nil {
-			return err
-		}
+		time.AfterFunc(r.cfg.FirstTimePruneDelay, func() {
+			select {
+			case <-r.quit:
+				return
+			default:
+			}
+
+			log.Info("Initial zombie prune starting")
+			if err := r.pruneZombieChans(); err != nil {
+				log.Errorf("Unable to prune zombies: %v", err)
+			}
+		})
 	} else {
 		// Otherwise, we'll use our filtered chain view to prune
 		// channels as soon as they are detected as spent on-chain.
@@ -522,6 +572,14 @@ func (r *ChannelRouter) Start() error {
 			}
 		}
 
+		// The graph pruning might have taken a while and there could be
+		// new blocks available.
+		_, bestHeight, err = r.cfg.Chain.GetBestBlock()
+		if err != nil {
+			return err
+		}
+		r.bestHeight = uint32(bestHeight)
+
 		// Before we begin normal operation of the router, we first need
 		// to synchronize the channel graph to the latest state of the
 		// UTXO set.
@@ -552,14 +610,7 @@ func (r *ChannelRouter) Start() error {
 	// until the cleaning has finished.
 	toKeep := make(map[uint64]struct{})
 	for _, p := range payments {
-		payment, err := r.cfg.Control.FetchPayment(
-			p.Info.PaymentHash,
-		)
-		if err != nil {
-			return err
-		}
-
-		for _, a := range payment.HTLCs {
+		for _, a := range p.HTLCs {
 			toKeep[a.AttemptID] = struct{}{}
 		}
 	}
@@ -570,10 +621,39 @@ func (r *ChannelRouter) Start() error {
 	}
 
 	for _, payment := range payments {
-		log.Infof("Resuming payment with hash %v", payment.Info.PaymentHash)
+		log.Infof("Resuming payment %v", payment.Info.PaymentIdentifier)
 		r.wg.Add(1)
-		go func(payment *channeldb.InFlightPayment) {
+		go func(payment *channeldb.MPPayment) {
 			defer r.wg.Done()
+
+			// Get the hashes used for the outstanding HTLCs.
+			htlcs := make(map[uint64]lntypes.Hash)
+			for _, a := range payment.HTLCs {
+				a := a
+
+				// We check whether the individual attempts
+				// have their HTLC hash set, if not we'll fall
+				// back to the overall payment hash.
+				hash := payment.Info.PaymentIdentifier
+				if a.Hash != nil {
+					hash = *a.Hash
+				}
+
+				htlcs[a.AttemptID] = hash
+			}
+
+			// Since we are not supporting creating more shards
+			// after a restart (only receiving the result of the
+			// shards already outstanding), we create a simple
+			// shard tracker that will map the attempt IDs to
+			// hashes used for the HTLCs. This will be enough also
+			// for AMP payments, since we only need the hashes for
+			// the individual HTLCs to regenerate the circuits, and
+			// we don't currently persist the root share necessary
+			// to re-derive them.
+			shardTracker := shards.NewSimpleShardTracker(
+				payment.Info.PaymentIdentifier, htlcs,
+			)
 
 			// We create a dummy, empty payment session such that
 			// we won't make another payment attempt when the
@@ -586,17 +666,17 @@ func (r *ChannelRouter) Start() error {
 			// also set a zero fee limit, as no more routes should
 			// be tried.
 			_, _, err := r.sendPayment(
-				payment.Info.Value, 0,
-				payment.Info.PaymentHash, 0, paySession,
+				0, payment.Info.PaymentIdentifier, 0,
+				paySession, shardTracker,
 			)
 			if err != nil {
-				log.Errorf("Resuming payment with hash %v "+
-					"failed: %v.", payment.Info.PaymentHash, err)
+				log.Errorf("Resuming payment %v failed: %v.",
+					payment.Info.PaymentIdentifier, err)
 				return
 			}
 
-			log.Infof("Resumed payment with hash %v completed.",
-				payment.Info.PaymentHash)
+			log.Infof("Resumed payment %v completed.",
+				payment.Info.PaymentIdentifier)
 		}(payment)
 	}
 
@@ -614,7 +694,7 @@ func (r *ChannelRouter) Stop() error {
 		return nil
 	}
 
-	log.Tracef("Channel Router shutting down")
+	log.Info("Channel Router shutting down")
 
 	// Our filtered chain view could've only been started if
 	// AssumeChannelValid isn't present.
@@ -800,30 +880,39 @@ func (r *ChannelRouter) pruneZombieChans() error {
 			return nil
 		}
 
-		// If *both* edges haven't been updated for a period of
+		// If either edge hasn't been updated for a period of
 		// chanExpiry, then we'll mark the channel itself as eligible
 		// for graph pruning.
-		var e1Zombie, e2Zombie bool
-		if e1 != nil {
-			e1Zombie = time.Since(e1.LastUpdate) >= chanExpiry
-			if e1Zombie {
-				log.Tracef("Edge #1 of ChannelID(%v) last "+
-					"update: %v", info.ChannelID,
-					e1.LastUpdate)
-			}
+		e1Zombie := e1 == nil || time.Since(e1.LastUpdate) >= chanExpiry
+		e2Zombie := e2 == nil || time.Since(e2.LastUpdate) >= chanExpiry
+
+		if e1Zombie {
+			log.Tracef("Node1 pubkey=%x of chan_id=%v is zombie",
+				info.NodeKey1Bytes, info.ChannelID)
 		}
-		if e2 != nil {
-			e2Zombie = time.Since(e2.LastUpdate) >= chanExpiry
-			if e2Zombie {
-				log.Tracef("Edge #2 of ChannelID(%v) last "+
-					"update: %v", info.ChannelID,
-					e2.LastUpdate)
-			}
+		if e2Zombie {
+			log.Tracef("Node2 pubkey=%x of chan_id=%v is zombie",
+				info.NodeKey2Bytes, info.ChannelID)
 		}
 
-		// If the channel is not considered zombie, we can move on to
-		// the next.
-		if !e1Zombie || !e2Zombie {
+		// If we're using strict zombie pruning, then a channel is only
+		// considered live if both edges have a recent update we know
+		// of.
+		var channelIsLive bool
+		switch {
+		case r.cfg.StrictZombiePruning:
+			channelIsLive = !e1Zombie && !e2Zombie
+
+		// Otherwise, if we're using the less strict variant, then a
+		// channel is considered live if either of the edges have a
+		// recent update.
+		default:
+			channelIsLive = !e1Zombie || !e2Zombie
+		}
+
+		// Return early if the channel is still considered to be live
+		// with the current set of configuration parameters.
+		if channelIsLive {
 			return nil
 		}
 
@@ -873,6 +962,9 @@ func (r *ChannelRouter) pruneZombieChans() error {
 	}
 
 	log.Infof("Pruning %v zombie channels", len(chansToPrune))
+	if len(chansToPrune) == 0 {
+		return nil
+	}
 
 	// With the set of zombie-like channels obtained, we'll do another pass
 	// to delete them from the channel graph.
@@ -881,7 +973,10 @@ func (r *ChannelRouter) pruneZombieChans() error {
 		toPrune = append(toPrune, chanID)
 		log.Tracef("Pruning zombie channel with ChannelID(%v)", chanID)
 	}
-	if err := r.cfg.Graph.DeleteChannelEdges(toPrune...); err != nil {
+	err = r.cfg.Graph.DeleteChannelEdges(
+		r.cfg.StrictZombiePruning, true, toPrune...,
+	)
+	if err != nil {
 		return fmt.Errorf("unable to delete zombie channels: %v", err)
 	}
 
@@ -893,6 +988,78 @@ func (r *ChannelRouter) pruneZombieChans() error {
 	}
 
 	return nil
+}
+
+// handleNetworkUpdate is responsible for processing the update message and
+// notifies topology changes, if any.
+//
+// NOTE: must be run inside goroutine.
+func (r *ChannelRouter) handleNetworkUpdate(vb *ValidationBarrier,
+	update *routingMsg) {
+
+	defer r.wg.Done()
+	defer vb.CompleteJob()
+
+	// If this message has an existing dependency, then we'll wait until
+	// that has been fully validated before we proceed.
+	err := vb.WaitForDependants(update.msg)
+	if err != nil {
+		switch {
+		case IsError(err, ErrVBarrierShuttingDown):
+			update.err <- err
+
+		case IsError(err, ErrParentValidationFailed):
+			update.err <- newErrf(ErrIgnored, err.Error())
+
+		default:
+			log.Warnf("unexpected error during validation "+
+				"barrier shutdown: %v", err)
+			update.err <- err
+		}
+
+		return
+	}
+
+	// Process the routing update to determine if this is either a new
+	// update from our PoV or an update to a prior vertex/edge we
+	// previously accepted.
+	err = r.processUpdate(update.msg, update.op...)
+	update.err <- err
+
+	// If this message had any dependencies, then we can now signal them to
+	// continue.
+	allowDependents := err == nil || IsError(err, ErrIgnored, ErrOutdated)
+	vb.SignalDependants(update.msg, allowDependents)
+
+	// If the error is not nil here, there's no need to send topology
+	// change.
+	if err != nil {
+		// We now decide to log an error or not. If allowDependents is
+		// false, it means there is an error and the error is neither
+		// ErrIgnored or ErrOutdated. In this case, we'll log an error.
+		// Otherwise, we'll add debug log only.
+		if allowDependents {
+			log.Debugf("process network updates got: %v", err)
+		} else {
+			log.Errorf("process network updates got: %v", err)
+		}
+
+		return
+	}
+
+	// Otherwise, we'll send off a new notification for the newly accepted
+	// update, if any.
+	topChange := &TopologyChange{}
+	err = addToTopologyChange(r.cfg.Graph, topChange, update.msg)
+	if err != nil {
+		log.Errorf("unable to update topology change notification: %v",
+			err)
+		return
+	}
+
+	if !topChange.isEmpty() {
+		r.notifyTopologyChange(topChange)
+	}
 }
 
 // networkHandler is the primary goroutine for the ChannelRouter. The roles of
@@ -913,7 +1080,28 @@ func (r *ChannelRouter) networkHandler() {
 
 	// We'll use this validation barrier to ensure that we process all jobs
 	// in the proper order during parallel validation.
-	validationBarrier := NewValidationBarrier(1000, r.quit)
+	//
+	// NOTE: For AssumeChannelValid, we bump up the maximum number of
+	// concurrent validation requests since there are no blocks being
+	// fetched. This significantly increases the performance of IGD for
+	// neutrino nodes.
+	//
+	// However, we dial back to use multiple of the number of cores when
+	// fully validating, to avoid fetching up to 1000 blocks from the
+	// backend. On bitcoind, this will empirically cause massive latency
+	// spikes when executing this many concurrent RPC calls. Critical
+	// subsystems or basic rpc calls that rely on calls such as GetBestBlock
+	// will hang due to excessive load.
+	//
+	// See https://github.com/lightningnetwork/lnd/issues/4892.
+	var validationBarrier *ValidationBarrier
+	if r.cfg.AssumeChannelValid {
+		validationBarrier = NewValidationBarrier(1000, r.quit)
+	} else {
+		validationBarrier = NewValidationBarrier(
+			4*runtime.NumCPU(), r.quit,
+		)
+	}
 
 	for {
 
@@ -928,61 +1116,12 @@ func (r *ChannelRouter) networkHandler() {
 		// on the exact type of the message.
 		case update := <-r.networkUpdates:
 			// We'll set up any dependants, and wait until a free
-			// slot for this job opens up, this allow us to not
+			// slot for this job opens up, this allows us to not
 			// have thousands of goroutines active.
 			validationBarrier.InitJobDependencies(update.msg)
 
 			r.wg.Add(1)
-			go func() {
-				defer r.wg.Done()
-				defer validationBarrier.CompleteJob()
-
-				// If this message has an existing dependency,
-				// then we'll wait until that has been fully
-				// validated before we proceed.
-				err := validationBarrier.WaitForDependants(
-					update.msg,
-				)
-				if err != nil {
-					if err != ErrVBarrierShuttingDown {
-						log.Warnf("unexpected error "+
-							"during validation "+
-							"barrier shutdown: %v",
-							err)
-					}
-					return
-				}
-
-				// Process the routing update to determine if
-				// this is either a new update from our PoV or
-				// an update to a prior vertex/edge we
-				// previously accepted.
-				err = r.processUpdate(update.msg)
-				update.err <- err
-
-				// If this message had any dependencies, then
-				// we can now signal them to continue.
-				validationBarrier.SignalDependants(update.msg)
-				if err != nil {
-					return
-				}
-
-				// Send off a new notification for the newly
-				// accepted update.
-				topChange := &TopologyChange{}
-				err = addToTopologyChange(
-					r.cfg.Graph, topChange, update.msg,
-				)
-				if err != nil {
-					log.Errorf("unable to update topology "+
-						"change notification: %v", err)
-					return
-				}
-
-				if !topChange.isEmpty() {
-					r.notifyTopologyChange(topChange)
-				}
-			}()
+			go r.handleNetworkUpdate(validationBarrier, update)
 
 			// TODO(roasbeef): remove all unconnected vertexes
 			// after N blocks pass with no corresponding
@@ -1022,60 +1161,39 @@ func (r *ChannelRouter) networkHandler() {
 
 			// We'll ensure that any new blocks received attach
 			// directly to the end of our main chain. If not, then
-			// we've somehow missed some blocks. We don't process
-			// this block as otherwise, we may miss on-chain
-			// events.
+			// we've somehow missed some blocks. Here we'll catch
+			// up the chain with the latest blocks.
 			currentHeight := atomic.LoadUint32(&r.bestHeight)
-			if chainUpdate.Height != currentHeight+1 {
-				log.Errorf("out of order block: expecting "+
-					"height=%v, got height=%v", currentHeight+1,
-					chainUpdate.Height)
-				continue
-			}
-
-			// Once a new block arrives, we update our running
-			// track of the height of the chain tip.
-			blockHeight := uint32(chainUpdate.Height)
-			atomic.StoreUint32(&r.bestHeight, blockHeight)
-			log.Infof("Pruning channel graph using block %v (height=%v)",
-				chainUpdate.Hash, blockHeight)
-
-			// We're only interested in all prior outputs that have
-			// been spent in the block, so collate all the
-			// referenced previous outpoints within each tx and
-			// input.
-			var spentOutputs []*wire.OutPoint
-			for _, tx := range chainUpdate.Transactions {
-				for _, txIn := range tx.TxIn {
-					spentOutputs = append(spentOutputs,
-						&txIn.PreviousOutPoint)
+			switch {
+			case chainUpdate.Height == currentHeight+1:
+				err := r.updateGraphWithClosedChannels(
+					chainUpdate,
+				)
+				if err != nil {
+					log.Errorf("unable to prune graph "+
+						"with closed channels: %v", err)
 				}
+
+			case chainUpdate.Height > currentHeight+1:
+				log.Errorf("out of order block: expecting "+
+					"height=%v, got height=%v",
+					currentHeight+1, chainUpdate.Height)
+
+				err := r.getMissingBlocks(currentHeight, chainUpdate)
+				if err != nil {
+					log.Errorf("unable to retrieve missing"+
+						"blocks: %v", err)
+				}
+
+			case chainUpdate.Height < currentHeight+1:
+				log.Errorf("out of order block: expecting "+
+					"height=%v, got height=%v",
+					currentHeight+1, chainUpdate.Height)
+
+				log.Infof("Skipping channel pruning since "+
+					"received block height %v was already"+
+					" processed.", chainUpdate.Height)
 			}
-
-			// With the spent outputs gathered, attempt to prune
-			// the channel graph, also passing in the hash+height
-			// of the block being pruned so the prune tip can be
-			// updated.
-			chansClosed, err := r.cfg.Graph.PruneGraph(spentOutputs,
-				&chainUpdate.Hash, chainUpdate.Height)
-			if err != nil {
-				log.Errorf("unable to prune routing table: %v", err)
-				continue
-			}
-
-			log.Infof("Block %v (height=%v) closed %v channels",
-				chainUpdate.Hash, blockHeight, len(chansClosed))
-
-			if len(chansClosed) == 0 {
-				continue
-			}
-
-			// Notify all currently registered clients of the newly
-			// closed channels.
-			closeSummaries := createCloseSummaries(blockHeight, chansClosed...)
-			r.notifyTopologyChange(&TopologyChange{
-				ClosedChannels: closeSummaries,
-			})
 
 		// A new notification client update has arrived. We're either
 		// gaining a new client, or cancelling notifications for an
@@ -1084,14 +1202,10 @@ func (r *ChannelRouter) networkHandler() {
 			clientID := ntfnUpdate.clientID
 
 			if ntfnUpdate.cancel {
-				r.RLock()
-				client, ok := r.topologyClients[ntfnUpdate.clientID]
-				r.RUnlock()
+				client, ok := r.topologyClients.LoadAndDelete(
+					clientID,
+				)
 				if ok {
-					r.Lock()
-					delete(r.topologyClients, clientID)
-					r.Unlock()
-
 					close(client.exit)
 					client.wg.Wait()
 
@@ -1101,12 +1215,10 @@ func (r *ChannelRouter) networkHandler() {
 				continue
 			}
 
-			r.Lock()
-			r.topologyClients[ntfnUpdate.clientID] = &topologyClient{
+			r.topologyClients.Store(clientID, &topologyClient{
 				ntfnChan: ntfnUpdate.ntfnChan,
 				exit:     make(chan struct{}),
-			}
-			r.Unlock()
+			})
 
 		// The graph prune ticker has ticked, so we'll examine the
 		// state of the known graph to filter out any zombie channels
@@ -1134,6 +1246,117 @@ func (r *ChannelRouter) networkHandler() {
 			return
 		}
 	}
+}
+
+// getMissingBlocks walks through all missing blocks and updates the graph
+// closed channels accordingly.
+func (r *ChannelRouter) getMissingBlocks(currentHeight uint32,
+	chainUpdate *chainview.FilteredBlock) error {
+
+	outdatedHash, err := r.cfg.Chain.GetBlockHash(int64(currentHeight))
+	if err != nil {
+		return err
+	}
+
+	outdatedBlock := &chainntnfs.BlockEpoch{
+		Height: int32(currentHeight),
+		Hash:   outdatedHash,
+	}
+
+	epochClient, err := r.cfg.Notifier.RegisterBlockEpochNtfn(
+		outdatedBlock,
+	)
+	if err != nil {
+		return err
+	}
+	defer epochClient.Cancel()
+
+	blockDifference := int(chainUpdate.Height - currentHeight)
+
+	// We'll walk through all the outdated blocks and make sure we're able
+	// to update the graph with any closed channels from them.
+	for i := 0; i < blockDifference; i++ {
+		var (
+			missingBlock *chainntnfs.BlockEpoch
+			ok           bool
+		)
+
+		select {
+		case missingBlock, ok = <-epochClient.Epochs:
+			if !ok {
+				return nil
+			}
+
+		case <-r.quit:
+			return nil
+		}
+
+		filteredBlock, err := r.cfg.ChainView.FilterBlock(
+			missingBlock.Hash,
+		)
+		if err != nil {
+			return err
+		}
+
+		err = r.updateGraphWithClosedChannels(
+			filteredBlock,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// updateGraphWithClosedChannels prunes the channel graph of closed channels
+// that are no longer needed.
+func (r *ChannelRouter) updateGraphWithClosedChannels(
+	chainUpdate *chainview.FilteredBlock) error {
+
+	// Once a new block arrives, we update our running track of the height
+	// of the chain tip.
+	blockHeight := chainUpdate.Height
+
+	atomic.StoreUint32(&r.bestHeight, blockHeight)
+	log.Infof("Pruning channel graph using block %v (height=%v)",
+		chainUpdate.Hash, blockHeight)
+
+	// We're only interested in all prior outputs that have been spent in
+	// the block, so collate all the referenced previous outpoints within
+	// each tx and input.
+	var spentOutputs []*wire.OutPoint
+	for _, tx := range chainUpdate.Transactions {
+		for _, txIn := range tx.TxIn {
+			spentOutputs = append(spentOutputs,
+				&txIn.PreviousOutPoint)
+		}
+	}
+
+	// With the spent outputs gathered, attempt to prune the channel graph,
+	// also passing in the hash+height of the block being pruned so the
+	// prune tip can be updated.
+	chansClosed, err := r.cfg.Graph.PruneGraph(spentOutputs,
+		&chainUpdate.Hash, chainUpdate.Height)
+	if err != nil {
+		log.Errorf("unable to prune routing table: %v", err)
+		return err
+	}
+
+	log.Infof("Block %v (height=%v) closed %v channels", chainUpdate.Hash,
+		blockHeight, len(chansClosed))
+
+	if len(chansClosed) == 0 {
+		return err
+	}
+
+	// Notify all currently registered clients of the newly closed channels.
+	closeSummaries := createCloseSummaries(blockHeight, chansClosed...)
+	r.notifyTopologyChange(&TopologyChange{
+		ClosedChannels: closeSummaries,
+	})
+
+	return nil
 }
 
 // assertNodeAnnFreshness returns a non-nil error if we have an announcement in
@@ -1172,11 +1395,29 @@ func (r *ChannelRouter) assertNodeAnnFreshness(node route.Vertex,
 	return nil
 }
 
+// addZombieEdge adds a channel that failed complete validation into the zombie
+// index so we can avoid having to re-validate it in the future.
+func (r *ChannelRouter) addZombieEdge(chanID uint64) error {
+	// If the edge fails validation we'll mark the edge itself as a zombie
+	// so we don't continue to request it. We use the "zero key" for both
+	// node pubkeys so this edge can't be resurrected.
+	var zeroKey [33]byte
+	err := r.cfg.Graph.MarkEdgeZombie(chanID, zeroKey, zeroKey)
+	if err != nil {
+		return fmt.Errorf("unable to mark spent chan(id=%v) as a "+
+			"zombie: %w", chanID, err)
+	}
+
+	return nil
+}
+
 // processUpdate processes a new relate authenticated channel/edge, node or
 // channel/edge update network update. If the update didn't affect the internal
 // state of the draft due to either being out of date, invalid, or redundant,
 // then error is returned.
-func (r *ChannelRouter) processUpdate(msg interface{}) error {
+func (r *ChannelRouter) processUpdate(msg interface{},
+	op ...batch.SchedulerOption) error {
+
 	switch msg := msg.(type) {
 	case *channeldb.LightningNode:
 		// Before we add the node to the database, we'll check to see
@@ -1187,7 +1428,7 @@ func (r *ChannelRouter) processUpdate(msg interface{}) error {
 			return err
 		}
 
-		if err := r.cfg.Graph.AddLightningNode(msg); err != nil {
+		if err := r.cfg.Graph.AddLightningNode(msg, op...); err != nil {
 			return errors.Errorf("unable to add node %v to the "+
 				"graph: %v", msg.PubKeyBytes, err)
 		}
@@ -1196,6 +1437,9 @@ func (r *ChannelRouter) processUpdate(msg interface{}) error {
 		r.stats.incNumNodeUpdates()
 
 	case *channeldb.ChannelEdgeInfo:
+		log.Debugf("Received ChannelEdgeInfo for channel %v",
+			msg.ChannelID)
+
 		// Prior to processing the announcement we first check if we
 		// already know of this channel, if so, then we can exit early.
 		_, _, exists, isZombie, err := r.cfg.Graph.HasChannelEdge(
@@ -1217,9 +1461,13 @@ func (r *ChannelRouter) processUpdate(msg interface{}) error {
 		// If AssumeChannelValid is present, then we are unable to
 		// perform any of the expensive checks below, so we'll
 		// short-circuit our path straight to adding the edge to our
-		// graph.
-		if r.cfg.AssumeChannelValid {
-			if err := r.cfg.Graph.AddChannelEdge(msg); err != nil {
+		// graph. If the passed ShortChannelID is an alias, then we'll
+		// skip validation as it will not map to a legitimate tx. This
+		// is not a DoS vector as only we can add an alias
+		// ChannelAnnouncement from the gossiper.
+		scid := lnwire.NewShortChanIDFromInt(msg.ChannelID)
+		if r.cfg.AssumeChannelValid || r.cfg.IsAlias(scid) {
+			if err := r.cfg.Graph.AddChannelEdge(msg, op...); err != nil {
 				return fmt.Errorf("unable to add edge: %v", err)
 			}
 			log.Tracef("New channel discovered! Link "+
@@ -1237,8 +1485,36 @@ func (r *ChannelRouter) processUpdate(msg interface{}) error {
 		channelID := lnwire.NewShortChanIDFromInt(msg.ChannelID)
 		fundingTx, err := r.fetchFundingTx(&channelID)
 		if err != nil {
-			return errors.Errorf("unable to fetch funding tx for "+
-				"chan_id=%v: %v", msg.ChannelID, err)
+			// In order to ensure we don't erroneously mark a
+			// channel as a zombie due to an RPC failure, we'll
+			// attempt to string match for the relevant errors.
+			//
+			// * btcd:
+			//    * https://github.com/btcsuite/btcd/blob/master/rpcserver.go#L1316
+			//    * https://github.com/btcsuite/btcd/blob/master/rpcserver.go#L1086
+			// * bitcoind:
+			//    * https://github.com/bitcoin/bitcoin/blob/7fcf53f7b4524572d1d0c9a5fdc388e87eb02416/src/rpc/blockchain.cpp#L770
+			//     * https://github.com/bitcoin/bitcoin/blob/7fcf53f7b4524572d1d0c9a5fdc388e87eb02416/src/rpc/blockchain.cpp#L954
+			switch {
+			case strings.Contains(err.Error(), "not found"):
+				fallthrough
+
+			case strings.Contains(err.Error(), "out of range"):
+				// If the funding transaction isn't found at
+				// all, then we'll mark the edge itself as a
+				// zombie so we don't continue to request it.
+				// We use the "zero key" for both node pubkeys
+				// so this edge can't be resurrected.
+				zErr := r.addZombieEdge(msg.ChannelID)
+				if zErr != nil {
+					return zErr
+				}
+
+			default:
+			}
+
+			return newErrf(ErrNoFundingTransaction, "unable to "+
+				"locate funding tx: %v", err)
 		}
 
 		// Recreate witness output to be sure that declared in channel
@@ -1267,7 +1543,14 @@ func (r *ChannelRouter) processUpdate(msg interface{}) error {
 			FundingTx:        fundingTx,
 		})
 		if err != nil {
-			return err
+			// Mark the edge as a zombie so we won't try to
+			// re-validate it on start up.
+			if err := r.addZombieEdge(msg.ChannelID); err != nil {
+				return err
+			}
+
+			return newErrf(ErrInvalidFundingOutput, "output "+
+				"failed validation: %w", err)
 		}
 
 		// Now that we have the funding outpoint of the channel, ensure
@@ -1282,7 +1565,14 @@ func (r *ChannelRouter) processUpdate(msg interface{}) error {
 			r.quit,
 		)
 		if err != nil {
-			return fmt.Errorf("unable to fetch utxo "+
+			if errors.Is(err, btcwallet.ErrOutputSpent) {
+				zErr := r.addZombieEdge(msg.ChannelID)
+				if zErr != nil {
+					return zErr
+				}
+			}
+
+			return newErrf(ErrChannelSpent, "unable to fetch utxo "+
 				"for chan_id=%v, chan_point=%v: %v",
 				msg.ChannelID, fundingPoint, err)
 		}
@@ -1291,11 +1581,11 @@ func (r *ChannelRouter) processUpdate(msg interface{}) error {
 		// after commitment fees are dynamic.
 		msg.Capacity = btcutil.Amount(chanUtxo.Value)
 		msg.ChannelPoint = *fundingPoint
-		if err := r.cfg.Graph.AddChannelEdge(msg); err != nil {
+		if err := r.cfg.Graph.AddChannelEdge(msg, op...); err != nil {
 			return errors.Errorf("unable to add edge: %v", err)
 		}
 
-		log.Tracef("New channel discovered! Link "+
+		log.Debugf("New channel discovered! Link "+
 			"connects %x and %x with ChannelPoint(%v): "+
 			"chan_id=%v, capacity=%v",
 			msg.NodeKey1Bytes, msg.NodeKey2Bytes,
@@ -1321,6 +1611,9 @@ func (r *ChannelRouter) processUpdate(msg interface{}) error {
 		}
 
 	case *channeldb.ChannelEdgePolicy:
+		log.Debugf("Received ChannelEdgePolicy for channel %v",
+			msg.ChannelID)
+
 		// We make sure to hold the mutex for this channel ID,
 		// such that no other goroutine is concurrently doing
 		// database accesses for the same channel ID.
@@ -1390,13 +1683,13 @@ func (r *ChannelRouter) processUpdate(msg interface{}) error {
 		// Now that we know this isn't a stale update, we'll apply the
 		// new edge policy to the proper directional edge within the
 		// channel graph.
-		if err = r.cfg.Graph.UpdateEdgePolicy(msg); err != nil {
+		if err = r.cfg.Graph.UpdateEdgePolicy(msg, op...); err != nil {
 			err := errors.Errorf("unable to add channel: %v", err)
 			log.Error(err)
 			return err
 		}
 
-		log.Tracef("New channel update applied: %v",
+		log.Debugf("New channel update applied: %v",
 			newLogClosure(func() string { return spew.Sdump(msg) }))
 		r.stats.incNumChannelUpdates()
 
@@ -1432,9 +1725,9 @@ func (r *ChannelRouter) fetchFundingTx(
 	// block.
 	numTxns := uint32(len(fundingBlock.Transactions))
 	if chanID.TxIndex > numTxns-1 {
-		return nil, fmt.Errorf("tx_index=#%v is out of range "+
-			"(max_index=%v), network_chan_id=%v", chanID.TxIndex,
-			numTxns-1, chanID)
+		return nil, fmt.Errorf("tx_index=#%v "+
+			"is out of range (max_index=%v), network_chan_id=%v",
+			chanID.TxIndex, numTxns-1, chanID)
 	}
 
 	return fundingBlock.Transactions[chanID.TxIndex], nil
@@ -1444,86 +1737,219 @@ func (r *ChannelRouter) fetchFundingTx(
 // error channel.
 type routingMsg struct {
 	msg interface{}
+	op  []batch.SchedulerOption
 	err chan error
+}
+
+// RouteRequest contains the parameters for a pathfinding request.
+type RouteRequest struct {
+	// Source is the node that the path originates from.
+	Source route.Vertex
+
+	// Target is the node that the path terminates at.
+	Target *route.Vertex
+
+	// Amount is the amount in millisatoshis to be delivered to the target
+	// node.
+	Amount lnwire.MilliSatoshi
+
+	// TimePreference expresses the caller's time preference for
+	// pathfinding.
+	TimePreference float64
+
+	// Restrictions provides a set of additional restrictions that the
+	// route must adhere to.
+	Restrictions *RestrictParams
+
+	// CustomRecords is a set of custom tlv records to include for the
+	// final hop.
+	CustomRecords record.CustomSet
+
+	// RouteHints contains an additional set of edges to include in our
+	// view of the graph.
+	RouteHints map[route.Vertex][]*channeldb.CachedEdgePolicy
+
+	// BlindedPayment contains an optional blinded path and parameters
+	// used to reach a target node via a blinded path.
+	BlindedPayment *BlindedPayment
+
+	// FinalExpiry is the cltv delta for the final hop.
+	FinalExpiry uint16
+}
+
+// NewRouteRequest produces a new route request.
+func NewRouteRequest(source route.Vertex, target *route.Vertex,
+	amount lnwire.MilliSatoshi, timePref float64,
+	restrictions *RestrictParams, customRecords record.CustomSet,
+	routeHints map[route.Vertex][]*channeldb.CachedEdgePolicy,
+	blindedPayment *BlindedPayment, finalExpiry uint16) *RouteRequest {
+
+	return &RouteRequest{
+		Source:         source,
+		Target:         target,
+		Amount:         amount,
+		TimePreference: timePref,
+		Restrictions:   restrictions,
+		CustomRecords:  customRecords,
+		RouteHints:     routeHints,
+		BlindedPayment: blindedPayment,
+		FinalExpiry:    finalExpiry,
+	}
+}
+
+// validate ensures that a route request is logically sane.
+func (r *RouteRequest) validate() error {
+	var (
+		blinded    = r.BlindedPayment != nil
+		routeHints = len(r.RouteHints) != 0
+		targetSet  = r.Target != nil
+	)
+
+	// Perform some additional validation for blinded paths.
+	if blinded {
+		if targetSet {
+			return errors.New("target node can't be set " +
+				"with blinded path")
+		}
+
+		if routeHints {
+			return errors.New("route hints can't be set " +
+				"with blinded path")
+		}
+
+		if err := r.BlindedPayment.Validate(); err != nil {
+			return fmt.Errorf("invalid blinded payment: %w", err)
+		}
+
+		return nil
+	}
+
+	// If we're not sending to a blinded path, a target node is required.
+	if !targetSet {
+		return errors.New("target node required")
+	}
+
+	return nil
+}
+
+// target returns the destination node. In the case where we have a blinded
+// payment, this will be the *blinded* node ID of the final node in the blinded
+// path.
+func (r *RouteRequest) target() route.Vertex {
+	if r.BlindedPayment != nil {
+		hops := r.BlindedPayment.BlindedPath.BlindedHops
+
+		// If we're dealing with an edge-case blinded path that just
+		// has an introduction node (first hop expected to be the intro
+		// hop), then we return the unblinded introduction node as our
+		// target.
+		if len(r.BlindedPayment.BlindedPath.BlindedHops) == 1 {
+			return route.NewVertex(
+				r.BlindedPayment.BlindedPath.IntroductionPoint,
+			)
+		}
+
+		return route.NewVertex(hops[len(hops)-1].NodePub)
+	}
+
+	return *r.Target
+}
+
+// hints returns a set of additional edges for pathfinding. This may either
+// be a set of hints for private channels or a "virtual" hop hint that
+// represents a blinded route. Our validation ensures that only one of these
+// fields is populated, so we can handle them simply here.
+func (r *RouteRequest) hints() map[route.Vertex][]*channeldb.CachedEdgePolicy {
+	if r.BlindedPayment != nil {
+		return r.BlindedPayment.toRouteHints()
+	}
+
+	return r.RouteHints
+}
+
+// blindedPath returns the request's blinded path, which is set if the payment
+// is to a blinded route.
+func (r *RouteRequest) blindedPath() *sphinx.BlindedPath {
+	if r.BlindedPayment == nil {
+		return nil
+	}
+
+	return r.BlindedPayment.BlindedPath
 }
 
 // FindRoute attempts to query the ChannelRouter for the optimum path to a
 // particular target destination to which it is able to send `amt` after
 // factoring in channel capacities and cumulative fees along the route.
-func (r *ChannelRouter) FindRoute(source, target route.Vertex,
-	amt lnwire.MilliSatoshi, restrictions *RestrictParams,
-	destCustomRecords record.CustomSet,
-	routeHints map[route.Vertex][]*channeldb.ChannelEdgePolicy,
-	finalExpiry uint16) (*route.Route, error) {
+func (r *ChannelRouter) FindRoute(req *RouteRequest) (*route.Route, float64,
+	error) {
 
-	log.Debugf("Searching for path to %v, sending %v", target, amt)
+	if err := req.validate(); err != nil {
+		return nil, 0, err
+	}
+
+	log.Debugf("Searching for path to %v, sending %v", req.target(),
+		req.Amount)
 
 	// We'll attempt to obtain a set of bandwidth hints that can help us
 	// eliminate certain routes early on in the path finding process.
-	bandwidthHints, err := generateBandwidthHints(
-		r.selfNode, r.cfg.QueryBandwidth,
+	bandwidthHints, err := newBandwidthManager(
+		r.cachedGraph, r.selfNode.PubKeyBytes, r.cfg.GetLink,
 	)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	// We'll fetch the current block height so we can properly calculate the
 	// required HTLC time locks within the route.
 	_, currentHeight, err := r.cfg.Chain.GetBestBlock()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	// Now that we know the destination is reachable within the graph, we'll
 	// execute our path finding algorithm.
-	finalHtlcExpiry := currentHeight + int32(finalExpiry)
+	finalHtlcExpiry := currentHeight + int32(req.FinalExpiry)
 
-	routingTx, err := newDbRoutingTx(r.cfg.Graph)
-	if err != nil {
-		return nil, err
+	// Validate time preference.
+	timePref := req.TimePreference
+	if timePref < -1 || timePref > 1 {
+		return nil, 0, errors.New("time preference out of range")
 	}
-	defer func() {
-		err := routingTx.close()
-		if err != nil {
-			log.Errorf("Error closing db tx: %v", err)
-		}
-	}()
 
-	path, err := findPath(
+	path, probability, err := findPath(
 		&graphParams{
-			additionalEdges: routeHints,
+			additionalEdges: req.hints(),
 			bandwidthHints:  bandwidthHints,
-			graph:           routingTx,
+			graph:           r.cachedGraph,
 		},
-		restrictions,
-		&r.cfg.PathFindingConfig,
-		source, target, amt, finalHtlcExpiry,
+		req.Restrictions, &r.cfg.PathFindingConfig, req.Source,
+		req.target(), req.Amount, req.TimePreference, finalHtlcExpiry,
 	)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	// Create the route with absolute time lock values.
 	route, err := newRoute(
-		source, path, uint32(currentHeight),
+		req.Source, path, uint32(currentHeight),
 		finalHopParams{
-			amt:       amt,
-			totalAmt:  amt,
-			cltvDelta: finalExpiry,
-			records:   destCustomRecords,
-		},
+			amt:       req.Amount,
+			totalAmt:  req.Amount,
+			cltvDelta: req.FinalExpiry,
+			records:   req.CustomRecords,
+		}, req.blindedPath(),
 	)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	go log.Tracef("Obtained path to send %v to %x: %v",
-		amt, target, newLogClosure(func() string {
+		req.Amount, req.target(), newLogClosure(func() string {
 			return spew.Sdump(route)
 		}),
 	)
 
-	return route, nil
+	return route, probability, nil
 }
 
 // generateNewSessionKey generates a new ephemeral private key to be used for a
@@ -1533,7 +1959,7 @@ func generateNewSessionKey() (*btcec.PrivateKey, error) {
 	// any replay.
 	//
 	// TODO(roasbeef): add more sources of randomness?
-	return btcec.NewPrivateKey(btcec.S256())
+	return btcec.NewPrivateKey()
 }
 
 // generateSphinxPacket generates then encodes a sphinx packet which encodes
@@ -1544,7 +1970,7 @@ func generateSphinxPacket(rt *route.Route, paymentHash []byte,
 	sessionKey *btcec.PrivateKey) ([]byte, *sphinx.Circuit, error) {
 
 	// Now that we know we have an actual route, we'll map the route into a
-	// sphinx payument path which includes per-hop paylods for each hop
+	// sphinx payment path which includes per-hop payloads for each hop
 	// that give each node within the route the necessary information
 	// (fees, CLTV value, etc) to properly forward the payment.
 	sphinxPath, err := rt.ToSphinxPath()
@@ -1557,7 +1983,6 @@ func generateSphinxPacket(rt *route.Route, paymentHash []byte,
 			path := make([]sphinx.OnionHop, sphinxPath.TrueRouteLength())
 			for i := range path {
 				hopCopy := sphinxPath[i]
-				hopCopy.NodePub.Curve = nil
 				path[i] = hopCopy
 			}
 			return spew.Sdump(path)
@@ -1587,7 +2012,6 @@ func generateSphinxPacket(rt *route.Route, paymentHash []byte,
 			// internal curve here in order to keep the logs from
 			// getting noisy.
 			key := *sphinxPacket.EphemeralKey
-			key.Curve = nil
 			packetCopy := *sphinxPacket
 			packetCopy.EphemeralKey = &key
 			return spew.Sdump(packetCopy)
@@ -1619,9 +2043,13 @@ type LightningPayment struct {
 	// complete this payment.
 	CltvLimit uint32
 
-	// PaymentHash is the r-hash value to use within the HTLC extended to
-	// the first hop.
-	PaymentHash [32]byte
+	// paymentHash is the r-hash value to use within the HTLC extended to
+	// the first hop. This won't be set for AMP payments.
+	paymentHash *lntypes.Hash
+
+	// amp is an optional field that is set if and only if this is am AMP
+	// payment.
+	amp *AMPOptions
 
 	// FinalCLTVDelta is the CTLV expiry delta to use for the _final_ hop
 	// in the route. This means that the final hop will have a CLTV delta
@@ -1680,6 +2108,63 @@ type LightningPayment struct {
 	// MaxParts is the maximum number of partial payments that may be used
 	// to complete the full amount.
 	MaxParts uint32
+
+	// MaxShardAmt is the largest shard that we'll attempt to split using.
+	// If this field is set, and we need to split, rather than attempting
+	// half of the original payment amount, we'll use this value if half
+	// the payment amount is greater than it.
+	//
+	// NOTE: This field is _optional_.
+	MaxShardAmt *lnwire.MilliSatoshi
+
+	// TimePref is the time preference for this payment. Set to -1 to
+	// optimize for fees only, to 1 to optimize for reliability only or a
+	// value in between for a mix.
+	TimePref float64
+
+	// Metadata is additional data that is sent along with the payment to
+	// the payee.
+	Metadata []byte
+}
+
+// AMPOptions houses information that must be known in order to send an AMP
+// payment.
+type AMPOptions struct {
+	SetID     [32]byte
+	RootShare [32]byte
+}
+
+// SetPaymentHash sets the given hash as the payment's overall hash. This
+// should only be used for non-AMP payments.
+func (l *LightningPayment) SetPaymentHash(hash lntypes.Hash) error {
+	if l.amp != nil {
+		return fmt.Errorf("cannot set payment hash for AMP payment")
+	}
+
+	l.paymentHash = &hash
+	return nil
+}
+
+// SetAMP sets the given AMP options for the payment.
+func (l *LightningPayment) SetAMP(amp *AMPOptions) error {
+	if l.paymentHash != nil {
+		return fmt.Errorf("cannot set amp options for payment " +
+			"with payment hash")
+	}
+
+	l.amp = amp
+	return nil
+}
+
+// Identifier returns a 32-byte slice that uniquely identifies this single
+// payment. For non-AMP payments this will be the payment hash, for AMP
+// payments this will be the used SetID.
+func (l *LightningPayment) Identifier() [32]byte {
+	if l.amp != nil {
+		return l.amp.SetID
+	}
+
+	return *l.paymentHash
 }
 
 // SendPayment attempts to send a payment as described within the passed
@@ -1692,7 +2177,7 @@ type LightningPayment struct {
 func (r *ChannelRouter) SendPayment(payment *LightningPayment) ([32]byte,
 	*route.Route, error) {
 
-	paySession, err := r.preparePayment(payment)
+	paySession, shardTracker, err := r.preparePayment(payment)
 	if err != nil {
 		return [32]byte{}, nil, err
 	}
@@ -1703,15 +2188,15 @@ func (r *ChannelRouter) SendPayment(payment *LightningPayment) ([32]byte,
 	// Since this is the first time this payment is being made, we pass nil
 	// for the existing attempt.
 	return r.sendPayment(
-		payment.Amount, payment.FeeLimit, payment.PaymentHash,
-		payment.PayAttemptTimeout, paySession,
+		payment.FeeLimit, payment.Identifier(),
+		payment.PayAttemptTimeout, paySession, shardTracker,
 	)
 }
 
 // SendPaymentAsync is the non-blocking version of SendPayment. The payment
 // result needs to be retrieved via the control tower.
 func (r *ChannelRouter) SendPaymentAsync(payment *LightningPayment) error {
-	paySession, err := r.preparePayment(payment)
+	paySession, shardTracker, err := r.preparePayment(payment)
 	if err != nil {
 		return err
 	}
@@ -1726,12 +2211,12 @@ func (r *ChannelRouter) SendPaymentAsync(payment *LightningPayment) error {
 			spewPayment(payment))
 
 		_, _, err := r.sendPayment(
-			payment.Amount, payment.FeeLimit, payment.PaymentHash,
-			payment.PayAttemptTimeout, paySession,
+			payment.FeeLimit, payment.Identifier(),
+			payment.PayAttemptTimeout, paySession, shardTracker,
 		)
 		if err != nil {
-			log.Errorf("Payment with hash %x failed: %v",
-				payment.PaymentHash, err)
+			log.Errorf("Payment %x failed: %v",
+				payment.Identifier(), err)
 		}
 	}()
 
@@ -1749,7 +2234,6 @@ func spewPayment(payment *LightningPayment) logClosure {
 			var hopHints []zpay32.HopHint
 			for _, hopHint := range routeHint {
 				h := hopHint.Copy()
-				h.NodeID.Curve = nil
 				hopHints = append(hopHints, h)
 			}
 			routeHints = append(routeHints, hopHints)
@@ -1763,14 +2247,14 @@ func spewPayment(payment *LightningPayment) logClosure {
 // preparePayment creates the payment session and registers the payment with the
 // control tower.
 func (r *ChannelRouter) preparePayment(payment *LightningPayment) (
-	PaymentSession, error) {
+	PaymentSession, shards.ShardTracker, error) {
 
 	// Before starting the HTLC routing attempt, we'll create a fresh
 	// payment session which will report our errors back to mission
 	// control.
 	paySession, err := r.cfg.SessionSource.NewPaymentSession(payment)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Record this payment hash with the ControlTower, ensuring it is not
@@ -1778,27 +2262,63 @@ func (r *ChannelRouter) preparePayment(payment *LightningPayment) (
 	//
 	// TODO(roasbeef): store records as part of creation info?
 	info := &channeldb.PaymentCreationInfo{
-		PaymentHash:    payment.PaymentHash,
-		Value:          payment.Amount,
-		CreationTime:   r.cfg.Clock.Now(),
-		PaymentRequest: payment.PaymentRequest,
+		PaymentIdentifier: payment.Identifier(),
+		Value:             payment.Amount,
+		CreationTime:      r.cfg.Clock.Now(),
+		PaymentRequest:    payment.PaymentRequest,
 	}
 
-	err = r.cfg.Control.InitPayment(payment.PaymentHash, info)
+	// Create a new ShardTracker that we'll use during the life cycle of
+	// this payment.
+	var shardTracker shards.ShardTracker
+	switch {
+	// If this is an AMP payment, we'll use the AMP shard tracker.
+	case payment.amp != nil:
+		shardTracker = amp.NewShardTracker(
+			payment.amp.RootShare, payment.amp.SetID,
+			*payment.PaymentAddr, payment.Amount,
+		)
+
+	// Otherwise we'll use the simple tracker that will map each attempt to
+	// the same payment hash.
+	default:
+		shardTracker = shards.NewSimpleShardTracker(
+			payment.Identifier(), nil,
+		)
+	}
+
+	err = r.cfg.Control.InitPayment(payment.Identifier(), info)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return paySession, nil
+	return paySession, shardTracker, nil
 }
 
-// SendToRoute attempts to send a payment with the given hash through the
+// SendToRoute sends a payment using the provided route and fails the payment
+// when an error is returned from the attempt.
+func (r *ChannelRouter) SendToRoute(htlcHash lntypes.Hash,
+	rt *route.Route) (*channeldb.HTLCAttempt, error) {
+
+	return r.sendToRoute(htlcHash, rt, false)
+}
+
+// SendToRouteSkipTempErr sends a payment using the provided route and fails
+// the payment ONLY when a terminal error is returned from the attempt.
+func (r *ChannelRouter) SendToRouteSkipTempErr(htlcHash lntypes.Hash,
+	rt *route.Route) (*channeldb.HTLCAttempt, error) {
+
+	return r.sendToRoute(htlcHash, rt, true)
+}
+
+// sendToRoute attempts to send a payment with the given hash through the
 // provided route. This function is blocking and will return the attempt
 // information as it is stored in the database. For a successful htlc, this
 // information will contain the preimage. If an error occurs after the attempt
-// was initiated, both return values will be non-nil.
-func (r *ChannelRouter) SendToRoute(hash lntypes.Hash, rt *route.Route) (
-	*channeldb.HTLCAttempt, error) {
+// was initiated, both return values will be non-nil. If skipTempErr is true,
+// the payment won't be failed unless a terminal error has occurred.
+func (r *ChannelRouter) sendToRoute(htlcHash lntypes.Hash, rt *route.Route,
+	skipTempErr bool) (*channeldb.HTLCAttempt, error) {
 
 	// Calculate amount paid to receiver.
 	amt := rt.ReceiverAmt()
@@ -1811,16 +2331,27 @@ func (r *ChannelRouter) SendToRoute(hash lntypes.Hash, rt *route.Route) (
 		amt = mpp.TotalMsat()
 	}
 
+	// For non-AMP payments the overall payment identifier will be the same
+	// hash as used for this HTLC.
+	paymentIdentifier := htlcHash
+
+	// For AMP-payments, we'll use the setID as the unique ID for the
+	// overall payment.
+	amp := finalHop.AMP
+	if amp != nil {
+		paymentIdentifier = amp.SetID()
+	}
+
 	// Record this payment hash with the ControlTower, ensuring it is not
 	// already in-flight.
 	info := &channeldb.PaymentCreationInfo{
-		PaymentHash:    hash,
-		Value:          amt,
-		CreationTime:   r.cfg.Clock.Now(),
-		PaymentRequest: nil,
+		PaymentIdentifier: paymentIdentifier,
+		Value:             amt,
+		CreationTime:      r.cfg.Clock.Now(),
+		PaymentRequest:    nil,
 	}
 
-	err := r.cfg.Control.InitPayment(hash, info)
+	err := r.cfg.Control.InitPayment(paymentIdentifier, info)
 	switch {
 	// If this is an MPP attempt and the hash is already registered with
 	// the database, we can go on to launch the shard.
@@ -1831,20 +2362,28 @@ func (r *ChannelRouter) SendToRoute(hash lntypes.Hash, rt *route.Route) (
 		return nil, err
 	}
 
-	log.Tracef("Dispatching SendToRoute for hash %v: %v",
-		hash, newLogClosure(func() string {
+	log.Tracef("Dispatching SendToRoute for HTLC hash %v: %v",
+		htlcHash, newLogClosure(func() string {
 			return spew.Sdump(rt)
 		}),
 	)
 
+	// Since the HTLC hashes and preimages are specified manually over the
+	// RPC for SendToRoute requests, we don't have to worry about creating
+	// a ShardTracker that can generate hashes for AMP payments. Instead we
+	// create a simple tracker that can just return the hash for the single
+	// shard we'll now launch.
+	shardTracker := shards.NewSimpleShardTracker(htlcHash, nil)
+
 	// Launch a shard along the given route.
 	sh := &shardHandler{
-		router:      r,
-		paymentHash: hash,
+		router:       r,
+		identifier:   paymentIdentifier,
+		shardTracker: shardTracker,
 	}
 
 	var shardError error
-	attempt, outcome, err := sh.launchShard(rt)
+	attempt, outcome, err := sh.launchShard(rt, false)
 
 	// With SendToRoute, it can happen that the route exceeds protocol
 	// constraints. Mark the payment as failed with an internal error.
@@ -1852,10 +2391,10 @@ func (r *ChannelRouter) SendToRoute(hash lntypes.Hash, rt *route.Route) (
 		err == sphinx.ErrMaxRoutingInfoSizeExceeded {
 
 		log.Debugf("Invalid route provided for payment %x: %v",
-			hash, err)
+			paymentIdentifier, err)
 
-		controlErr := r.cfg.Control.Fail(
-			hash, channeldb.FailureReasonError,
+		controlErr := r.cfg.Control.FailPayment(
+			paymentIdentifier, channeldb.FailureReasonError,
 		)
 		if controlErr != nil {
 			return nil, controlErr
@@ -1895,15 +2434,24 @@ func (r *ChannelRouter) SendToRoute(hash lntypes.Hash, rt *route.Route) (
 	// mark the payment failed with the control tower immediately. Process
 	// the error to check if it maps into a terminal error code, if not use
 	// a generic NO_ROUTE error.
-	reason := r.processSendError(
-		attempt.AttemptID, &attempt.Route, shardError,
-	)
-	if reason == nil {
-		r := channeldb.FailureReasonNoRoute
-		reason = &r
-	}
+	var failureReason *channeldb.FailureReason
+	err = sh.handleSendError(attempt, shardError)
 
-	err = r.cfg.Control.Fail(hash, *reason)
+	switch {
+	// If a non-terminal error is returned and `skipTempErr` is false, then
+	// we'll use the normal no route error.
+	case err == nil && !skipTempErr:
+		err = r.cfg.Control.FailPayment(
+			paymentIdentifier, channeldb.FailureReasonNoRoute,
+		)
+
+	// If this is a failure reason, then we'll apply the failure directly
+	// to the control tower, and return the normal response to the caller.
+	case goErrors.As(err, &failureReason):
+		err = r.cfg.Control.FailPayment(
+			paymentIdentifier, *failureReason,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1927,10 +2475,10 @@ func (r *ChannelRouter) SendToRoute(hash lntypes.Hash, rt *route.Route) (
 // carry out its execution. After restarts it is safe, and assumed, that the
 // router will call this method for every payment still in-flight according to
 // the ControlTower.
-func (r *ChannelRouter) sendPayment(
-	totalAmt, feeLimit lnwire.MilliSatoshi, paymentHash lntypes.Hash,
-	timeout time.Duration,
-	paySession PaymentSession) ([32]byte, *route.Route, error) {
+func (r *ChannelRouter) sendPayment(feeLimit lnwire.MilliSatoshi,
+	identifier lntypes.Hash, timeout time.Duration,
+	paySession PaymentSession,
+	shardTracker shards.ShardTracker) ([32]byte, *route.Route, error) {
 
 	// We'll also fetch the current block height so we can properly
 	// calculate the required HTLC time locks within the route.
@@ -1943,10 +2491,10 @@ func (r *ChannelRouter) sendPayment(
 	// can resume the payment from the current state.
 	p := &paymentLifecycle{
 		router:        r,
-		totalAmount:   totalAmt,
 		feeLimit:      feeLimit,
-		paymentHash:   paymentHash,
+		identifier:    identifier,
 		paySession:    paySession,
+		shardTracker:  shardTracker,
 		currentHeight: currentHeight,
 	}
 
@@ -1959,121 +2507,6 @@ func (r *ChannelRouter) sendPayment(
 
 	return p.resumePayment()
 
-}
-
-// tryApplyChannelUpdate tries to apply a channel update present in the failure
-// message if any.
-func (r *ChannelRouter) tryApplyChannelUpdate(rt *route.Route,
-	errorSourceIdx int, failure lnwire.FailureMessage) error {
-
-	// It makes no sense to apply our own channel updates.
-	if errorSourceIdx == 0 {
-		log.Errorf("Channel update of ourselves received")
-
-		return nil
-	}
-
-	// Extract channel update if the error contains one.
-	update := r.extractChannelUpdate(failure)
-	if update == nil {
-		return nil
-	}
-
-	// Parse pubkey to allow validation of the channel update. This should
-	// always succeed, otherwise there is something wrong in our
-	// implementation. Therefore return an error.
-	errVertex := rt.Hops[errorSourceIdx-1].PubKeyBytes
-	errSource, err := btcec.ParsePubKey(
-		errVertex[:], btcec.S256(),
-	)
-	if err != nil {
-		log.Errorf("Cannot parse pubkey: idx=%v, pubkey=%v",
-			errorSourceIdx, errVertex)
-
-		return err
-	}
-
-	// Apply channel update.
-	if !r.applyChannelUpdate(update, errSource) {
-		log.Debugf("Invalid channel update received: node=%v",
-			errVertex)
-	}
-
-	return nil
-}
-
-// processSendError analyzes the error for the payment attempt received from the
-// switch and updates mission control and/or channel policies. Depending on the
-// error type, this error is either the final outcome of the payment or we need
-// to continue with an alternative route. A final outcome is indicated by a
-// non-nil return value.
-func (r *ChannelRouter) processSendError(paymentID uint64, rt *route.Route,
-	sendErr error) *channeldb.FailureReason {
-
-	internalErrorReason := channeldb.FailureReasonError
-
-	reportFail := func(srcIdx *int,
-		msg lnwire.FailureMessage) *channeldb.FailureReason {
-
-		// Report outcome to mission control.
-		reason, err := r.cfg.MissionControl.ReportPaymentFail(
-			paymentID, rt, srcIdx, msg,
-		)
-		if err != nil {
-			log.Errorf("Error reporting payment result to mc: %v",
-				err)
-
-			return &internalErrorReason
-		}
-
-		return reason
-	}
-
-	if sendErr == htlcswitch.ErrUnreadableFailureMessage {
-		log.Tracef("Unreadable failure when sending htlc")
-
-		return reportFail(nil, nil)
-	}
-
-	// If the error is a ClearTextError, we have received a valid wire
-	// failure message, either from our own outgoing link or from a node
-	// down the route. If the error is not related to the propagation of
-	// our payment, we can stop trying because an internal error has
-	// occurred.
-	rtErr, ok := sendErr.(htlcswitch.ClearTextError)
-	if !ok {
-		return &internalErrorReason
-	}
-
-	// failureSourceIdx is the index of the node that the failure occurred
-	// at. If the ClearTextError received is not a ForwardingError the
-	// payment error occurred at our node, so we leave this value as 0
-	// to indicate that the failure occurred locally. If the error is a
-	// ForwardingError, it did not originate at our node, so we set
-	// failureSourceIdx to the index of the node where the failure occurred.
-	failureSourceIdx := 0
-	source, ok := rtErr.(*htlcswitch.ForwardingError)
-	if ok {
-		failureSourceIdx = source.FailureSourceIdx
-	}
-
-	// Extract the wire failure and apply channel update if it contains one.
-	// If we received an unknown failure message from a node along the
-	// route, the failure message will be nil.
-	failureMessage := rtErr.WireMessage()
-	if failureMessage != nil {
-		err := r.tryApplyChannelUpdate(
-			rt, failureSourceIdx, failureMessage,
-		)
-		if err != nil {
-			return &internalErrorReason
-		}
-	}
-
-	log.Tracef("Node=%v reported failure when sending htlc",
-		failureSourceIdx)
-
-	return reportFail(&failureSourceIdx, failureMessage)
 }
 
 // extractChannelUpdate examines the error and extracts the channel update.
@@ -2100,17 +2533,33 @@ func (r *ChannelRouter) extractChannelUpdate(
 }
 
 // applyChannelUpdate validates a channel update and if valid, applies it to the
-// database. It returns a bool indicating whether the updates was successful.
-func (r *ChannelRouter) applyChannelUpdate(msg *lnwire.ChannelUpdate,
-	pubKey *btcec.PublicKey) bool {
-
+// database. It returns a bool indicating whether the updates were successful.
+func (r *ChannelRouter) applyChannelUpdate(msg *lnwire.ChannelUpdate) bool {
 	ch, _, _, err := r.GetChannelByID(msg.ShortChannelID)
 	if err != nil {
 		log.Errorf("Unable to retrieve channel by id: %v", err)
 		return false
 	}
 
-	if err := ValidateChannelUpdateAnn(pubKey, ch.Capacity, msg); err != nil {
+	var pubKey *btcec.PublicKey
+
+	switch msg.ChannelFlags & lnwire.ChanUpdateDirection {
+	case 0:
+		pubKey, _ = ch.NodeKey1()
+
+	case 1:
+		pubKey, _ = ch.NodeKey2()
+	}
+
+	// Exit early if the pubkey cannot be decided.
+	if pubKey == nil {
+		log.Errorf("Unable to decide pubkey with ChannelFlags=%v",
+			msg.ChannelFlags)
+		return false
+	}
+
+	err = ValidateChannelUpdateAnn(pubKey, ch.Capacity, msg)
+	if err != nil {
 		log.Errorf("Unable to validate channel update: %v", err)
 		return false
 	}
@@ -2140,9 +2589,12 @@ func (r *ChannelRouter) applyChannelUpdate(msg *lnwire.ChannelUpdate,
 // be ignored.
 //
 // NOTE: This method is part of the ChannelGraphSource interface.
-func (r *ChannelRouter) AddNode(node *channeldb.LightningNode) error {
+func (r *ChannelRouter) AddNode(node *channeldb.LightningNode,
+	op ...batch.SchedulerOption) error {
+
 	rMsg := &routingMsg{
 		msg: node,
+		op:  op,
 		err: make(chan error, 1),
 	}
 
@@ -2164,9 +2616,12 @@ func (r *ChannelRouter) AddNode(node *channeldb.LightningNode) error {
 // in construction of payment path.
 //
 // NOTE: This method is part of the ChannelGraphSource interface.
-func (r *ChannelRouter) AddEdge(edge *channeldb.ChannelEdgeInfo) error {
+func (r *ChannelRouter) AddEdge(edge *channeldb.ChannelEdgeInfo,
+	op ...batch.SchedulerOption) error {
+
 	rMsg := &routingMsg{
 		msg: edge,
+		op:  op,
 		err: make(chan error, 1),
 	}
 
@@ -2187,9 +2642,12 @@ func (r *ChannelRouter) AddEdge(edge *channeldb.ChannelEdgeInfo) error {
 // considered as not fully constructed.
 //
 // NOTE: This method is part of the ChannelGraphSource interface.
-func (r *ChannelRouter) UpdateEdge(update *channeldb.ChannelEdgePolicy) error {
+func (r *ChannelRouter) UpdateEdge(update *channeldb.ChannelEdgePolicy,
+	op ...batch.SchedulerOption) error {
+
 	rMsg := &routingMsg{
 		msg: update,
+		op:  op,
 		err: make(chan error, 1),
 	}
 
@@ -2214,6 +2672,13 @@ func (r *ChannelRouter) CurrentBlockHeight() (uint32, error) {
 	return uint32(height), err
 }
 
+// SyncedHeight returns the block height to which the router subsystem currently
+// is synced to. This can differ from the above chain height if the goroutine
+// responsible for processing the blocks isn't yet up to speed.
+func (r *ChannelRouter) SyncedHeight() uint32 {
+	return atomic.LoadUint32(&r.bestHeight)
+}
+
 // GetChannelByID return the channel by the channel id.
 //
 // NOTE: This method is part of the ChannelGraphSource interface.
@@ -2230,8 +2695,10 @@ func (r *ChannelRouter) GetChannelByID(chanID lnwire.ShortChannelID) (
 // within the graph.
 //
 // NOTE: This method is part of the ChannelGraphSource interface.
-func (r *ChannelRouter) FetchLightningNode(node route.Vertex) (*channeldb.LightningNode, error) {
-	return r.cfg.Graph.FetchLightningNode(nil, node)
+func (r *ChannelRouter) FetchLightningNode(
+	node route.Vertex) (*channeldb.LightningNode, error) {
+
+	return r.cfg.Graph.FetchLightningNode(node)
 }
 
 // ForEachNode is used to iterate over every node in router topology.
@@ -2247,28 +2714,19 @@ func (r *ChannelRouter) ForEachNode(cb func(*channeldb.LightningNode) error) err
 // the router.
 //
 // NOTE: This method is part of the ChannelGraphSource interface.
-func (r *ChannelRouter) ForAllOutgoingChannels(cb func(*channeldb.ChannelEdgeInfo,
-	*channeldb.ChannelEdgePolicy) error) error {
+func (r *ChannelRouter) ForAllOutgoingChannels(cb func(kvdb.RTx,
+	*channeldb.ChannelEdgeInfo, *channeldb.ChannelEdgePolicy) error) error {
 
-	return r.selfNode.ForEachChannel(nil, func(_ kvdb.RTx, c *channeldb.ChannelEdgeInfo,
+	return r.selfNode.ForEachChannel(nil, func(tx kvdb.RTx,
+		c *channeldb.ChannelEdgeInfo,
 		e, _ *channeldb.ChannelEdgePolicy) error {
 
 		if e == nil {
 			return fmt.Errorf("channel from self node has no policy")
 		}
 
-		return cb(c, e)
+		return cb(tx, c, e)
 	})
-}
-
-// ForEachChannel is used to iterate over every known edge (channel) within our
-// view of the channel graph.
-//
-// NOTE: This method is part of the ChannelGraphSource interface.
-func (r *ChannelRouter) ForEachChannel(cb func(chanInfo *channeldb.ChannelEdgeInfo,
-	e1, e2 *channeldb.ChannelEdgePolicy) error) error {
-
-	return r.cfg.Graph.ForEachChannel(cb)
 }
 
 // AddProof updates the channel edge info with proof which is needed to
@@ -2291,10 +2749,18 @@ func (r *ChannelRouter) AddProof(chanID lnwire.ShortChannelID,
 // target node with a more recent timestamp.
 //
 // NOTE: This method is part of the ChannelGraphSource interface.
-func (r *ChannelRouter) IsStaleNode(node route.Vertex, timestamp time.Time) bool {
+func (r *ChannelRouter) IsStaleNode(node route.Vertex,
+	timestamp time.Time) bool {
+
 	// If our attempt to assert that the node announcement is fresh fails,
 	// then we know that this is actually a stale announcement.
-	return r.assertNodeAnnFreshness(node, timestamp) != nil
+	err := r.assertNodeAnnFreshness(node, timestamp)
+	if err != nil {
+		log.Debugf("Checking stale node %x got %v", node, err)
+		return true
+	}
+
+	return false
 }
 
 // IsPublicNode determines whether the given vertex is seen as a public node in
@@ -2314,7 +2780,7 @@ func (r *ChannelRouter) IsKnownEdge(chanID lnwire.ShortChannelID) bool {
 	return exists || isZombie
 }
 
-// IsStaleEdgePolicy returns true if the graph soruce has a channel edge for
+// IsStaleEdgePolicy returns true if the graph source has a channel edge for
 // the passed channel ID (and flags) that have a more recent timestamp.
 //
 // NOTE: This method is part of the ChannelGraphSource interface.
@@ -2324,6 +2790,7 @@ func (r *ChannelRouter) IsStaleEdgePolicy(chanID lnwire.ShortChannelID,
 	edge1Timestamp, edge2Timestamp, exists, isZombie, err :=
 		r.cfg.Graph.HasChannelEdge(chanID.ToUint64())
 	if err != nil {
+		log.Debugf("Check stale edge policy got error: %v", err)
 		return false
 
 	}
@@ -2378,41 +2845,6 @@ func (r *ChannelRouter) MarkEdgeLive(chanID lnwire.ShortChannelID) error {
 	return r.cfg.Graph.MarkEdgeLive(chanID.ToUint64())
 }
 
-// generateBandwidthHints is a helper function that's utilized the main
-// findPath function in order to obtain hints from the lower layer w.r.t to the
-// available bandwidth of edges on the network. Currently, we'll only obtain
-// bandwidth hints for the edges we directly have open ourselves. Obtaining
-// these hints allows us to reduce the number of extraneous attempts as we can
-// skip channels that are inactive, or just don't have enough bandwidth to
-// carry the payment.
-func generateBandwidthHints(sourceNode *channeldb.LightningNode,
-	queryBandwidth func(*channeldb.ChannelEdgeInfo) lnwire.MilliSatoshi) (map[uint64]lnwire.MilliSatoshi, error) {
-
-	// First, we'll collect the set of outbound edges from the target
-	// source node.
-	var localChans []*channeldb.ChannelEdgeInfo
-	err := sourceNode.ForEachChannel(nil, func(tx kvdb.RTx,
-		edgeInfo *channeldb.ChannelEdgeInfo,
-		_, _ *channeldb.ChannelEdgePolicy) error {
-
-		localChans = append(localChans, edgeInfo)
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	// Now that we have all of our outbound edges, we'll populate the set
-	// of bandwidth hints, querying the lower switch layer for the most up
-	// to date values.
-	bandwidthHints := make(map[uint64]lnwire.MilliSatoshi)
-	for _, localChan := range localChans {
-		bandwidthHints[localChan.ChannelID] = queryBandwidth(localChan)
-	}
-
-	return bandwidthHints, nil
-}
-
 // ErrNoChannel is returned when a route cannot be built because there are no
 // channels that satisfy all requirements.
 type ErrNoChannel struct {
@@ -2449,8 +2881,8 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 
 	// We'll attempt to obtain a set of bandwidth hints that helps us select
 	// the best outgoing channel to use in case no outgoing channel is set.
-	bandwidthHints, err := generateBandwidthHints(
-		r.selfNode, r.cfg.QueryBandwidth,
+	bandwidthHints, err := newBandwidthManager(
+		r.cachedGraph, r.selfNode.PubKeyBytes, r.cfg.GetLink,
 	)
 	if err != nil {
 		return nil, err
@@ -2463,9 +2895,8 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 		return nil, err
 	}
 
-	// Allocate a list that will contain the unified policies for this
-	// route.
-	edges := make([]*unifiedPolicy, len(hops))
+	// Allocate a list that will contain the edge unifiers for this route.
+	unifiers := make([]*edgeUnifier, len(hops))
 
 	var runningAmt lnwire.MilliSatoshi
 	if useMinAmt {
@@ -2479,18 +2910,6 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 		// delivers exactly this amount to the final destination.
 		runningAmt = *amt
 	}
-
-	// Open a transaction to execute the graph queries in.
-	routingTx, err := newDbRoutingTx(r.cfg.Graph)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		err := routingTx.close()
-		if err != nil {
-			log.Errorf("Error closing db tx: %v", err)
-		}
-	}()
 
 	// Traverse hops backwards to accumulate fees in the running amounts.
 	source := r.selfNode.PubKeyBytes
@@ -2506,18 +2925,19 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 
 		localChan := i == 0
 
-		// Build unified policies for this hop based on the channels
-		// known in the graph.
-		u := newUnifiedPolicies(source, toNode, outgoingChans)
+		// Build unified edges for this hop based on the channels known
+		// in the graph.
+		u := newNodeEdgeUnifier(source, toNode, outgoingChans)
 
-		err := u.addGraphPolicies(routingTx)
+		err := u.addGraphPolicies(r.cachedGraph)
 		if err != nil {
 			return nil, err
 		}
 
 		// Exit if there are no channels.
-		unifiedPolicy, ok := u.policies[fromNode]
+		edgeUnifier, ok := u.edgeUnifiers[fromNode]
 		if !ok {
+			log.Errorf("Cannot find policy for node %v", fromNode)
 			return nil, ErrNoChannel{
 				fromNode: fromNode,
 				position: i,
@@ -2526,16 +2946,18 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 
 		// If using min amt, increase amt if needed.
 		if useMinAmt {
-			min := unifiedPolicy.minAmt()
+			min := edgeUnifier.minAmt()
 			if min > runningAmt {
 				runningAmt = min
 			}
 		}
 
-		// Get a forwarding policy for the specific amount that we want
-		// to forward.
-		policy := unifiedPolicy.getPolicy(runningAmt, bandwidthHints)
-		if policy == nil {
+		// Get an edge for the specific amount that we want to forward.
+		edge := edgeUnifier.getEdge(runningAmt, bandwidthHints)
+		if edge == nil {
+			log.Errorf("Cannot find policy with amt=%v for node %v",
+				runningAmt, fromNode)
+
 			return nil, ErrNoChannel{
 				fromNode: fromNode,
 				position: i,
@@ -2544,23 +2966,24 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 
 		// Add fee for this hop.
 		if !localChan {
-			runningAmt += policy.ComputeFee(runningAmt)
+			runningAmt += edge.policy.ComputeFee(runningAmt)
 		}
 
-		log.Tracef("Select channel %v at position %v", policy.ChannelID, i)
+		log.Tracef("Select channel %v at position %v",
+			edge.policy.ChannelID, i)
 
-		edges[i] = unifiedPolicy
+		unifiers[i] = edgeUnifier
 	}
 
 	// Now that we arrived at the start of the route and found out the route
 	// total amount, we make a forward pass. Because the amount may have
 	// been increased in the backward pass, fees need to be recalculated and
 	// amount ranges re-checked.
-	var pathEdges []*channeldb.ChannelEdgePolicy
+	var pathEdges []*channeldb.CachedEdgePolicy
 	receiverAmt := runningAmt
-	for i, edge := range edges {
-		policy := edge.getPolicy(receiverAmt, bandwidthHints)
-		if policy == nil {
+	for i, unifier := range unifiers {
+		edge := unifier.getEdge(receiverAmt, bandwidthHints)
+		if edge == nil {
 			return nil, ErrNoChannel{
 				fromNode: hops[i-1],
 				position: i,
@@ -2569,12 +2992,12 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 
 		if i > 0 {
 			// Decrease the amount to send while going forward.
-			receiverAmt -= policy.ComputeFeeFromIncoming(
+			receiverAmt -= edge.policy.ComputeFeeFromIncoming(
 				receiverAmt,
 			)
 		}
 
-		pathEdges = append(pathEdges, policy)
+		pathEdges = append(pathEdges, edge.policy)
 	}
 
 	// Build and return the final route.
@@ -2586,6 +3009,6 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 			cltvDelta:   uint16(finalCltvDelta),
 			records:     nil,
 			paymentAddr: payAddr,
-		},
+		}, nil,
 	)
 }

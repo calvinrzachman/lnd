@@ -2,13 +2,12 @@ package wtclient
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"net"
 	"sync"
 	"time"
 
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btclog"
 	"github.com/lightningnetwork/lnd/build"
@@ -45,8 +44,8 @@ const (
 
 // genActiveSessionFilter generates a filter that selects active sessions that
 // also match the desired channel type, either legacy or anchor.
-func genActiveSessionFilter(anchor bool) func(*wtdb.ClientSession) bool {
-	return func(s *wtdb.ClientSession) bool {
+func genActiveSessionFilter(anchor bool) func(*ClientSession) bool {
+	return func(s *ClientSession) bool {
 		return s.Status == wtdb.CSessionActive &&
 			anchor == s.Policy.IsAnchorChannel()
 	}
@@ -83,10 +82,12 @@ type Client interface {
 
 	// RegisteredTowers retrieves the list of watchtowers registered with
 	// the client.
-	RegisteredTowers() ([]*RegisteredTower, error)
+	RegisteredTowers(...wtdb.ClientSessionListOption) ([]*RegisteredTower,
+		error)
 
 	// LookupTower retrieves a registered watchtower through its public key.
-	LookupTower(*btcec.PublicKey) (*RegisteredTower, error)
+	LookupTower(*btcec.PublicKey,
+		...wtdb.ClientSessionListOption) (*RegisteredTower, error)
 
 	// Stats returns the in-memory statistics of the client since startup.
 	Stats() ClientStats
@@ -239,7 +240,7 @@ type TowerClient struct {
 
 	negotiator        SessionNegotiator
 	candidateTowers   TowerCandidateIterator
-	candidateSessions map[wtdb.SessionID]*wtdb.ClientSession
+	candidateSessions map[wtdb.SessionID]*ClientSession
 	activeSessions    sessionQueueSet
 
 	sessionQueue *sessionQueue
@@ -264,9 +265,9 @@ type TowerClient struct {
 var _ Client = (*TowerClient)(nil)
 
 // New initializes a new TowerClient from the provide Config. An error is
-// returned if the client could not initialized.
+// returned if the client could not be initialized.
 func New(config *Config) (*TowerClient, error) {
-	// Copy the config to prevent side-effects from modifying both the
+	// Copy the config to prevent side effects from modifying both the
 	// internal and external version of the Config.
 	cfg := new(Config)
 	*cfg = *config
@@ -287,26 +288,6 @@ func New(config *Config) (*TowerClient, error) {
 	}
 	plog := build.NewPrefixLog(prefix, log)
 
-	// Next, load all candidate sessions and towers from the database into
-	// the client. We will use any of these session if their policies match
-	// the current policy of the client, otherwise they will be ignored and
-	// new sessions will be requested.
-	isAnchorClient := cfg.Policy.IsAnchorChannel()
-	activeSessionFilter := genActiveSessionFilter(isAnchorClient)
-	candidateSessions, err := getClientSessions(
-		cfg.DB, cfg.SecretKeyRing, nil, activeSessionFilter,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	var candidateTowers []*wtdb.Tower
-	for _, s := range candidateSessions {
-		plog.Infof("Using private watchtower %s, offering policy %s",
-			s.Tower, cfg.Policy)
-		candidateTowers = append(candidateTowers, s.Tower)
-	}
-
 	// Load the sweep pkscripts that have been generated for all previously
 	// registered channels.
 	chanSummaries, err := cfg.DB.FetchChanSummaries()
@@ -317,9 +298,8 @@ func New(config *Config) (*TowerClient, error) {
 	c := &TowerClient{
 		cfg:               cfg,
 		log:               plog,
-		pipeline:          newTaskPipeline(),
-		candidateTowers:   newTowerListIterator(candidateTowers...),
-		candidateSessions: candidateSessions,
+		pipeline:          newTaskPipeline(plog),
+		chanCommitHeights: make(map[lnwire.ChannelID]uint64),
 		activeSessions:    make(sessionQueueSet),
 		summaries:         chanSummaries,
 		statTicker:        time.NewTicker(DefaultStatInterval),
@@ -328,6 +308,76 @@ func New(config *Config) (*TowerClient, error) {
 		staleTowers:       make(chan *staleTowerMsg),
 		forceQuit:         make(chan struct{}),
 	}
+
+	// perUpdate is a callback function that will be used to inspect the
+	// full set of candidate client sessions loaded from disk, and to
+	// determine the highest known commit height for each channel. This
+	// allows the client to reject backups that it has already processed for
+	// its active policy.
+	perUpdate := func(policy wtpolicy.Policy, chanID lnwire.ChannelID,
+		commitHeight uint64) {
+
+		// We only want to consider accepted updates that have been
+		// accepted under an identical policy to the client's current
+		// policy.
+		if policy != c.cfg.Policy {
+			return
+		}
+
+		// Take the highest commit height found in the session's acked
+		// updates.
+		height, ok := c.chanCommitHeights[chanID]
+		if !ok || commitHeight > height {
+			c.chanCommitHeights[chanID] = commitHeight
+		}
+	}
+
+	perMaxHeight := func(s *wtdb.ClientSession, chanID lnwire.ChannelID,
+		height uint64) {
+
+		perUpdate(s.Policy, chanID, height)
+	}
+
+	perCommittedUpdate := func(s *wtdb.ClientSession,
+		u *wtdb.CommittedUpdate) {
+
+		perUpdate(s.Policy, u.BackupID.ChanID, u.BackupID.CommitHeight)
+	}
+
+	// Load all candidate sessions and towers from the database into the
+	// client. We will use any of these sessions if their policies match the
+	// current policy of the client, otherwise they will be ignored and new
+	// sessions will be requested.
+	isAnchorClient := cfg.Policy.IsAnchorChannel()
+	activeSessionFilter := genActiveSessionFilter(isAnchorClient)
+
+	candidateTowers := newTowerListIterator()
+	perActiveTower := func(tower *Tower) {
+		// If the tower has already been marked as active, then there is
+		// no need to add it to the iterator again.
+		if candidateTowers.IsActive(tower.ID) {
+			return
+		}
+
+		log.Infof("Using private watchtower %s, offering policy %s",
+			tower, cfg.Policy)
+
+		// Add the tower to the set of candidate towers.
+		candidateTowers.AddCandidate(tower)
+	}
+
+	candidateSessions, err := getTowerAndSessionCandidates(
+		cfg.DB, cfg.SecretKeyRing, activeSessionFilter, perActiveTower,
+		wtdb.WithPerMaxHeight(perMaxHeight),
+		wtdb.WithPerCommittedUpdate(perCommittedUpdate),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	c.candidateTowers = candidateTowers
+	c.candidateSessions = candidateSessions
+
 	c.negotiator = newSessionNegotiator(&NegotiatorConfig{
 		DB:            cfg.DB,
 		SecretKeyRing: cfg.SecretKeyRing,
@@ -339,13 +389,73 @@ func New(config *Config) (*TowerClient, error) {
 		Candidates:    c.candidateTowers,
 		MinBackoff:    cfg.MinBackoff,
 		MaxBackoff:    cfg.MaxBackoff,
+		Log:           plog,
 	})
 
-	// Reconstruct the highest commit height processed for each channel
-	// under the client's current policy.
-	c.buildHighestCommitHeights()
-
 	return c, nil
+}
+
+// getTowerAndSessionCandidates loads all the towers from the DB and then
+// fetches the sessions for each of tower. Sessions are only collected if they
+// pass the sessionFilter check. If a tower has a session that does pass the
+// sessionFilter check then the perActiveTower call-back will be called on that
+// tower.
+func getTowerAndSessionCandidates(db DB, keyRing ECDHKeyRing,
+	sessionFilter func(*ClientSession) bool,
+	perActiveTower func(tower *Tower),
+	opts ...wtdb.ClientSessionListOption) (
+	map[wtdb.SessionID]*ClientSession, error) {
+
+	towers, err := db.ListTowers()
+	if err != nil {
+		return nil, err
+	}
+
+	candidateSessions := make(map[wtdb.SessionID]*ClientSession)
+	for _, dbTower := range towers {
+		tower, err := NewTowerFromDBTower(dbTower)
+		if err != nil {
+			return nil, err
+		}
+
+		sessions, err := db.ListClientSessions(&tower.ID, opts...)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, s := range sessions {
+			towerKeyDesc, err := keyRing.DeriveKey(
+				keychain.KeyLocator{
+					Family: keychain.KeyFamilyTowerSession,
+					Index:  s.KeyIndex,
+				},
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			sessionKeyECDH := keychain.NewPubKeyECDH(
+				towerKeyDesc, keyRing,
+			)
+
+			cs := &ClientSession{
+				ID:                s.ID,
+				ClientSessionBody: s.ClientSessionBody,
+				Tower:             tower,
+				SessionKeyECDH:    sessionKeyECDH,
+			}
+
+			if !sessionFilter(cs) {
+				continue
+			}
+
+			// Add the session to the set of candidate sessions.
+			candidateSessions[s.ID] = cs
+			perActiveTower(tower)
+		}
+	}
+
+	return candidateSessions, nil
 }
 
 // getClientSessions retrieves the client sessions for a particular tower if
@@ -353,13 +463,14 @@ func New(config *Config) (*TowerClient, error) {
 // optional filter can be provided to filter out any undesired client sessions.
 //
 // NOTE: This method should only be used when deserialization of a
-// ClientSession's Tower and SessionPrivKey fields is desired, otherwise, the
-// existing ListClientSessions method should be used.
+// ClientSession's SessionPrivKey field is desired, otherwise, the existing
+// ListClientSessions method should be used.
 func getClientSessions(db DB, keyRing ECDHKeyRing, forTower *wtdb.TowerID,
-	passesFilter func(*wtdb.ClientSession) bool) (
-	map[wtdb.SessionID]*wtdb.ClientSession, error) {
+	passesFilter func(*ClientSession) bool,
+	opts ...wtdb.ClientSessionListOption) (
+	map[wtdb.SessionID]*ClientSession, error) {
 
-	sessions, err := db.ListClientSessions(forTower)
+	dbSessions, err := db.ListClientSessions(forTower, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -369,12 +480,12 @@ func getClientSessions(db DB, keyRing ECDHKeyRing, forTower *wtdb.TowerID,
 	// be able to communicate with the towers and authenticate session
 	// requests. This prevents us from having to store the private keys on
 	// disk.
-	for _, s := range sessions {
-		tower, err := db.LoadTowerByID(s.TowerID)
+	sessions := make(map[wtdb.SessionID]*ClientSession)
+	for _, s := range dbSessions {
+		dbTower, err := db.LoadTowerByID(s.TowerID)
 		if err != nil {
 			return nil, err
 		}
-		s.Tower = tower
 
 		towerKeyDesc, err := keyRing.DeriveKey(keychain.KeyLocator{
 			Family: keychain.KeyFamilyTowerSession,
@@ -383,81 +494,65 @@ func getClientSessions(db DB, keyRing ECDHKeyRing, forTower *wtdb.TowerID,
 		if err != nil {
 			return nil, err
 		}
-		s.SessionKeyECDH = keychain.NewPubKeyECDH(towerKeyDesc, keyRing)
+		sessionKeyECDH := keychain.NewPubKeyECDH(towerKeyDesc, keyRing)
+
+		tower, err := NewTowerFromDBTower(dbTower)
+		if err != nil {
+			return nil, err
+		}
+
+		cs := &ClientSession{
+			ID:                s.ID,
+			ClientSessionBody: s.ClientSessionBody,
+			Tower:             tower,
+			SessionKeyECDH:    sessionKeyECDH,
+		}
 
 		// If an optional filter was provided, use it to filter out any
 		// undesired sessions.
-		if passesFilter != nil && !passesFilter(s) {
-			delete(sessions, s.ID)
+		if passesFilter != nil && !passesFilter(cs) {
+			continue
 		}
+
+		sessions[s.ID] = cs
 	}
 
 	return sessions, nil
 }
 
-// buildHighestCommitHeights inspects the full set of candidate client sessions
-// loaded from disk, and determines the highest known commit height for each
-// channel. This allows the client to reject backups that it has already
-// processed for it's active policy.
-func (c *TowerClient) buildHighestCommitHeights() {
-	chanCommitHeights := make(map[lnwire.ChannelID]uint64)
-	for _, s := range c.candidateSessions {
-		// We only want to consider accepted updates that have been
-		// accepted under an identical policy to the client's current
-		// policy.
-		if s.Policy != c.cfg.Policy {
-			continue
-		}
-
-		// Take the highest commit height found in the session's
-		// committed updates.
-		for _, committedUpdate := range s.CommittedUpdates {
-			bid := committedUpdate.BackupID
-
-			height, ok := chanCommitHeights[bid.ChanID]
-			if !ok || bid.CommitHeight > height {
-				chanCommitHeights[bid.ChanID] = bid.CommitHeight
-			}
-		}
-
-		// Take the heights commit height found in the session's acked
-		// updates.
-		for _, bid := range s.AckedUpdates {
-			height, ok := chanCommitHeights[bid.ChanID]
-			if !ok || bid.CommitHeight > height {
-				chanCommitHeights[bid.ChanID] = bid.CommitHeight
-			}
-		}
-	}
-
-	c.chanCommitHeights = chanCommitHeights
-}
-
 // Start initializes the watchtower client by loading or negotiating an active
 // session and then begins processing backup tasks from the request pipeline.
 func (c *TowerClient) Start() error {
-	var err error
+	var returnErr error
 	c.started.Do(func() {
-		c.log.Infof("Starting watchtower client")
+		c.log.Infof("Watchtower client starting")
 
 		// First, restart a session queue for any sessions that have
 		// committed but unacked state updates. This ensures that these
 		// sessions will be able to flush the committed updates after a
 		// restart.
 		for _, session := range c.candidateSessions {
-			if len(session.CommittedUpdates) > 0 {
+			committedUpdates, err := c.cfg.DB.FetchSessionCommittedUpdates(&session.ID)
+			if err != nil {
+				returnErr = err
+				return
+			}
+
+			if len(committedUpdates) > 0 {
 				c.log.Infof("Starting session=%s to process "+
 					"%d committed backups", session.ID,
-					len(session.CommittedUpdates))
-				c.initActiveQueue(session)
+					len(committedUpdates))
+
+				c.initActiveQueue(session, committedUpdates)
 			}
 		}
 
 		// Now start the session negotiator, which will allow us to
 		// request new session as soon as the backupDispatcher starts
 		// up.
-		err = c.negotiator.Start()
+		err := c.negotiator.Start()
 		if err != nil {
+			returnErr = err
 			return
 		}
 
@@ -468,9 +563,9 @@ func (c *TowerClient) Start() error {
 		c.wg.Add(1)
 		go c.backupDispatcher()
 
-		log.Infof("Watchtower client started successfully")
+		c.log.Infof("Watchtower client started successfully")
 	})
-	return err
+	return returnErr
 }
 
 // Stop idempotently initiates a graceful shutdown of the watchtower client.
@@ -602,11 +697,11 @@ func (c *TowerClient) RegisterChannel(chanID lnwire.ChannelID) error {
 
 // BackupState initiates a request to back up a particular revoked state. If the
 // method returns nil, the backup is guaranteed to be successful unless the:
-//  - client is force quit,
-//  - justice transaction would create dust outputs when trying to abide by the
-//    negotiated policy, or
-//  - breached outputs contain too little value to sweep at the target sweep fee
-//    rate.
+//   - client is force quit,
+//   - justice transaction would create dust outputs when trying to abide by the
+//     negotiated policy, or
+//   - breached outputs contain too little value to sweep at the target sweep fee
+//     rate.
 func (c *TowerClient) BackupState(chanID *lnwire.ChannelID,
 	breachInfo *lnwallet.BreachRetribution,
 	chanType channeldb.ChannelType) error {
@@ -646,10 +741,10 @@ func (c *TowerClient) BackupState(chanID *lnwire.ChannelID,
 // active client's advertised policy will be ignored, but may be resumed if the
 // client is restarted with a matching policy. If no candidates were found, nil
 // is returned to signal that we need to request a new policy.
-func (c *TowerClient) nextSessionQueue() *sessionQueue {
+func (c *TowerClient) nextSessionQueue() (*sessionQueue, error) {
 	// Select any candidate session at random, and remove it from the set of
 	// candidate sessions.
-	var candidateSession *wtdb.ClientSession
+	var candidateSession *ClientSession
 	for id, sessionInfo := range c.candidateSessions {
 		delete(c.candidateSessions, id)
 
@@ -668,13 +763,20 @@ func (c *TowerClient) nextSessionQueue() *sessionQueue {
 	// If none of the sessions could be used or none were found, we'll
 	// return nil to signal that we need another session to be negotiated.
 	if candidateSession == nil {
-		return nil
+		return nil, nil
 	}
 
-	// Initialize the session queue and spin it up so it can begin handling
+	updates, err := c.cfg.DB.FetchSessionCommittedUpdates(
+		&candidateSession.ID,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Initialize the session queue and spin it up, so it can begin handling
 	// updates. If the queue was already made active on startup, this will
 	// simply return the existing session queue from the set.
-	return c.getOrInitActiveQueue(candidateSession)
+	return c.getOrInitActiveQueue(candidateSession, updates), nil
 }
 
 // backupDispatcher processes events coming from the taskPipeline and is
@@ -725,13 +827,10 @@ func (c *TowerClient) backupDispatcher() {
 				msg.errChan <- c.handleNewTower(msg)
 
 			// A tower has been requested to be removed. We'll
-			// immediately return an error as we want to avoid the
-			// possibility of a new session being negotiated with
-			// this request's tower.
+			// only allow removal of it if the address in question
+			// is not currently being used for session negotiation.
 			case msg := <-c.staleTowers:
-				msg.errChan <- errors.New("removing towers " +
-					"is disallowed while a new session " +
-					"negotiation is in progress")
+				msg.errChan <- c.handleStaleTower(msg)
 
 			case <-c.forceQuit:
 				return
@@ -747,7 +846,13 @@ func (c *TowerClient) backupDispatcher() {
 			// We've exhausted the prior session, we'll pop another
 			// from the remaining sessions and continue processing
 			// backup tasks.
-			c.sessionQueue = c.nextSessionQueue()
+			var err error
+			c.sessionQueue, err = c.nextSessionQueue()
+			if err != nil {
+				c.log.Errorf("error fetching next session "+
+					"queue: %v", err)
+			}
+
 			if c.sessionQueue != nil {
 				c.log.Debugf("Loaded next candidate session "+
 					"queue id=%s", c.sessionQueue.ID())
@@ -817,7 +922,7 @@ func (c *TowerClient) backupDispatcher() {
 }
 
 // processTask attempts to schedule the given backupTask on the active
-// sessionQueue. The task will either be accepted or rejected, afterwhich the
+// sessionQueue. The task will either be accepted or rejected, after which the
 // appropriate modifications to the client's state machine will be made. After
 // every invocation of processTask, the caller should ensure that the
 // sessionQueue hasn't been exhausted before proceeding to the next task. Tasks
@@ -860,7 +965,7 @@ func (c *TowerClient) taskAccepted(task *backupTask, newStatus reserveStatus) {
 		c.log.Debugf("Session %s exhausted", c.sessionQueue.ID())
 
 		// This task left the session exhausted, set it to nil and
-		// proceed to the next loop so we can consume another
+		// proceed to the next loop, so we can consume another
 		// pre-negotiated session or request another.
 		c.sessionQueue = nil
 	}
@@ -868,7 +973,7 @@ func (c *TowerClient) taskAccepted(task *backupTask, newStatus reserveStatus) {
 
 // taskRejected process the rejection of a task by a sessionQueue depending on
 // the state the was in *before* the task was rejected. The client's prevTask
-// will cache the task if the sessionQueue was exhausted before hand, and nil
+// will cache the task if the sessionQueue was exhausted beforehand, and nil
 // the sessionQueue to find a new session. If the sessionQueue was not
 // exhausted, the client marks the task as ineligible, as this implies we
 // couldn't construct a valid justice transaction given the session's policy.
@@ -995,7 +1100,9 @@ func (c *TowerClient) sendMessage(peer wtserver.Peer, msg wtwire.Message) error 
 
 // newSessionQueue creates a sessionQueue from a ClientSession loaded from the
 // database and supplying it with the resources needed by the client.
-func (c *TowerClient) newSessionQueue(s *wtdb.ClientSession) *sessionQueue {
+func (c *TowerClient) newSessionQueue(s *ClientSession,
+	updates []wtdb.CommittedUpdate) *sessionQueue {
+
 	return newSessionQueue(&sessionQueueConfig{
 		ClientSession: s,
 		ChainHash:     c.cfg.ChainHash,
@@ -1006,28 +1113,33 @@ func (c *TowerClient) newSessionQueue(s *wtdb.ClientSession) *sessionQueue {
 		DB:            c.cfg.DB,
 		MinBackoff:    c.cfg.MinBackoff,
 		MaxBackoff:    c.cfg.MaxBackoff,
-	})
+		Log:           c.log,
+	}, updates)
 }
 
 // getOrInitActiveQueue checks the activeSessions set for a sessionQueue for the
 // passed ClientSession. If it exists, the active sessionQueue is returned.
-// Otherwise a new sessionQueue is initialized and added to the set.
-func (c *TowerClient) getOrInitActiveQueue(s *wtdb.ClientSession) *sessionQueue {
+// Otherwise, a new sessionQueue is initialized and added to the set.
+func (c *TowerClient) getOrInitActiveQueue(s *ClientSession,
+	updates []wtdb.CommittedUpdate) *sessionQueue {
+
 	if sq, ok := c.activeSessions[s.ID]; ok {
 		return sq
 	}
 
-	return c.initActiveQueue(s)
+	return c.initActiveQueue(s, updates)
 }
 
 // initActiveQueue creates a new sessionQueue from the passed ClientSession,
 // adds the sessionQueue to the activeSessions set, and starts the sessionQueue
 // so that it can deliver any committed updates or begin accepting newly
 // assigned tasks.
-func (c *TowerClient) initActiveQueue(s *wtdb.ClientSession) *sessionQueue {
-	// Initialize the session queue, providing it with all of the resources
-	// it requires from the client instance.
-	sq := c.newSessionQueue(s)
+func (c *TowerClient) initActiveQueue(s *ClientSession,
+	updates []wtdb.CommittedUpdate) *sessionQueue {
+
+	// Initialize the session queue, providing it with all the resources it
+	// requires from the client instance.
+	sq := c.newSessionQueue(s, updates)
 
 	// Add the session queue as an active session so that we remember to
 	// stop it on shutdown.
@@ -1075,10 +1187,16 @@ func (c *TowerClient) handleNewTower(msg *newTowerMsg) error {
 	// We'll start by updating our persisted state, followed by our
 	// in-memory state, with the new tower. This might not actually be a new
 	// tower, but it might include a new address at which it can be reached.
-	tower, err := c.cfg.DB.CreateTower(msg.addr)
+	dbTower, err := c.cfg.DB.CreateTower(msg.addr)
 	if err != nil {
 		return err
 	}
+
+	tower, err := NewTowerFromDBTower(dbTower)
+	if err != nil {
+		return err
+	}
+
 	c.candidateTowers.AddCandidate(tower)
 
 	// Include all of its corresponding sessions to our set of candidates.
@@ -1134,18 +1252,31 @@ func (c *TowerClient) RemoveTower(pubKey *btcec.PublicKey, addr net.Addr) error 
 func (c *TowerClient) handleStaleTower(msg *staleTowerMsg) error {
 	// We'll load the tower before potentially removing it in order to
 	// retrieve its ID within the database.
-	tower, err := c.cfg.DB.LoadTower(msg.pubKey)
+	dbTower, err := c.cfg.DB.LoadTower(msg.pubKey)
 	if err != nil {
 		return err
 	}
 
-	// We'll update our persisted state, followed by our in-memory state,
-	// with the stale tower.
-	if err := c.cfg.DB.RemoveTower(msg.pubKey, msg.addr); err != nil {
+	// We'll first update our in-memory state followed by our persisted
+	// state, with the stale tower. The removal of the tower address from
+	// the in-memory state will fail if the address is currently being used
+	// for a session negotiation.
+	err = c.candidateTowers.RemoveCandidate(dbTower.ID, msg.addr)
+	if err != nil {
 		return err
 	}
-	err = c.candidateTowers.RemoveCandidate(tower.ID, msg.addr)
-	if err != nil {
+
+	if err := c.cfg.DB.RemoveTower(msg.pubKey, msg.addr); err != nil {
+		// If the persisted state update fails, re-add the address to
+		// our in-memory state.
+		tower, newTowerErr := NewTowerFromDBTower(dbTower)
+		if newTowerErr != nil {
+			log.Errorf("could not create new in-memory tower: %v",
+				newTowerErr)
+		} else {
+			c.candidateTowers.AddCandidate(tower)
+		}
+
 		return err
 	}
 
@@ -1158,7 +1289,7 @@ func (c *TowerClient) handleStaleTower(msg *staleTowerMsg) error {
 	// Otherwise, the tower should no longer be used for future session
 	// negotiations and backups.
 	pubKey := msg.pubKey.SerializeCompressed()
-	sessions, err := c.cfg.DB.ListClientSessions(&tower.ID)
+	sessions, err := c.cfg.DB.ListClientSessions(&dbTower.ID)
 	if err != nil {
 		return fmt.Errorf("unable to retrieve sessions for tower %x: "+
 			"%v", pubKey, err)
@@ -1170,7 +1301,7 @@ func (c *TowerClient) handleStaleTower(msg *staleTowerMsg) error {
 	// If our active session queue corresponds to the stale tower, we'll
 	// proceed to negotiate a new one.
 	if c.sessionQueue != nil {
-		activeTower := c.sessionQueue.towerAddr.IdentityKey.SerializeCompressed()
+		activeTower := c.sessionQueue.tower.IdentityKey.SerializeCompressed()
 		if bytes.Equal(pubKey, activeTower) {
 			c.sessionQueue = nil
 		}
@@ -1181,13 +1312,15 @@ func (c *TowerClient) handleStaleTower(msg *staleTowerMsg) error {
 
 // RegisteredTowers retrieves the list of watchtowers registered with the
 // client.
-func (c *TowerClient) RegisteredTowers() ([]*RegisteredTower, error) {
+func (c *TowerClient) RegisteredTowers(opts ...wtdb.ClientSessionListOption) (
+	[]*RegisteredTower, error) {
+
 	// Retrieve all of our towers along with all of our sessions.
 	towers, err := c.cfg.DB.ListTowers()
 	if err != nil {
 		return nil, err
 	}
-	clientSessions, err := c.cfg.DB.ListClientSessions(nil)
+	clientSessions, err := c.cfg.DB.ListClientSessions(nil, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1220,13 +1353,15 @@ func (c *TowerClient) RegisteredTowers() ([]*RegisteredTower, error) {
 }
 
 // LookupTower retrieves a registered watchtower through its public key.
-func (c *TowerClient) LookupTower(pubKey *btcec.PublicKey) (*RegisteredTower, error) {
+func (c *TowerClient) LookupTower(pubKey *btcec.PublicKey,
+	opts ...wtdb.ClientSessionListOption) (*RegisteredTower, error) {
+
 	tower, err := c.cfg.DB.LoadTower(pubKey)
 	if err != nil {
 		return nil, err
 	}
 
-	towerSessions, err := c.cfg.DB.ListClientSessions(&tower.ID)
+	towerSessions, err := c.cfg.DB.ListClientSessions(&tower.ID, opts...)
 	if err != nil {
 		return nil, err
 	}

@@ -7,8 +7,8 @@ import (
 	"io"
 	"time"
 
-	"github.com/btcsuite/btcd/btcec"
-	"github.com/lightningnetwork/lnd/channeldb/kvdb"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/lightningnetwork/lnd/kvdb"
 	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/routing/route"
@@ -53,7 +53,7 @@ type duplicateHTLCAttemptInfo struct {
 	attemptID uint64
 
 	// sessionKey is the ephemeral key used for this attempt.
-	sessionKey *btcec.PrivateKey
+	sessionKey [btcec.PrivKeyBytesLen]byte
 
 	// route is the route attempted to send the HTLC.
 	route route.Route
@@ -99,7 +99,7 @@ func deserializeDuplicatePaymentCreationInfo(r io.Reader) (
 
 	c := &PaymentCreationInfo{}
 
-	if _, err := io.ReadFull(r, c.PaymentHash[:]); err != nil {
+	if _, err := io.ReadFull(r, c.PaymentIdentifier[:]); err != nil {
 		return nil, err
 	}
 
@@ -150,7 +150,6 @@ func fetchDuplicatePayment(bucket kvdb.RBucket) (*MPPayment, error) {
 	creationInfo, err := deserializeDuplicatePaymentCreationInfo(r)
 	if err != nil {
 		return nil, err
-
 	}
 
 	// Get failure reason if available.
@@ -181,7 +180,7 @@ func fetchDuplicatePayment(bucket kvdb.RBucket) (*MPPayment, error) {
 			HTLCAttemptInfo: HTLCAttemptInfo{
 				AttemptID:  attempt.attemptID,
 				Route:      attempt.route,
-				SessionKey: attempt.sessionKey,
+				sessionKey: attempt.sessionKey,
 			},
 		}
 

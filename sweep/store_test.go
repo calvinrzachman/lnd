@@ -6,6 +6,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/stretchr/testify/require"
 )
 
 // TestStore asserts that the store persists the presented data to disk and is
@@ -14,14 +15,9 @@ func TestStore(t *testing.T) {
 	t.Run("bolt", func(t *testing.T) {
 
 		// Create new store.
-		cdb, cleanUp, err := channeldb.MakeTestDB()
+		cdb, err := channeldb.MakeTestDB(t)
 		if err != nil {
 			t.Fatalf("unable to open channel db: %v", err)
-		}
-		defer cleanUp()
-
-		if err != nil {
-			t.Fatal(err)
 		}
 
 		testStore(t, func() (SweeperStore, error) {
@@ -125,9 +121,7 @@ func testStore(t *testing.T, createStore func() (SweeperStore, error)) {
 	}
 
 	txns, err := store.ListSweeps()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.NoError(t, err, "unexpected error")
 
 	// Create a map containing the sweeps we expect to be returned by list
 	// sweeps.

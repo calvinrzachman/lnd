@@ -2,12 +2,11 @@ package invoicesrpc
 
 import (
 	"encoding/hex"
-	"errors"
 	"fmt"
 
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/invoices"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/zpay32"
@@ -17,14 +16,14 @@ import (
 // because not all information is stored in dedicated invoice fields. If there
 // is no payment request present, a dummy request will be returned. This can
 // happen with just-in-time inserted keysend invoices.
-func decodePayReq(invoice *channeldb.Invoice,
+func decodePayReq(invoice *invoices.Invoice,
 	activeNetParams *chaincfg.Params) (*zpay32.Invoice, error) {
 
 	paymentRequest := string(invoice.PaymentRequest)
 	if paymentRequest == "" {
 		preimage := invoice.Terms.PaymentPreimage
 		if preimage == nil {
-			return nil, errors.New("cannot reconstruct pay req")
+			return &zpay32.Invoice{}, nil
 		}
 		hash := [32]byte(preimage.Hash())
 		return &zpay32.Invoice{
@@ -39,16 +38,20 @@ func decodePayReq(invoice *channeldb.Invoice,
 			"request: %v", err)
 	}
 	return decoded, nil
-
 }
 
-// CreateRPCInvoice creates an *lnrpc.Invoice from the *channeldb.Invoice.
-func CreateRPCInvoice(invoice *channeldb.Invoice,
+// CreateRPCInvoice creates an *lnrpc.Invoice from the *invoices.Invoice.
+func CreateRPCInvoice(invoice *invoices.Invoice,
 	activeNetParams *chaincfg.Params) (*lnrpc.Invoice, error) {
 
 	decoded, err := decodePayReq(invoice, activeNetParams)
 	if err != nil {
 		return nil, err
+	}
+
+	var rHash []byte
+	if decoded.PaymentHash != nil {
+		rHash = decoded.PaymentHash[:]
 	}
 
 	var descHash []byte
@@ -73,18 +76,22 @@ func CreateRPCInvoice(invoice *channeldb.Invoice,
 	satAmt := invoice.Terms.Value.ToSatoshis()
 	satAmtPaid := invoice.AmtPaid.ToSatoshis()
 
-	isSettled := invoice.State == channeldb.ContractSettled
+	isSettled := invoice.State == invoices.ContractSettled
 
 	var state lnrpc.Invoice_InvoiceState
 	switch invoice.State {
-	case channeldb.ContractOpen:
+	case invoices.ContractOpen:
 		state = lnrpc.Invoice_OPEN
-	case channeldb.ContractSettled:
+
+	case invoices.ContractSettled:
 		state = lnrpc.Invoice_SETTLED
-	case channeldb.ContractCanceled:
+
+	case invoices.ContractCanceled:
 		state = lnrpc.Invoice_CANCELED
-	case channeldb.ContractAccepted:
+
+	case invoices.ContractAccepted:
 		state = lnrpc.Invoice_ACCEPTED
+
 	default:
 		return nil, fmt.Errorf("unknown invoice state %v",
 			invoice.State)
@@ -94,11 +101,11 @@ func CreateRPCInvoice(invoice *channeldb.Invoice,
 	for key, htlc := range invoice.Htlcs {
 		var state lnrpc.InvoiceHTLCState
 		switch htlc.State {
-		case channeldb.HtlcStateAccepted:
+		case invoices.HtlcStateAccepted:
 			state = lnrpc.InvoiceHTLCState_ACCEPTED
-		case channeldb.HtlcStateSettled:
+		case invoices.HtlcStateSettled:
 			state = lnrpc.InvoiceHTLCState_SETTLED
-		case channeldb.HtlcStateCanceled:
+		case invoices.HtlcStateCanceled:
 			state = lnrpc.InvoiceHTLCState_CANCELED
 		default:
 			return nil, fmt.Errorf("unknown state %v", htlc.State)
@@ -116,8 +123,27 @@ func CreateRPCInvoice(invoice *channeldb.Invoice,
 			MppTotalAmtMsat: uint64(htlc.MppTotalAmt),
 		}
 
+		// Populate any fields relevant to AMP payments.
+		if htlc.AMP != nil {
+			rootShare := htlc.AMP.Record.RootShare()
+			setID := htlc.AMP.Record.SetID()
+
+			var preimage []byte
+			if htlc.AMP.Preimage != nil {
+				preimage = htlc.AMP.Preimage[:]
+			}
+
+			rpcHtlc.Amp = &lnrpc.AMP{
+				RootShare:  rootShare[:],
+				SetId:      setID[:],
+				ChildIndex: htlc.AMP.Record.ChildIndex(),
+				Hash:       htlc.AMP.Hash[:],
+				Preimage:   preimage,
+			}
+		}
+
 		// Only report resolved times if htlc is resolved.
-		if htlc.State != channeldb.HtlcStateAccepted {
+		if htlc.State != invoices.HtlcStateAccepted {
 			rpcHtlc.ResolveTime = htlc.ResolveTime.Unix()
 		}
 
@@ -125,8 +151,8 @@ func CreateRPCInvoice(invoice *channeldb.Invoice,
 	}
 
 	rpcInvoice := &lnrpc.Invoice{
-		Memo:            string(invoice.Memo[:]),
-		RHash:           decoded.PaymentHash[:],
+		Memo:            string(invoice.Memo),
+		RHash:           rHash,
 		Value:           int64(satAmt),
 		ValueMsat:       int64(invoice.Terms.Value),
 		CreationDate:    invoice.CreationDate.Unix(),
@@ -147,8 +173,41 @@ func CreateRPCInvoice(invoice *channeldb.Invoice,
 		State:           state,
 		Htlcs:           rpcHtlcs,
 		Features:        CreateRPCFeatures(invoice.Terms.Features),
-		IsKeysend:       len(invoice.PaymentRequest) == 0,
+		IsKeysend:       invoice.IsKeysend(),
 		PaymentAddr:     invoice.Terms.PaymentAddr[:],
+		IsAmp:           invoice.IsAMP(),
+	}
+
+	rpcInvoice.AmpInvoiceState = make(map[string]*lnrpc.AMPInvoiceState)
+	for setID, ampState := range invoice.AMPState {
+		setIDStr := hex.EncodeToString(setID[:])
+
+		var state lnrpc.InvoiceHTLCState
+		switch ampState.State {
+		case invoices.HtlcStateAccepted:
+			state = lnrpc.InvoiceHTLCState_ACCEPTED
+		case invoices.HtlcStateSettled:
+			state = lnrpc.InvoiceHTLCState_SETTLED
+		case invoices.HtlcStateCanceled:
+			state = lnrpc.InvoiceHTLCState_CANCELED
+		default:
+			return nil, fmt.Errorf("unknown state %v", ampState.State)
+		}
+
+		rpcInvoice.AmpInvoiceState[setIDStr] = &lnrpc.AMPInvoiceState{
+			State:       state,
+			SettleIndex: ampState.SettleIndex,
+			SettleTime:  ampState.SettleDate.Unix(),
+			AmtPaidMsat: int64(ampState.AmtPaid),
+		}
+
+		// If at least one of the present HTLC sets show up as being
+		// settled, then we'll mark the invoice itself as being
+		// settled.
+		if ampState.State == invoices.HtlcStateSettled {
+			rpcInvoice.Settled = true // nolint:staticcheck
+			rpcInvoice.State = lnrpc.Invoice_SETTLED
+		}
 	}
 
 	if preimage != nil {
@@ -218,7 +277,7 @@ func CreateZpay32HopHints(routeHints []*lnrpc.RouteHint) ([][]zpay32.HopHint, er
 			if err != nil {
 				return nil, err
 			}
-			p, err := btcec.ParsePubKey(pubKeyBytes, btcec.S256())
+			p, err := btcec.ParsePubKey(pubKeyBytes)
 			if err != nil {
 				return nil, err
 			}

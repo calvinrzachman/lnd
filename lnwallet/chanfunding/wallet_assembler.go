@@ -1,13 +1,14 @@
 package chanfunding
 
 import (
+	"fmt"
 	"math"
 
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/txsort"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/txsort"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/keychain"
 )
@@ -20,7 +21,7 @@ import (
 //
 // Steps to final channel provisioning:
 //  1. Call BindKeys to notify the intent which keys to use when constructing
-//  the multi-sig output.
+//     the multi-sig output.
 //  2. Call CompileFundingTx afterwards to obtain the funding transaction.
 //
 // If either of these steps fail, then the Cancel method MUST be called.
@@ -106,9 +107,14 @@ func (f *FullIntent) CompileFundingTx(extraInputs []*wire.TxIn,
 
 	// Next, sign all inputs that are ours, collecting the signatures in
 	// order of the inputs.
+	prevOutFetcher := NewSegWitV0DualFundingPrevOutputFetcher(
+		f.coinSource, extraInputs,
+	)
 	signDesc := input.SignDescriptor{
-		HashType:  txscript.SigHashAll,
-		SigHashes: txscript.NewTxSigHashes(fundingTx),
+		SigHashes: txscript.NewTxSigHashes(
+			fundingTx, prevOutFetcher,
+		),
+		PrevOutputFetcher: prevOutFetcher,
 	}
 	for i, txIn := range fundingTx.TxIn {
 		// We can only sign this input if it's ours, so we'll ask the
@@ -128,6 +134,13 @@ func (f *FullIntent) CompileFundingTx(extraInputs []*wire.TxIn,
 			PkScript: info.PkScript,
 		}
 		signDesc.InputIndex = i
+
+		// We support spending a p2tr input ourselves. But not as part
+		// of their inputs.
+		signDesc.HashType = txscript.SigHashAll
+		if txscript.IsPayToTaproot(info.PkScript) {
+			signDesc.HashType = txscript.SigHashDefault
+		}
 
 		// Finally, we'll sign the input as is, and populate the input
 		// with the witness and sigScript (if needed).
@@ -150,6 +163,28 @@ func (f *FullIntent) CompileFundingTx(extraInputs []*wire.TxIn,
 	}
 
 	return fundingTx, nil
+}
+
+// Inputs returns all inputs to the final funding transaction that we
+// know about. Since this funding transaction is created all from our wallet,
+// it will be all inputs.
+func (f *FullIntent) Inputs() []wire.OutPoint {
+	var ins []wire.OutPoint
+	for _, coin := range f.InputCoins {
+		ins = append(ins, coin.OutPoint)
+	}
+
+	return ins
+}
+
+// Outputs returns all outputs of the final funding transaction that we
+// know about. This will be the funding output and the change outputs going
+// back to our wallet.
+func (f *FullIntent) Outputs() []*wire.TxOut {
+	outs := f.ShimIntent.Outputs()
+	outs = append(outs, f.ChangeOutputs...)
+
+	return outs
 }
 
 // Cancel allows the caller to cancel a funding Intent at any time.  This will
@@ -227,7 +262,9 @@ func (w *WalletAssembler) ProvisionChannel(r *Request) (Intent, error) {
 			"sat/kw as fee rate", int64(r.FeeRate))
 
 		// Find all unlocked unspent witness outputs that satisfy the
-		// minimum number of confirmations required.
+		// minimum number of confirmations required. Coin selection in
+		// this function currently ignores the configured coin selection
+		// strategy.
 		coins, err := w.cfg.CoinSource.ListCoins(
 			r.MinConfs, math.MaxInt32,
 		)
@@ -267,20 +304,28 @@ func (w *WalletAssembler) ProvisionChannel(r *Request) (Intent, error) {
 		// Otherwise do a normal coin selection where we target a given
 		// funding amount.
 		default:
+			dustLimit := w.cfg.DustLimit
 			localContributionAmt = r.LocalAmt
 			selectedCoins, changeAmt, err = CoinSelect(
-				r.FeeRate, r.LocalAmt, coins,
+				r.FeeRate, r.LocalAmt, dustLimit, coins,
 			)
 			if err != nil {
 				return err
 			}
 		}
 
+		// Sanity check: The addition of the outputs should not lead to the
+		// creation of dust.
+		if changeAmt != 0 && changeAmt < w.cfg.DustLimit {
+			return fmt.Errorf("change amount(%v) after coin "+
+				"select is below dust limit(%v)", changeAmt,
+				w.cfg.DustLimit)
+		}
+
 		// Record any change output(s) generated as a result of the
-		// coin selection, but only if the addition of the output won't
-		// lead to the creation of dust.
+		// coin selection.
 		var changeOutput *wire.TxOut
-		if changeAmt != 0 && changeAmt > w.cfg.DustLimit {
+		if changeAmt != 0 {
 			changeAddr, err := r.ChangeAddr()
 			if err != nil {
 				return err
@@ -341,3 +386,57 @@ func (w *WalletAssembler) FundingTxAvailable() {}
 // A compile-time assertion to ensure the WalletAssembler meets the
 // FundingTxAssembler interface.
 var _ FundingTxAssembler = (*WalletAssembler)(nil)
+
+// SegWitV0DualFundingPrevOutputFetcher is a txscript.PrevOutputFetcher that
+// knows about local and remote funding inputs.
+//
+// TODO(guggero): Support dual funding with p2tr inputs, currently only segwit
+// v0 inputs are supported.
+type SegWitV0DualFundingPrevOutputFetcher struct {
+	local  CoinSource
+	remote *txscript.MultiPrevOutFetcher
+}
+
+var _ txscript.PrevOutputFetcher = (*SegWitV0DualFundingPrevOutputFetcher)(nil)
+
+// NewSegWitV0DualFundingPrevOutputFetcher creates a new
+// txscript.PrevOutputFetcher from the given local and remote inputs.
+//
+// NOTE: Since the actual pkScript and amounts aren't passed in, this will just
+// make sure that nothing will panic when creating a SegWit v0 sighash. But this
+// code will NOT WORK for transactions that spend any _remote_ Taproot inputs!
+// So basically dual-funding won't work with Taproot inputs unless the UTXO info
+// is exchanged between the peers.
+func NewSegWitV0DualFundingPrevOutputFetcher(localSource CoinSource,
+	remoteInputs []*wire.TxIn) txscript.PrevOutputFetcher {
+
+	remote := txscript.NewMultiPrevOutFetcher(nil)
+	for _, inp := range remoteInputs {
+		// We add an empty output to prevent the sighash calculation
+		// from panicking. But this will always detect the inputs as
+		// SegWig v0!
+		remote.AddPrevOut(inp.PreviousOutPoint, &wire.TxOut{})
+	}
+	return &SegWitV0DualFundingPrevOutputFetcher{
+		local:  localSource,
+		remote: remote,
+	}
+}
+
+// FetchPrevOutput attempts to fetch the previous output referenced by the
+// passed outpoint.
+//
+// NOTE: This is a part of the txscript.PrevOutputFetcher interface.
+func (d *SegWitV0DualFundingPrevOutputFetcher) FetchPrevOutput(
+	op wire.OutPoint) *wire.TxOut {
+
+	// Try the local source first. This will return nil if our internal
+	// wallet doesn't know the outpoint.
+	coin, err := d.local.CoinFromOutPoint(op)
+	if err == nil && coin != nil {
+		return &coin.TxOut
+	}
+
+	// Fall back to the remote
+	return d.remote.FetchPrevOutput(op)
+}

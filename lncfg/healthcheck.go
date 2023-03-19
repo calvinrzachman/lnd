@@ -22,12 +22,18 @@ var (
 
 // HealthCheckConfig contains the configuration for the different health checks
 // the lnd runs.
+//
+//nolint:lll
 type HealthCheckConfig struct {
 	ChainCheck *CheckConfig `group:"chainbackend" namespace:"chainbackend"`
 
 	DiskCheck *DiskCheckConfig `group:"diskspace" namespace:"diskspace"`
 
 	TLSCheck *CheckConfig `group:"tls" namespace:"tls"`
+
+	TorConnection *CheckConfig `group:"torconnection" namespace:"torconnection"`
+
+	RemoteSigner *CheckConfig `group:"remotesigner" namespace:"remotesigner"`
 }
 
 // Validate checks the values configured for our health checks.
@@ -48,6 +54,10 @@ func (h *HealthCheckConfig) Validate() error {
 		h.DiskCheck.RequiredRemaining >= 1 {
 
 		return errors.New("disk required ratio must be in [0:1)")
+	}
+
+	if err := h.TorConnection.validate("tor connection"); err != nil {
+		return err
 	}
 
 	return nil

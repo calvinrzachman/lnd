@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/channeldb/models"
 	"github.com/lightningnetwork/lnd/htlcswitch/hop"
 	"github.com/lightningnetwork/lnd/invoices"
 	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwallet"
+	"github.com/lightningnetwork/lnd/lnwire"
 )
 
 // htlcIncomingContestResolver is a ContractResolver that's able to resolve an
@@ -49,16 +51,40 @@ func newIncomingContestResolver(
 	}
 }
 
+func (h *htlcIncomingContestResolver) processFinalHtlcFail() error {
+	// Mark the htlc as final failed.
+	err := h.ChainArbitratorConfig.PutFinalHtlcOutcome(
+		h.ChannelArbitratorConfig.ShortChanID, h.htlc.HtlcIndex, false,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Send notification.
+	h.ChainArbitratorConfig.HtlcNotifier.NotifyFinalHtlcEvent(
+		models.CircuitKey{
+			ChanID: h.ShortChanID,
+			HtlcID: h.htlc.HtlcIndex,
+		},
+		channeldb.FinalHtlcInfo{
+			Settled:  false,
+			Offchain: false,
+		},
+	)
+
+	return nil
+}
+
 // Resolve attempts to resolve this contract. As we don't yet know of the
 // preimage for the contract, we'll wait for one of two things to happen:
 //
-//   1. We learn of the preimage! In this case, we can sweep the HTLC incoming
-//      and ensure that if this was a multi-hop HTLC we are made whole. In this
-//      case, an additional ContractResolver will be returned to finish the
-//      job.
+//  1. We learn of the preimage! In this case, we can sweep the HTLC incoming
+//     and ensure that if this was a multi-hop HTLC we are made whole. In this
+//     case, an additional ContractResolver will be returned to finish the
+//     job.
 //
-//   2. The HTLC expires. If this happens, then the contract is fully resolved
-//      as we have no remaining actions left at our disposal.
+//  2. The HTLC expires. If this happens, then the contract is fully resolved
+//     as we have no remaining actions left at our disposal.
 //
 // NOTE: Part of the ContractResolver interface.
 func (h *htlcIncomingContestResolver) Resolve() (ContractResolver, error) {
@@ -70,7 +96,7 @@ func (h *htlcIncomingContestResolver) Resolve() (ContractResolver, error) {
 
 	// First try to parse the payload. If that fails, we can stop resolution
 	// now.
-	payload, err := h.decodePayload()
+	payload, nextHopOnionBlob, err := h.decodePayload()
 	if err != nil {
 		log.Debugf("ChannelArbitrator(%v): cannot decode payload of "+
 			"htlc %v", h.ChanPoint, h.HtlcPoint())
@@ -81,6 +107,10 @@ func (h *htlcIncomingContestResolver) Resolve() (ContractResolver, error) {
 		// present itself when we crash before processRemoteAdds in the
 		// link has ran.
 		h.resolved = true
+
+		if err := h.processFinalHtlcFail(); err != nil {
+			return nil, err
+		}
 
 		// We write a report to disk that indicates we could not decode
 		// the htlc.
@@ -128,6 +158,10 @@ func (h *htlcIncomingContestResolver) Resolve() (ContractResolver, error) {
 			h.htlcExpiry, currentHeight)
 		h.resolved = true
 
+		if err := h.processFinalHtlcFail(); err != nil {
+			return nil, err
+		}
+
 		// Finally, get our report and checkpoint our resolver with a
 		// timeout outcome report.
 		report := h.report().resolverReport(
@@ -152,7 +186,7 @@ func (h *htlcIncomingContestResolver) Resolve() (ContractResolver, error) {
 		// Update htlcResolution with the matching preimage.
 		h.htlcResolution.Preimage = preimage
 
-		log.Infof("%T(%v): extracted preimage=%v from beacon!", h,
+		log.Infof("%T(%v): applied preimage=%v", h,
 			h.htlcResolution.ClaimOutpoint, preimage)
 
 		// If this is our commitment transaction, then we'll need to
@@ -180,7 +214,6 @@ func (h *htlcIncomingContestResolver) Resolve() (ContractResolver, error) {
 		// Take action based on the type of resolution we have
 		// received.
 		switch resolution := e.(type) {
-
 		// If the htlc resolution was a settle, apply the
 		// preimage and return a success resolver.
 		case *invoices.HtlcSettleResolution:
@@ -200,6 +233,10 @@ func (h *htlcIncomingContestResolver) Resolve() (ContractResolver, error) {
 				h.htlcExpiry, currentHeight)
 
 			h.resolved = true
+
+			if err := h.processFinalHtlcFail(); err != nil {
+				return nil, err
+			}
 
 			// Checkpoint our resolver with an abandoned outcome
 			// because we take no further action on this htlc.
@@ -229,7 +266,7 @@ func (h *htlcIncomingContestResolver) Resolve() (ContractResolver, error) {
 		// hop on-chain. If this HTLC indeed pays to an existing
 		// invoice, the invoice registry will tell us what to do with
 		// the HTLC. This is identical to HTLC resolution in the link.
-		circuitKey := channeldb.CircuitKey{
+		circuitKey := models.CircuitKey{
 			ChanID: h.ShortChanID,
 			HtlcID: h.htlc.HtlcIndex,
 		}
@@ -278,7 +315,13 @@ func (h *htlcIncomingContestResolver) Resolve() (ContractResolver, error) {
 		// NOTE: This is done BEFORE opportunistically querying the db,
 		// to ensure the preimage can't be delivered between querying
 		// and registering for the preimage subscription.
-		preimageSubscription := h.PreimageDB.SubscribeUpdates()
+		preimageSubscription, err := h.PreimageDB.SubscribeUpdates(
+			h.htlcSuccessResolver.ShortChanID, &h.htlc,
+			payload, nextHopOnionBlob,
+		)
+		if err != nil {
+			return nil, err
+		}
 		defer preimageSubscription.CancelSubscription()
 
 		// With the epochs and preimage subscriptions initialized, we'll
@@ -336,6 +379,10 @@ func (h *htlcIncomingContestResolver) Resolve() (ContractResolver, error) {
 					h.htlcResolution.ClaimOutpoint,
 					h.htlcExpiry, currentHeight)
 				h.resolved = true
+
+				if err := h.processFinalHtlcFail(); err != nil {
+					return nil, err
+				}
 
 				report := h.report().resolverReport(
 					nil,
@@ -434,17 +481,31 @@ func (h *htlcIncomingContestResolver) Supplement(htlc channeldb.HTLC) {
 }
 
 // decodePayload (re)decodes the hop payload of a received htlc.
-func (h *htlcIncomingContestResolver) decodePayload() (*hop.Payload, error) {
+func (h *htlcIncomingContestResolver) decodePayload() (*hop.Payload,
+	[]byte, error) {
 
 	onionReader := bytes.NewReader(h.htlc.OnionBlob)
 	iterator, err := h.OnionProcessor.ReconstructHopIterator(
 		onionReader, h.htlc.RHash[:],
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return iterator.HopPayload()
+	payload, err := iterator.HopPayload()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Transform onion blob for the next hop.
+	var onionBlob [lnwire.OnionPacketSize]byte
+	buf := bytes.NewBuffer(onionBlob[0:0])
+	err = iterator.EncodeNextHop(buf)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return payload, onionBlob[:], nil
 }
 
 // A compile time assertion to ensure htlcIncomingContestResolver meets the

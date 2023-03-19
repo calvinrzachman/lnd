@@ -3,8 +3,8 @@ package sweep
 import (
 	"testing"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/stretchr/testify/require"
@@ -14,14 +14,9 @@ import (
 func TestTxInputSet(t *testing.T) {
 	const (
 		feeRate   = 1000
-		relayFee  = 300
 		maxInputs = 10
 	)
-	set := newTxInputSet(nil, feeRate, relayFee, maxInputs)
-
-	if set.dustLimit != 537 {
-		t.Fatalf("incorrect dust limit")
-	}
+	set := newTxInputSet(nil, feeRate, maxInputs)
 
 	// Create a 300 sat input. The fee to sweep this input to a P2WKH output
 	// is 439 sats. That means that this input yields -139 sats and we
@@ -66,16 +61,15 @@ func TestTxInputSet(t *testing.T) {
 func TestTxInputSetFromWallet(t *testing.T) {
 	const (
 		feeRate   = 500
-		relayFee  = 300
 		maxInputs = 10
 	)
 
 	wallet := &mockWallet{}
-	set := newTxInputSet(wallet, feeRate, relayFee, maxInputs)
+	set := newTxInputSet(wallet, feeRate, maxInputs)
 
-	// Add a 700 sat input to the set. It yields positively, but doesn't
+	// Add a 500 sat input to the set. It yields positively, but doesn't
 	// reach the output dust limit.
-	if !set.add(createP2WKHInput(700), constraintsRegular) {
+	if !set.add(createP2WKHInput(500), constraintsRegular) {
 		t.Fatal("expected add of positively yielding input to succeed")
 	}
 	if set.enoughInput() {
@@ -112,7 +106,7 @@ type mockWallet struct {
 	Wallet
 }
 
-func (m *mockWallet) ListUnspentWitness(minconfirms, maxconfirms int32) (
+func (m *mockWallet) ListUnspentWitnessFromDefaultAccount(minConfs, maxConfs int32) (
 	[]*lnwallet.Utxo, error) {
 
 	return []*lnwallet.Utxo{
@@ -138,13 +132,9 @@ func (r *reqInput) RequiredTxOut() *wire.TxOut {
 func TestTxInputSetRequiredOutput(t *testing.T) {
 	const (
 		feeRate   = 1000
-		relayFee  = 300
 		maxInputs = 10
 	)
-	set := newTxInputSet(nil, feeRate, relayFee, maxInputs)
-	if set.dustLimit != 537 {
-		t.Fatalf("incorrect dust limit")
-	}
+	set := newTxInputSet(nil, feeRate, maxInputs)
 
 	// Attempt to add an input with a required txout below the dust limit.
 	// This should fail since we cannot trim such outputs.
@@ -152,7 +142,7 @@ func TestTxInputSetRequiredOutput(t *testing.T) {
 		Input: createP2WKHInput(500),
 		txOut: &wire.TxOut{
 			Value:    500,
-			PkScript: make([]byte, 33),
+			PkScript: make([]byte, input.P2PKHSize),
 		},
 	}
 	require.False(t, set.add(inp, constraintsRegular),
@@ -164,7 +154,7 @@ func TestTxInputSetRequiredOutput(t *testing.T) {
 		Input: createP2WKHInput(1000),
 		txOut: &wire.TxOut{
 			Value:    1000,
-			PkScript: make([]byte, 22),
+			PkScript: make([]byte, input.P2WPKHSize),
 		},
 	}
 	require.True(t, set.add(inp, constraintsRegular), "failed adding input")
@@ -244,7 +234,6 @@ func TestTxInputSetRequiredOutput(t *testing.T) {
 	change = set.changeOutput
 	if change != 1000 {
 		t.Fatalf("expected change to be %v, had %v", 1000, change)
-
 	}
 	require.True(t, set.enoughInput())
 }

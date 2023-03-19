@@ -5,13 +5,14 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
 	"github.com/lightningnetwork/lnd/autopilot"
 	"github.com/lightningnetwork/lnd/chainreg"
 	"github.com/lightningnetwork/lnd/funding"
 	"github.com/lightningnetwork/lnd/lncfg"
+	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/tor"
 )
@@ -136,7 +137,7 @@ var _ autopilot.ChannelController = (*chanController)(nil)
 // interfaces needed to drive it won't be launched before the Manager's
 // StartAgent method is called.
 func initAutoPilot(svr *server, cfg *lncfg.AutoPilot,
-	chainCfg *lncfg.Chain, netParams chainreg.BitcoinNetParams) (
+	minHTLCIn lnwire.MilliSatoshi, netParams chainreg.BitcoinNetParams) (
 	*autopilot.ManagerCfg, error) {
 
 	atplLog.Infof("Instantiating autopilot with active=%v, "+
@@ -176,13 +177,15 @@ func initAutoPilot(svr *server, cfg *lncfg.AutoPilot,
 			private:       cfg.Private,
 			minConfs:      cfg.MinConfs,
 			confTarget:    cfg.ConfTarget,
-			chanMinHtlcIn: chainCfg.MinHTLCIn,
+			chanMinHtlcIn: minHTLCIn,
 			netParams:     netParams,
 		},
 		WalletBalance: func() (btcutil.Amount, error) {
-			return svr.cc.Wallet.ConfirmedBalance(cfg.MinConfs)
+			return svr.cc.Wallet.ConfirmedBalance(
+				cfg.MinConfs, lnwallet.DefaultAccountName,
+			)
 		},
-		Graph:       autopilot.ChannelGraphFromDatabase(svr.localChanDB.ChannelGraph()),
+		Graph:       autopilot.ChannelGraphFromDatabase(svr.graphDB),
 		Constraints: atplConstraints,
 		ConnectToPeer: func(target *btcec.PublicKey, addrs []net.Addr) (bool, error) {
 			// First, we'll check if we're already connected to the
@@ -255,7 +258,7 @@ func initAutoPilot(svr *server, cfg *lncfg.AutoPilot,
 			// We'll fetch the current state of open
 			// channels from the database to use as initial
 			// state for the auto-pilot agent.
-			activeChannels, err := svr.remoteChanDB.FetchAllChannels()
+			activeChannels, err := svr.chanStateDB.FetchAllChannels()
 			if err != nil {
 				return nil, err
 			}
@@ -279,7 +282,7 @@ func initAutoPilot(svr *server, cfg *lncfg.AutoPilot,
 		ChannelInfo: func(chanPoint wire.OutPoint) (
 			*autopilot.LocalChannel, error) {
 
-			channel, err := svr.remoteChanDB.FetchChannel(chanPoint)
+			channel, err := svr.chanStateDB.FetchChannel(nil, chanPoint)
 			if err != nil {
 				return nil, err
 			}

@@ -9,12 +9,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/input"
+	"github.com/lightningnetwork/lnd/labels"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 )
@@ -337,7 +338,7 @@ func (s *UtxoSweeper) Start() error {
 		return nil
 	}
 
-	log.Tracef("Sweeper starting")
+	log.Info("Sweeper starting")
 
 	// Retrieve last published tx from database.
 	lastTx, err := s.cfg.Store.GetLastPublishedTx()
@@ -427,7 +428,7 @@ func (s *UtxoSweeper) Stop() error {
 		return nil
 	}
 
-	log.Debugf("Sweeper shutting down")
+	log.Info("Sweeper shutting down")
 
 	close(s.quit)
 	s.wg.Wait()
@@ -459,9 +460,11 @@ func (s *UtxoSweeper) SweepInput(input input.Input,
 		return nil, err
 	}
 
+	absoluteTimeLock, _ := input.RequiredLockTime()
 	log.Infof("Sweep request received: out_point=%v, witness_type=%v, "+
-		"time_lock=%v, amount=%v, params=(%v)",
-		input.OutPoint(), input.WitnessType(), input.BlocksToMaturity(),
+		"relative_time_lock=%v, absolute_time_lock=%v, amount=%v, "+
+		"params=(%v)", input.OutPoint(), input.WitnessType(),
+		input.BlocksToMaturity(), absoluteTimeLock,
 		btcutil.Amount(input.SignDesc().Output.Value), params)
 
 	sweeperInput := &sweepInputMessage{
@@ -507,6 +510,81 @@ func (s *UtxoSweeper) feeRateForPreference(
 	return feeRate, nil
 }
 
+// removeLastSweepDescendants removes any transactions from the wallet that
+// spend outputs produced by the passed spendingTx. This needs to be done in
+// cases where we're not the only ones that can sweep an output, but there may
+// exist unconfirmed spends that spend outputs created by a sweep transaction.
+// The most common case for this is when someone sweeps our anchor outputs
+// after 16 blocks.
+func (s *UtxoSweeper) removeLastSweepDescendants(spendingTx *wire.MsgTx) error {
+	// Obtain all the past sweeps that we've done so far. We'll need these
+	// to ensure that if the spendingTx spends any of the same inputs, then
+	// we remove any transaction that may be spending those inputs from the
+	// wallet.
+	//
+	// TODO(roasbeef): can be last sweep here if we remove anything confirmed
+	// from the store?
+	pastSweepHashes, err := s.cfg.Store.ListSweeps()
+	if err != nil {
+		return err
+	}
+
+	log.Debugf("Attempting to remove descendant txns invalidated by "+
+		"(txid=%v): %v", spendingTx.TxHash(), spew.Sdump(spendingTx))
+
+	// Construct a map of the inputs this transaction spends for each look
+	// up.
+	inputsSpent := make(map[wire.OutPoint]struct{}, len(spendingTx.TxIn))
+	for _, txIn := range spendingTx.TxIn {
+		inputsSpent[txIn.PreviousOutPoint] = struct{}{}
+	}
+
+	// We'll now go through each past transaction we published during this
+	// epoch and cross reference the spent inputs. If there're any inputs
+	// in common with the inputs the spendingTx spent, then we'll remove
+	// those.
+	//
+	// TODO(roasbeef): need to start to remove all transaction hashes after
+	// every N blocks (assumed point of no return)
+	for _, sweepHash := range pastSweepHashes {
+		sweepTx, err := s.cfg.Wallet.FetchTx(sweepHash)
+		if err != nil {
+			return err
+		}
+
+		// Transaction wasn't found in the wallet, may have already
+		// been replaced/removed.
+		if sweepTx == nil {
+			continue
+		}
+
+		// Check to see if this past sweep transaction spent any of the
+		// same inputs as spendingTx.
+		var isConflicting bool
+		for _, txIn := range sweepTx.TxIn {
+			if _, ok := inputsSpent[txIn.PreviousOutPoint]; ok {
+				isConflicting = true
+				break
+			}
+		}
+
+		// If it did, then we'll signal the wallet to remove all the
+		// transactions that are descendants of outputs created by the
+		// sweepTx.
+		if isConflicting {
+			log.Debugf("Removing sweep txid=%v from wallet: %v",
+				sweepTx.TxHash(), spew.Sdump(sweepTx))
+
+			err := s.cfg.Wallet.RemoveDescendants(sweepTx)
+			if err != nil {
+				log.Warnf("unable to remove descendants: %v", err)
+			}
+		}
+	}
+
+	return nil
+}
+
 // collector is the sweeper main loop. It processes new inputs, spend
 // notifications and counts down to publication of the sweep tx.
 func (s *UtxoSweeper) collector(blockEpochs <-chan *chainntnfs.BlockEpoch) {
@@ -534,6 +612,18 @@ func (s *UtxoSweeper) collector(blockEpochs <-chan *chainntnfs.BlockEpoch) {
 				log.Debugf("Already pending input %v received",
 					outpoint)
 
+				// Before updating the input details, check if
+				// an exclusive group was set, and if so, assume
+				// this input as finalized and remove all other
+				// inputs belonging to the same exclusive group.
+				var prevExclGroup *uint64
+				if pendInput.params.ExclusiveGroup != nil &&
+					input.params.ExclusiveGroup == nil {
+
+					prevExclGroup = new(uint64)
+					*prevExclGroup = *pendInput.params.ExclusiveGroup
+				}
+
 				// Update input details and sweep parameters.
 				// The re-offered input details may contain a
 				// change to the unconfirmed parent tx info.
@@ -545,6 +635,11 @@ func (s *UtxoSweeper) collector(blockEpochs <-chan *chainntnfs.BlockEpoch) {
 				pendInput.listeners = append(
 					pendInput.listeners, input.resultChan,
 				)
+
+				if prevExclGroup != nil {
+					s.removeExclusiveGroup(*prevExclGroup)
+				}
+
 				continue
 			}
 
@@ -559,6 +654,7 @@ func (s *UtxoSweeper) collector(blockEpochs <-chan *chainntnfs.BlockEpoch) {
 				params:           input.params,
 			}
 			s.pendingInputs[outpoint] = pendInput
+			log.Tracef("input %v added to pendingInputs", outpoint)
 
 			// Start watching for spend of this input, either by us
 			// or the remote party.
@@ -579,6 +675,7 @@ func (s *UtxoSweeper) collector(blockEpochs <-chan *chainntnfs.BlockEpoch) {
 			if err := s.scheduleSweep(bestHeight); err != nil {
 				log.Errorf("schedule sweep: %v", err)
 			}
+			log.Tracef("input %v scheduled", outpoint)
 
 		// A spend of one of our inputs is detected. Signal sweep
 		// results to the caller(s).
@@ -599,12 +696,29 @@ func (s *UtxoSweeper) collector(blockEpochs <-chan *chainntnfs.BlockEpoch) {
 				continue
 			}
 
-			log.Debugf("Detected spend related to in flight inputs "+
-				"(is_ours=%v): %v",
-				newLogClosure(func() string {
-					return spew.Sdump(spend.SpendingTx)
-				}), isOurTx,
-			)
+			// If this isn't our transaction, it means someone else
+			// swept outputs that we were attempting to sweep. This
+			// can happen for anchor outputs as well as justice
+			// transactions. In this case, we'll notify the wallet
+			// to remove any spends that a descent from this
+			// output.
+			if !isOurTx {
+				err := s.removeLastSweepDescendants(
+					spend.SpendingTx,
+				)
+				if err != nil {
+					log.Warnf("unable to remove descendant "+
+						"transactions due to tx %v: ",
+						spendHash)
+				}
+
+				log.Debugf("Detected spend related to in flight inputs "+
+					"(is_ours=%v): %v",
+					newLogClosure(func() string {
+						return spew.Sdump(spend.SpendingTx)
+					}), isOurTx,
+				)
+			}
 
 			// Signal sweep results for inputs in this confirmed
 			// tx.
@@ -782,7 +896,7 @@ func (s *UtxoSweeper) bucketForFeeRate(
 // createInputClusters creates a list of input clusters from the set of pending
 // inputs known by the UtxoSweeper. It clusters inputs by
 // 1) Required tx locktime
-// 2) Similar fee rates
+// 2) Similar fee rates.
 func (s *UtxoSweeper) createInputClusters() []inputCluster {
 	inputs := s.pendingInputs
 
@@ -963,7 +1077,6 @@ func zipClusters(as, bs []inputCluster) []inputCluster {
 		a := as[i]
 
 		switch {
-
 		// If the fee rate for the next one from bs is at least a's, we
 		// merge.
 		case j < len(bs) && bs[j].sweepFeeRate >= a.sweepFeeRate:
@@ -973,7 +1086,7 @@ func zipClusters(as, bs []inputCluster) []inputCluster {
 			// Increment j for the next round.
 			j++
 
-		// We did not merge, meaning all the remining clusters from bs
+		// We did not merge, meaning all the remaining clusters from bs
 		// have lower fee rate. Instead we add a directly to the final
 		// clusters.
 		default:
@@ -998,7 +1111,6 @@ func mergeClusters(a, b inputCluster) []inputCluster {
 	newCluster := inputCluster{}
 
 	switch {
-
 	// Incompatible locktimes, return the sets without merging them.
 	case a.lockTime != nil && b.lockTime != nil && *a.lockTime != *b.lockTime:
 		return []inputCluster{a, b}
@@ -1035,7 +1147,7 @@ func (s *UtxoSweeper) scheduleSweep(currentHeight int32) error {
 	// The timer is already ticking, no action needed for the sweep to
 	// happen.
 	if s.timer != nil {
-		log.Debugf("Timer still ticking")
+		log.Debugf("Timer still ticking at height=%v", currentHeight)
 		return nil
 	}
 
@@ -1150,7 +1262,7 @@ func (s *UtxoSweeper) getInputLists(cluster inputCluster,
 	if len(retryInputs) > 0 {
 		var err error
 		allSets, err = generateInputPartitionings(
-			append(retryInputs, newInputs...), s.relayFeeRate,
+			append(retryInputs, newInputs...),
 			cluster.sweepFeeRate, s.cfg.MaxInputsPerTx,
 			s.cfg.Wallet,
 		)
@@ -1161,8 +1273,8 @@ func (s *UtxoSweeper) getInputLists(cluster inputCluster,
 
 	// Create sets for just the new inputs.
 	newSets, err := generateInputPartitionings(
-		newInputs, s.relayFeeRate, cluster.sweepFeeRate,
-		s.cfg.MaxInputsPerTx, s.cfg.Wallet,
+		newInputs, cluster.sweepFeeRate, s.cfg.MaxInputsPerTx,
+		s.cfg.Wallet,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("input partitionings: %v", err)
@@ -1192,8 +1304,8 @@ func (s *UtxoSweeper) sweep(inputs inputSet, feeRate chainfee.SatPerKWeight,
 
 	// Create sweep tx.
 	tx, err := createSweepTx(
-		inputs, s.currentOutputScript, uint32(currentHeight), feeRate,
-		dustLimit(s.relayFeeRate), s.cfg.Signer,
+		inputs, nil, s.currentOutputScript, uint32(currentHeight),
+		feeRate, s.cfg.Signer,
 	)
 	if err != nil {
 		return fmt.Errorf("create sweep tx: %v", err)
@@ -1219,16 +1331,23 @@ func (s *UtxoSweeper) sweep(inputs inputSet, feeRate chainfee.SatPerKWeight,
 		}),
 	)
 
-	err = s.cfg.Wallet.PublishTransaction(tx, "")
+	err = s.cfg.Wallet.PublishTransaction(
+		tx, labels.MakeLabel(labels.LabelTypeSweepTransaction, nil),
+	)
 
 	// In case of an unexpected error, don't try to recover.
 	if err != nil && err != lnwallet.ErrDoubleSpend {
 		return fmt.Errorf("publish tx: %v", err)
 	}
 
-	// Keep the output script in case of an error, so that it can be reused
-	// for the next transaction and causes no address inflation.
-	if err == nil {
+	// Otherwise log the error.
+	if err != nil {
+		log.Errorf("Publish sweep tx %v got error: %v", tx.TxHash(),
+			err)
+	} else {
+		// If there's no error, remove the output script. Otherwise
+		// keep it so that it can be reused for the next transaction
+		// and causes no address inflation.
 		s.currentOutputScript = nil
 	}
 
@@ -1263,6 +1382,11 @@ func (s *UtxoSweeper) sweep(inputs inputSet, feeRate chainfee.SatPerKWeight,
 			nextAttemptDelta)
 
 		if pi.publishAttempts >= s.cfg.MaxSweepAttempts {
+			log.Warnf("input %v: publishAttempts(%v) exceeds "+
+				"MaxSweepAttempts(%v), removed",
+				input.PreviousOutPoint, pi.publishAttempts,
+				s.cfg.MaxSweepAttempts)
+
 			// Signal result channels sweep result.
 			s.signalAndRemove(&input.PreviousOutPoint, Result{
 				Err: ErrTooManyAttempts,
@@ -1278,7 +1402,8 @@ func (s *UtxoSweeper) sweep(inputs inputSet, feeRate chainfee.SatPerKWeight,
 func (s *UtxoSweeper) waitForSpend(outpoint wire.OutPoint,
 	script []byte, heightHint uint32) (func(), error) {
 
-	log.Debugf("Wait for spend of %v", outpoint)
+	log.Tracef("Wait for spend of %v at heightHint=%v",
+		outpoint, heightHint)
 
 	spendEvent, err := s.cfg.Notifier.RegisterSpendNtfn(
 		&outpoint, script, heightHint,
@@ -1290,6 +1415,7 @@ func (s *UtxoSweeper) waitForSpend(outpoint wire.OutPoint,
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
+
 		select {
 		case spend, ok := <-spendEvent.Spend:
 			if !ok {
@@ -1405,10 +1531,10 @@ func (s *UtxoSweeper) UpdateParams(input wire.OutPoint,
 // fee preference to ensure it will properly create a replacement transaction.
 //
 // TODO(wilmer):
-//   * Validate fee preference to ensure we'll create a valid replacement
+//   - Validate fee preference to ensure we'll create a valid replacement
 //     transaction to allow the new fee rate to propagate throughout the
 //     network.
-//   * Ensure we don't combine this input with any other unconfirmed inputs that
+//   - Ensure we don't combine this input with any other unconfirmed inputs that
 //     did not exist in the original sweep transaction, resulting in an invalid
 //     replacement transaction.
 func (s *UtxoSweeper) handleUpdateReq(req *updateReq, bestHeight int32) (
@@ -1487,8 +1613,8 @@ func (s *UtxoSweeper) CreateSweepTx(inputs []input.Input, feePref FeePreference,
 	}
 
 	return createSweepTx(
-		inputs, pkScript, currentBlockHeight, feePerKw,
-		dustLimit(s.relayFeeRate), s.cfg.Signer,
+		inputs, nil, pkScript, currentBlockHeight, feePerKw,
+		s.cfg.Signer,
 	)
 }
 

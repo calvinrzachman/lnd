@@ -1,18 +1,20 @@
 package channeldb
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
 
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
 	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/shachain"
+	"github.com/lightningnetwork/lnd/tlv"
 )
 
 // writeOutpoint writes an outpoint to the passed writer using the minimal
@@ -84,7 +86,8 @@ func WriteElement(w io.Writer, element interface{}) error {
 
 		return binary.Write(w, byteOrder, false)
 	case ChannelType:
-		if err := binary.Write(w, byteOrder, e); err != nil {
+		var buf [8]byte
+		if err := tlv.WriteVarInt(w, uint64(e), &buf); err != nil {
 			return err
 		}
 
@@ -178,12 +181,23 @@ func WriteElement(w io.Writer, element interface{}) error {
 		}
 
 	case lnwire.Message:
-		if _, err := lnwire.WriteMessage(w, e, 0); err != nil {
+		var msgBuf bytes.Buffer
+		if _, err := lnwire.WriteMessage(&msgBuf, e, 0); err != nil {
+			return err
+		}
+
+		msgLen := uint16(len(msgBuf.Bytes()))
+		if err := WriteElements(w, msgLen); err != nil {
+			return err
+		}
+
+		if _, err := w.Write(msgBuf.Bytes()); err != nil {
 			return err
 		}
 
 	case ChannelStatus:
-		if err := binary.Write(w, byteOrder, e); err != nil {
+		var buf [8]byte
+		if err := tlv.WriteVarInt(w, uint64(e), &buf); err != nil {
 			return err
 		}
 
@@ -259,9 +273,13 @@ func ReadElement(r io.Reader, element interface{}) error {
 		}
 
 	case *ChannelType:
-		if err := binary.Read(r, byteOrder, e); err != nil {
+		var buf [8]byte
+		ctype, err := tlv.ReadVarInt(r, &buf)
+		if err != nil {
 			return err
 		}
+
+		*e = ChannelType(ctype)
 
 	case *chainhash.Hash:
 		if _, err := io.ReadFull(r, e[:]); err != nil {
@@ -335,7 +353,7 @@ func ReadElement(r io.Reader, element interface{}) error {
 			return err
 		}
 
-		priv, _ := btcec.PrivKeyFromBytes(btcec.S256(), b[:])
+		priv, _ := btcec.PrivKeyFromBytes(b[:])
 		*e = priv
 
 	case **btcec.PublicKey:
@@ -344,7 +362,7 @@ func ReadElement(r io.Reader, element interface{}) error {
 			return err
 		}
 
-		pubKey, err := btcec.ParsePubKey(b[:], btcec.S256())
+		pubKey, err := btcec.ParsePubKey(b[:])
 		if err != nil {
 			return err
 		}
@@ -394,7 +412,13 @@ func ReadElement(r io.Reader, element interface{}) error {
 		*e = bytes
 
 	case *lnwire.Message:
-		msg, err := lnwire.ReadMessage(r, 0)
+		var msgLen uint16
+		if err := ReadElement(r, &msgLen); err != nil {
+			return err
+		}
+
+		msgReader := io.LimitReader(r, int64(msgLen))
+		msg, err := lnwire.ReadMessage(msgReader, 0)
 		if err != nil {
 			return err
 		}
@@ -402,9 +426,13 @@ func ReadElement(r io.Reader, element interface{}) error {
 		*e = msg
 
 	case *ChannelStatus:
-		if err := binary.Read(r, byteOrder, e); err != nil {
+		var buf [8]byte
+		status, err := tlv.ReadVarInt(r, &buf)
+		if err != nil {
 			return err
 		}
+
+		*e = ChannelStatus(status)
 
 	case *ClosureType:
 		if err := binary.Read(r, byteOrder, e); err != nil {

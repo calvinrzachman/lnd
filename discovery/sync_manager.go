@@ -92,6 +92,11 @@ type SyncManagerCfg struct {
 
 	// BestHeight returns the latest height known of the chain.
 	BestHeight func() uint32
+
+	// PinnedSyncers is a set of peers that will always transition to
+	// ActiveSync upon connection. These peers will never transition to
+	// PassiveSync.
+	PinnedSyncers PinnedSyncers
 }
 
 // SyncManager is a subsystem of the gossiper that manages the gossip syncers
@@ -140,6 +145,12 @@ type SyncManager struct {
 	// currently receiving new graph updates from.
 	inactiveSyncers map[route.Vertex]*GossipSyncer
 
+	// pinnedActiveSyncers is the set of all syncers which are pinned into
+	// an active sync. Pinned peers performan an initial historical sync on
+	// each connection and will continue to receive graph updates for the
+	// duration of the connection.
+	pinnedActiveSyncers map[route.Vertex]*GossipSyncer
+
 	wg   sync.WaitGroup
 	quit chan struct{}
 }
@@ -154,7 +165,10 @@ func newSyncManager(cfg *SyncManagerCfg) *SyncManager {
 			map[route.Vertex]*GossipSyncer, cfg.NumActiveSyncers,
 		),
 		inactiveSyncers: make(map[route.Vertex]*GossipSyncer),
-		quit:            make(chan struct{}),
+		pinnedActiveSyncers: make(
+			map[route.Vertex]*GossipSyncer, len(cfg.PinnedSyncers),
+		),
+		quit: make(chan struct{}),
 	}
 }
 
@@ -169,6 +183,9 @@ func (m *SyncManager) Start() {
 // Stop stops the SyncManager from performing its duties.
 func (m *SyncManager) Stop() {
 	m.stop.Do(func() {
+		log.Debugf("SyncManager is stopping")
+		defer log.Debugf("SyncManager stopped")
+
 		close(m.quit)
 		m.wg.Wait()
 
@@ -188,8 +205,8 @@ func (m *SyncManager) Stop() {
 // 2. Finding new peers to receive graph updates from to ensure we don't only
 //    receive them from the same set of peers.
 
-// 3. Finding new peers to force a historical sync with to ensure we have as
-//    much of the public network as possible.
+//  3. Finding new peers to force a historical sync with to ensure we have as
+//     much of the public network as possible.
 //
 // NOTE: This must be run as a goroutine.
 func (m *SyncManager) syncerHandler() {
@@ -198,7 +215,6 @@ func (m *SyncManager) syncerHandler() {
 	m.cfg.RotateTicker.Resume()
 	defer m.cfg.RotateTicker.Stop()
 
-	m.cfg.HistoricalSyncTicker.Resume()
 	defer m.cfg.HistoricalSyncTicker.Stop()
 
 	var (
@@ -207,12 +223,25 @@ func (m *SyncManager) syncerHandler() {
 		initialHistoricalSyncer *GossipSyncer
 
 		// initialHistoricalSyncSignal is a signal that will fire once
-		// the intiial historical sync has been completed. This is
+		// the initial historical sync has been completed. This is
 		// crucial to ensure that another historical sync isn't
 		// attempted just because the initialHistoricalSyncer was
 		// disconnected.
 		initialHistoricalSyncSignal chan struct{}
 	)
+
+	setInitialHistoricalSyncer := func(s *GossipSyncer) {
+		initialHistoricalSyncer = s
+		initialHistoricalSyncSignal = s.ResetSyncedSignal()
+
+		// Restart the timer for our new historical sync peer. This will
+		// ensure that all initial syncers receive an equivalent
+		// duration before attempting the next sync. Without doing so we
+		// might attempt two historical sync back to back if a peer
+		// disconnects just before the ticker fires.
+		m.cfg.HistoricalSyncTicker.Pause()
+		m.cfg.HistoricalSyncTicker.Resume()
+	}
 
 	for {
 		select {
@@ -228,6 +257,8 @@ func (m *SyncManager) syncerHandler() {
 
 			s := m.createGossipSyncer(newSyncer.peer)
 
+			isPinnedSyncer := m.isPinnedSyncer(s)
+
 			// attemptHistoricalSync determines whether we should
 			// attempt an initial historical sync when a new peer
 			// connects.
@@ -235,6 +266,14 @@ func (m *SyncManager) syncerHandler() {
 
 			m.syncersMu.Lock()
 			switch {
+			// For pinned syncers, we will immediately transition
+			// the peer into an active (pinned) sync state.
+			case isPinnedSyncer:
+				attemptHistoricalSync = true
+				s.setSyncType(PinnedSync)
+				s.setSyncState(syncerIdle)
+				m.pinnedActiveSyncers[s.cfg.peerPub] = s
+
 			// Regardless of whether the initial historical sync
 			// has completed, we'll re-trigger a historical sync if
 			// we no longer have any syncers. This might be
@@ -243,7 +282,8 @@ func (m *SyncManager) syncerHandler() {
 			case len(m.activeSyncers) == 0 &&
 				len(m.inactiveSyncers) == 0:
 
-				attemptHistoricalSync = true
+				attemptHistoricalSync =
+					m.cfg.NumActiveSyncers > 0
 				fallthrough
 
 			// If we've exceeded our total number of active syncers,
@@ -280,7 +320,6 @@ func (m *SyncManager) syncerHandler() {
 			if !attemptHistoricalSync {
 				continue
 			}
-			m.markGraphSyncing()
 
 			log.Debugf("Attempting initial historical sync with "+
 				"GossipSyncer(%x)", s.cfg.peerPub)
@@ -297,8 +336,9 @@ func (m *SyncManager) syncerHandler() {
 			// keep track of the corresponding syncer to properly
 			// handle disconnects. We'll also use a signal to know
 			// when the historical sync completed.
-			initialHistoricalSyncer = s
-			initialHistoricalSyncSignal = s.ResetSyncedSignal()
+			if !isPinnedSyncer {
+				setInitialHistoricalSyncer(s)
+			}
 
 		// An existing peer has disconnected, so we'll tear down its
 		// corresponding GossipSyncer.
@@ -317,13 +357,15 @@ func (m *SyncManager) syncerHandler() {
 			case initialHistoricalSyncer == nil:
 				fallthrough
 			case staleSyncer.peer != initialHistoricalSyncer.cfg.peerPub:
+				fallthrough
+			case m.cfg.NumActiveSyncers == 0:
 				continue
 			}
 
 			// Otherwise, our initialHistoricalSyncer corresponds to
 			// the peer being disconnected, so we'll have to find a
 			// replacement.
-			log.Debug("Finding replacement for intitial " +
+			log.Debug("Finding replacement for initial " +
 				"historical sync")
 
 			s := m.forceHistoricalSync()
@@ -337,15 +379,13 @@ func (m *SyncManager) syncerHandler() {
 				"GossipSyncer(%v) with GossipSyncer(%x)",
 				staleSyncer.peer, s.cfg.peerPub)
 
-			initialHistoricalSyncer = s
-			initialHistoricalSyncSignal = s.ResetSyncedSignal()
+			setInitialHistoricalSyncer(s)
 
 		// Our initial historical sync signal has completed, so we'll
 		// nil all of the relevant fields as they're no longer needed.
 		case <-initialHistoricalSyncSignal:
 			initialHistoricalSyncer = nil
 			initialHistoricalSyncSignal = nil
-			m.markGraphSynced()
 
 			log.Debug("Initial historical sync completed")
 
@@ -359,6 +399,13 @@ func (m *SyncManager) syncerHandler() {
 			if numActiveLeft <= 0 {
 				m.syncersMu.Unlock()
 				continue
+			}
+
+			// We may not even have enough inactive syncers to be
+			// transitted. In that case, we will transit all the
+			// inactive syncers.
+			if len(m.inactiveSyncers) < numActiveLeft {
+				numActiveLeft = len(m.inactiveSyncers)
 			}
 
 			log.Debugf("Attempting to transition %v passive "+
@@ -380,12 +427,26 @@ func (m *SyncManager) syncerHandler() {
 		// Our HistoricalSyncTicker has ticked, so we'll randomly select
 		// a peer and force a historical sync with them.
 		case <-m.cfg.HistoricalSyncTicker.Ticks():
-			s := m.forceHistoricalSync()
+			// To be extra cautious, gate the forceHistoricalSync
+			// call such that it can only execute if we are
+			// configured to have a non-zero number of sync peers.
+			// This way even if the historical sync ticker manages
+			// to tick we can be sure that a historical sync won't
+			// accidentally begin.
+			if m.cfg.NumActiveSyncers == 0 {
+				continue
+			}
 
-			// If we don't have a syncer available or we've already
-			// performed our initial historical sync, then we have
-			// nothing left to do.
-			if s == nil || m.IsGraphSynced() {
+			// If we don't have a syncer available we have nothing
+			// to do.
+			s := m.forceHistoricalSync()
+			if s == nil {
+				continue
+			}
+
+			// If we've already completed a historical sync, we'll
+			// skip setting the initial historical syncer.
+			if m.IsGraphSynced() {
 				continue
 			}
 
@@ -394,13 +455,19 @@ func (m *SyncManager) syncerHandler() {
 			// where our previous historical sync peer did not
 			// respond to our queries and we haven't ingested as
 			// much of the graph as we should.
-			initialHistoricalSyncer = s
-			initialHistoricalSyncSignal = s.ResetSyncedSignal()
+			setInitialHistoricalSyncer(s)
 
 		case <-m.quit:
 			return
 		}
 	}
+}
+
+// isPinnedSyncer returns true if the passed GossipSyncer is one of our pinned
+// sync peers.
+func (m *SyncManager) isPinnedSyncer(s *GossipSyncer) bool {
+	_, isPinnedSyncer := m.cfg.PinnedSyncers[s.cfg.peerPub]
+	return isPinnedSyncer
 }
 
 // createGossipSyncer creates the GossipSyncer for a newly connected peer.
@@ -426,6 +493,7 @@ func (m *SyncManager) createGossipSyncer(peer lnpeer.Peer) *GossipSyncer {
 		maxUndelayedQueryReplies:  DefaultMaxUndelayedQueryReplies,
 		delayedQueryReplyInterval: DefaultDelayedQueryReplyInterval,
 		bestHeight:                m.cfg.BestHeight,
+		markGraphSynced:           m.markGraphSynced,
 		maxQueryChanRangeReplies:  maxQueryChanRangeReplies,
 	})
 
@@ -434,6 +502,10 @@ func (m *SyncManager) createGossipSyncer(peer lnpeer.Peer) *GossipSyncer {
 	// handle any sync transitions.
 	s.setSyncState(chansSynced)
 	s.setSyncType(PassiveSync)
+
+	log.Debugf("Created new GossipSyncer[state=%s type=%s] for peer=%v",
+		s.syncState(), s.SyncType(), peer)
+
 	return s
 }
 
@@ -458,6 +530,13 @@ func (m *SyncManager) removeGossipSyncer(peer route.Vertex) {
 	// If it's a non-active syncer, then we can just exit now.
 	if _, ok := m.inactiveSyncers[peer]; ok {
 		delete(m.inactiveSyncers, peer)
+		return
+	}
+
+	// If it's a pinned syncer, then we can just exit as this doesn't
+	// affect our active syncer count.
+	if _, ok := m.pinnedActiveSyncers[peer]; ok {
+		delete(m.pinnedActiveSyncers, peer)
 		return
 	}
 
@@ -663,6 +742,10 @@ func (m *SyncManager) gossipSyncer(peer route.Vertex) (*GossipSyncer, bool) {
 	if ok {
 		return syncer, true
 	}
+	syncer, ok = m.pinnedActiveSyncers[peer]
+	if ok {
+		return syncer, true
+	}
 	return nil, false
 }
 
@@ -692,12 +775,6 @@ func (m *SyncManager) gossipSyncers() map[route.Vertex]*GossipSyncer {
 // completed.
 func (m *SyncManager) markGraphSynced() {
 	atomic.StoreInt32(&m.initialHistoricalSyncCompleted, 1)
-}
-
-// markGraphSyncing allows us to report that the initial historical sync is
-// still undergoing.
-func (m *SyncManager) markGraphSyncing() {
-	atomic.StoreInt32(&m.initialHistoricalSyncCompleted, 0)
 }
 
 // IsGraphSynced determines whether we've completed our initial historical sync.

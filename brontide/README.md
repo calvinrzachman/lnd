@@ -23,6 +23,6 @@ between network enabled programs.
 
 ## Installation and Updating
 
-```bash
-$ go get -u github.com/lightningnetwork/lnd/brontide
+```shell
+$  go get -u github.com/lightningnetwork/lnd/brontide
 ```
