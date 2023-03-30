@@ -411,7 +411,7 @@ type channelLink struct {
 
 // hodlHtlc contains htlc data that is required for resolution.
 type hodlHtlc struct {
-	pd         *lnwallet.PaymentDescriptor
+	pd         *lnwallet.AddLogEntry
 	obfuscator hop.ErrorEncrypter
 }
 
@@ -868,7 +868,7 @@ func (l *channelLink) resolveFwdPkg(fwdPkg *channeldb.FwdPkg) error {
 	// If the package is fully acked but not completed, it must still have
 	// settles and fails to propagate.
 	if !fwdPkg.SettleFailFilter.IsFull() {
-		settleFails, err := lnwallet.PayDescsFromRemoteLogUpdates(
+		settleFails, err := lnwallet.LogEntriesFromRemoteLogUpdates(
 			fwdPkg.Source, fwdPkg.Height, fwdPkg.SettleFails,
 		)
 		if err != nil {
@@ -884,7 +884,7 @@ func (l *channelLink) resolveFwdPkg(fwdPkg *channeldb.FwdPkg) error {
 	// shove the entire, original set of adds down the pipeline so that the
 	// batch of adds presented to the sphinx router does not ever change.
 	if !fwdPkg.AckFilter.IsFull() {
-		adds, err := lnwallet.PayDescsFromRemoteLogUpdates(
+		adds, err := lnwallet.LogEntriesFromRemoteLogUpdates(
 			fwdPkg.Source, fwdPkg.Height, fwdPkg.Adds,
 		)
 		if err != nil {
@@ -1359,6 +1359,8 @@ func (l *channelLink) processHtlcResolution(resolution invoices.HtlcResolution,
 		l.log.Debugf("received settle resolution for %v "+
 			"with outcome: %v", circuitKey, res.Outcome)
 
+		// settleDesc := lnwallet.SettleLogEntry{}
+
 		return l.settleHTLC(res.Preimage, htlc.pd)
 
 	// For htlc failures, we get the relevant failure message based
@@ -1370,6 +1372,8 @@ func (l *channelLink) processHtlcResolution(resolution invoices.HtlcResolution,
 		// Get the lnwire failure message based on the resolution
 		// result.
 		failure := getResolutionFailure(res, htlc.pd.Amount)
+
+		// failDesc := lnwallet.FailLogEntry{}
 
 		l.sendHTLCError(
 			htlc.pd, failure, htlc.obfuscator, true,
@@ -2814,7 +2818,7 @@ func (l *channelLink) updateChannelFee(feePerKw chainfee.SatPerKWeight) error {
 // have already been acknowledged in the forwarding package will not be sent to
 // the switch.
 func (l *channelLink) processRemoteSettleFails(fwdPkg *channeldb.FwdPkg,
-	settleFails []*lnwallet.PaymentDescriptor) {
+	settleFails []lnwallet.LogEntry) {
 
 	if len(settleFails) == 0 {
 		return
@@ -2823,7 +2827,7 @@ func (l *channelLink) processRemoteSettleFails(fwdPkg *channeldb.FwdPkg,
 	l.log.Debugf("settle-fail-filter %v", fwdPkg.SettleFailFilter)
 
 	var switchPackets []*htlcPacket
-	for i, pd := range settleFails {
+	for i, logEntry := range settleFails {
 		// Skip any settles or fails that have already been
 		// acknowledged by the incoming link that originated the
 		// forwarded Add.
@@ -2834,12 +2838,13 @@ func (l *channelLink) processRemoteSettleFails(fwdPkg *channeldb.FwdPkg,
 		// TODO(roasbeef): rework log entries to a shared
 		// interface.
 
-		switch pd.EntryType {
+		switch pd := logEntry.(type) {
+		// switch pd.EntryType {
 
 		// A settle for an HTLC we previously forwarded HTLC has been
 		// received. So we'll forward the HTLC to the switch which will
 		// handle propagating the settle to the prior hop.
-		case lnwallet.Settle:
+		case *lnwallet.SettleLogEntry:
 			// If hodl.SettleIncoming is requested, we will not
 			// forward the SETTLE to the switch and will not signal
 			// a free slot on the commitment transaction.
@@ -2850,7 +2855,7 @@ func (l *channelLink) processRemoteSettleFails(fwdPkg *channeldb.FwdPkg,
 
 			settlePacket := &htlcPacket{
 				outgoingChanID: l.ShortChanID(),
-				outgoingHTLCID: pd.ParentIndex,
+				outgoingHTLCID: pd.ParentIndex(),
 				destRef:        pd.DestRef,
 				htlc: &lnwire.UpdateFulfillHTLC{
 					PaymentPreimage: pd.RPreimage,
@@ -2866,7 +2871,7 @@ func (l *channelLink) processRemoteSettleFails(fwdPkg *channeldb.FwdPkg,
 		// been received. As a result a new slot will be freed up in
 		// our commitment state, so we'll forward this to the switch so
 		// the backwards undo can continue.
-		case lnwallet.Fail:
+		case *lnwallet.FailLogEntry:
 			// If hodl.SettleIncoming is requested, we will not
 			// forward the FAIL to the switch and will not signal a
 			// free slot on the commitment transaction.
@@ -2881,7 +2886,7 @@ func (l *channelLink) processRemoteSettleFails(fwdPkg *channeldb.FwdPkg,
 			// set on the packet.
 			failPacket := &htlcPacket{
 				outgoingChanID: l.ShortChanID(),
-				outgoingHTLCID: pd.ParentIndex,
+				outgoingHTLCID: pd.ParentIndex(),
 				destRef:        pd.DestRef,
 				htlc: &lnwire.UpdateFailHTLC{
 					Reason: lnwire.OpaqueReason(
@@ -2890,7 +2895,7 @@ func (l *channelLink) processRemoteSettleFails(fwdPkg *channeldb.FwdPkg,
 				},
 			}
 
-			l.log.Debugf("Failed to send %s", pd.Amount)
+			// l.log.Debugf("Failed to send %s", pd.Amount)
 
 			// If the failure message lacks an HMAC (but includes
 			// the 4 bytes for encoding the message and padding
@@ -2924,7 +2929,7 @@ func (l *channelLink) processRemoteSettleFails(fwdPkg *channeldb.FwdPkg,
 // whether we are reprocessing as a result of a failure or restart. Adds that
 // have already been acknowledged in the forwarding package will be ignored.
 func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
-	lockedInHtlcs []*lnwallet.PaymentDescriptor) {
+	lockedInHtlcs []lnwallet.LogEntry) {
 
 	l.log.Tracef("processing %d remote adds for height %d",
 		len(lockedInHtlcs), fwdPkg.Height)
@@ -2933,24 +2938,30 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 		[]hop.DecodeHopIteratorRequest, 0, len(lockedInHtlcs),
 	)
 	for _, pd := range lockedInHtlcs {
-		switch pd.EntryType {
+
+		addDesc, ok := pd.(*lnwallet.AddLogEntry)
+		if !ok {
+			continue
+		}
+
+		// switch pd.EntryType {
 
 		// TODO(conner): remove type switch?
-		case lnwallet.Add:
-			// Before adding the new htlc to the state machine,
-			// parse the onion object in order to obtain the
-			// routing information with DecodeHopIterator function
-			// which process the Sphinx packet.
-			onionReader := bytes.NewReader(pd.OnionBlob)
+		// case lnwallet.Add:
+		// Before adding the new htlc to the state machine,
+		// parse the onion object in order to obtain the
+		// routing information with DecodeHopIterator function
+		// which process the Sphinx packet.
+		onionReader := bytes.NewReader(addDesc.OnionBlob)
 
-			req := hop.DecodeHopIteratorRequest{
-				OnionReader:  onionReader,
-				RHash:        pd.RHash[:],
-				IncomingCltv: pd.Timeout,
-			}
-
-			decodeReqs = append(decodeReqs, req)
+		req := hop.DecodeHopIteratorRequest{
+			OnionReader:  onionReader,
+			RHash:        addDesc.RHash[:],
+			IncomingCltv: addDesc.Timeout,
 		}
+
+		decodeReqs = append(decodeReqs, req)
+		// }
 	}
 
 	// Atomically decode the incoming htlcs, simultaneously checking for
@@ -2969,6 +2980,13 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 	var switchPackets []*htlcPacket
 
 	for i, pd := range lockedInHtlcs {
+		// NOTE(1/31/23): Unideal to have to do so many type assertions.
+		// Could we push this burden higher up in the processing stack?
+		addDesc, ok := pd.(*lnwallet.AddLogEntry)
+		if !ok {
+			continue
+		}
+
 		idx := uint16(i)
 
 		if fwdPkg.State == channeldb.FwdStateProcessed &&
@@ -2991,7 +3009,7 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 		// Fetch the onion blob that was included within this processed
 		// payment descriptor.
 		var onionBlob [lnwire.OnionPacketSize]byte
-		copy(onionBlob[:], pd.OnionBlob)
+		copy(onionBlob[:], addDesc.OnionBlob)
 
 		// Before adding the new htlc to the state machine, parse the
 		// onion object in order to obtain the routing information with
@@ -3001,8 +3019,8 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 			// If we're unable to process the onion blob than we
 			// should send the malformed htlc error to payment
 			// sender.
-			l.sendMalformedHTLCError(pd.HtlcIndex, failureCode,
-				onionBlob[:], pd.SourceRef)
+			l.sendMalformedHTLCError(addDesc.HtlcIndex, failureCode,
+				onionBlob[:], addDesc.SourceRef)
 
 			l.log.Errorf("unable to decode onion hop "+
 				"iterator: %v", failureCode)
@@ -3019,7 +3037,7 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 			// should send the malformed htlc error to payment
 			// sender.
 			l.sendMalformedHTLCError(
-				pd.HtlcIndex, failureCode, onionBlob[:], pd.SourceRef,
+				addDesc.HtlcIndex, failureCode, onionBlob[:], addDesc.SourceRef,
 			)
 
 			l.log.Errorf("unable to decode onion "+
@@ -3099,7 +3117,7 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 				addMsg := &lnwire.UpdateAddHTLC{
 					Expiry:      fwdInfo.OutgoingCTLV,
 					Amount:      fwdInfo.AmountToForward,
-					PaymentHash: pd.RHash,
+					PaymentHash: addDesc.RHash,
 				}
 
 				// Finally, we'll encode the onion packet for
@@ -3114,14 +3132,14 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 
 				updatePacket := &htlcPacket{
 					incomingChanID:  l.ShortChanID(),
-					incomingHTLCID:  pd.HtlcIndex,
+					incomingHTLCID:  addDesc.HtlcIndex,
 					outgoingChanID:  fwdInfo.NextHop,
-					sourceRef:       pd.SourceRef,
-					incomingAmount:  pd.Amount,
+					sourceRef:       addDesc.SourceRef,
+					incomingAmount:  addDesc.Amount,
 					amount:          addMsg.Amount,
 					htlc:            addMsg,
 					obfuscator:      obfuscator,
-					incomingTimeout: pd.Timeout,
+					incomingTimeout: addDesc.Timeout,
 					outgoingTimeout: fwdInfo.OutgoingCTLV,
 					customRecords:   pld.CustomRecords(),
 				}
@@ -3141,7 +3159,7 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 			addMsg := &lnwire.UpdateAddHTLC{
 				Expiry:      fwdInfo.OutgoingCTLV,
 				Amount:      fwdInfo.AmountToForward,
-				PaymentHash: pd.RHash,
+				PaymentHash: addDesc.RHash,
 			}
 
 			// Finally, we'll encode the onion packet for the
@@ -3178,14 +3196,14 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 			if fwdPkg.State == channeldb.FwdStateLockedIn {
 				updatePacket := &htlcPacket{
 					incomingChanID:  l.ShortChanID(),
-					incomingHTLCID:  pd.HtlcIndex,
+					incomingHTLCID:  addDesc.HtlcIndex,
 					outgoingChanID:  fwdInfo.NextHop,
-					sourceRef:       pd.SourceRef,
-					incomingAmount:  pd.Amount,
+					sourceRef:       addDesc.SourceRef,
+					incomingAmount:  addDesc.Amount,
 					amount:          addMsg.Amount,
 					htlc:            addMsg,
 					obfuscator:      obfuscator,
-					incomingTimeout: pd.Timeout,
+					incomingTimeout: addDesc.Timeout,
 					outgoingTimeout: fwdInfo.OutgoingCTLV,
 					customRecords:   pld.CustomRecords(),
 				}
@@ -3227,9 +3245,14 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 
 // processExitHop handles an htlc for which this link is the exit hop. It
 // returns a boolean indicating whether the commitment tx needs an update.
-func (l *channelLink) processExitHop(pd *lnwallet.PaymentDescriptor,
+func (l *channelLink) processExitHop(pd lnwallet.LogEntry,
 	obfuscator hop.ErrorEncrypter, fwdInfo hop.ForwardingInfo,
 	heightNow uint32, payload invoices.Payload) error {
+
+	addDesc, ok := pd.(*lnwallet.AddLogEntry)
+	if !ok {
+		return fmt.Errorf("unexpected HTLC update type: %+v", pd)
+	}
 
 	// If hodl.ExitSettle is requested, we will not validate the final hop's
 	// ADD, nor will we settle the corresponding invoice or respond with the
@@ -3243,14 +3266,14 @@ func (l *channelLink) processExitHop(pd *lnwallet.PaymentDescriptor,
 	// As we're the exit hop, we'll double check the hop-payload included in
 	// the HTLC to ensure that it was crafted correctly by the sender and
 	// matches the HTLC we were extended.
-	if pd.Amount != fwdInfo.AmountToForward {
+	if addDesc.Amount != fwdInfo.AmountToForward {
 
 		l.log.Errorf("onion payload of incoming htlc(%x) has incorrect "+
-			"value: expected %v, got %v", pd.RHash,
-			pd.Amount, fwdInfo.AmountToForward)
+			"value: expected %v, got %v", addDesc.RHash,
+			addDesc.Amount, fwdInfo.AmountToForward)
 
 		failure := NewLinkError(
-			lnwire.NewFinalIncorrectHtlcAmount(pd.Amount),
+			lnwire.NewFinalIncorrectHtlcAmount(addDesc.Amount),
 		)
 		l.sendHTLCError(pd, failure, obfuscator, true)
 
@@ -3259,13 +3282,13 @@ func (l *channelLink) processExitHop(pd *lnwallet.PaymentDescriptor,
 
 	// We'll also ensure that our time-lock value has been computed
 	// correctly.
-	if pd.Timeout != fwdInfo.OutgoingCTLV {
+	if addDesc.Timeout != fwdInfo.OutgoingCTLV {
 		l.log.Errorf("onion payload of incoming htlc(%x) has incorrect "+
 			"time-lock: expected %v, got %v",
-			pd.RHash[:], pd.Timeout, fwdInfo.OutgoingCTLV)
+			addDesc.RHash[:], addDesc.Timeout, fwdInfo.OutgoingCTLV)
 
 		failure := NewLinkError(
-			lnwire.NewFinalIncorrectCltvExpiry(pd.Timeout),
+			lnwire.NewFinalIncorrectCltvExpiry(addDesc.Timeout),
 		)
 		l.sendHTLCError(pd, failure, obfuscator, true)
 
@@ -3275,15 +3298,15 @@ func (l *channelLink) processExitHop(pd *lnwallet.PaymentDescriptor,
 	// Notify the invoiceRegistry of the exit hop htlc. If we crash right
 	// after this, this code will be re-executed after restart. We will
 	// receive back a resolution event.
-	invoiceHash := lntypes.Hash(pd.RHash)
+	invoiceHash := lntypes.Hash(addDesc.RHash)
 
 	circuitKey := models.CircuitKey{
 		ChanID: l.ShortChanID(),
-		HtlcID: pd.HtlcIndex,
+		HtlcID: pd.LogIndex(),
 	}
 
 	event, err := l.cfg.Registry.NotifyExitHopHtlc(
-		invoiceHash, pd.Amount, pd.Timeout, int32(heightNow),
+		invoiceHash, addDesc.Amount, addDesc.Timeout, int32(heightNow),
 		circuitKey, l.hodlQueue.ChanIn(), payload,
 	)
 	if err != nil {
@@ -3292,7 +3315,7 @@ func (l *channelLink) processExitHop(pd *lnwallet.PaymentDescriptor,
 
 	// Create a hodlHtlc struct and decide either resolved now or later.
 	htlc := hodlHtlc{
-		pd:         pd,
+		pd:         addDesc,
 		obfuscator: obfuscator,
 	}
 
@@ -3309,14 +3332,22 @@ func (l *channelLink) processExitHop(pd *lnwallet.PaymentDescriptor,
 
 // settleHTLC settles the HTLC on the channel.
 func (l *channelLink) settleHTLC(preimage lntypes.Preimage,
-	pd *lnwallet.PaymentDescriptor) error {
+	pd lnwallet.LogEntry) error {
+
+	// settleDesc, ok := pd.(*lnwallet.SettleLogEntry)
+	settleDesc, ok := pd.(*lnwallet.AddLogEntry)
+	if !ok {
+		return fmt.Errorf("unexpected HTLC update type: %+v", pd)
+	}
 
 	hash := preimage.Hash()
 
 	l.log.Infof("settling htlc %v as exit hop", hash)
 
+	// NOTE(2/15/23): This creates a SettleLogEntry. Prior to this we
+	// are dealing with the LogEntry for an Add, or AddLogEntry!
 	err := l.channel.SettleHTLC(
-		preimage, pd.HtlcIndex, pd.SourceRef, nil, nil,
+		preimage, pd.LogIndex(), settleDesc.SourceRef, nil, nil,
 	)
 	if err != nil {
 		return fmt.Errorf("unable to settle htlc: %v", err)
@@ -3334,7 +3365,7 @@ func (l *channelLink) settleHTLC(preimage lntypes.Preimage,
 	// remote peer.
 	l.cfg.Peer.SendMessage(false, &lnwire.UpdateFulfillHTLC{
 		ChanID:          l.ChanID(),
-		ID:              pd.HtlcIndex,
+		ID:              pd.LogIndex(),
 		PaymentPreimage: preimage,
 	})
 
@@ -3343,7 +3374,7 @@ func (l *channelLink) settleHTLC(preimage lntypes.Preimage,
 		HtlcKey{
 			IncomingCircuit: models.CircuitKey{
 				ChanID: l.ShortChanID(),
-				HtlcID: pd.HtlcIndex,
+				HtlcID: pd.LogIndex(),
 			},
 		},
 		preimage,
@@ -3378,8 +3409,15 @@ func (l *channelLink) forwardBatch(replay bool, packets ...*htlcPacket) {
 
 // sendHTLCError functions cancels HTLC and send cancel message back to the
 // peer from which HTLC was received.
-func (l *channelLink) sendHTLCError(pd *lnwallet.PaymentDescriptor,
+// func (l *channelLink) sendHTLCError(pd lnwallet.FailLogEntry,
+func (l *channelLink) sendHTLCError(pd lnwallet.LogEntry,
 	failure *LinkError, e hop.ErrorEncrypter, isReceive bool) {
+
+	// failDesc, ok := pd.(*lnwallet.FailLogEntry)
+	failDesc, ok := pd.(*lnwallet.AddLogEntry)
+	if !ok {
+		return
+	}
 
 	reason, err := e.EncryptFirstHop(failure.WireMessage())
 	if err != nil {
@@ -3387,7 +3425,9 @@ func (l *channelLink) sendHTLCError(pd *lnwallet.PaymentDescriptor,
 		return
 	}
 
-	err = l.channel.FailHTLC(pd.HtlcIndex, reason, pd.SourceRef, nil, nil)
+	// NOTE(2/15/23): This creates a FailLogEntry. Prior to this we
+	// are dealing with the LogEntry for an Add, or AddLogEntry!
+	err = l.channel.FailHTLC(pd.LogIndex(), reason, failDesc.SourceRef, nil, nil)
 	if err != nil {
 		l.log.Errorf("unable cancel htlc: %v", err)
 		return
@@ -3395,7 +3435,7 @@ func (l *channelLink) sendHTLCError(pd *lnwallet.PaymentDescriptor,
 
 	l.cfg.Peer.SendMessage(false, &lnwire.UpdateFailHTLC{
 		ChanID: l.ChanID(),
-		ID:     pd.HtlcIndex,
+		ID:     pd.LogIndex(),
 		Reason: reason,
 	})
 
@@ -3413,12 +3453,12 @@ func (l *channelLink) sendHTLCError(pd *lnwallet.PaymentDescriptor,
 		HtlcKey{
 			IncomingCircuit: models.CircuitKey{
 				ChanID: l.ShortChanID(),
-				HtlcID: pd.HtlcIndex,
+				HtlcID: pd.LogIndex(),
 			},
 		},
 		HtlcInfo{
-			IncomingTimeLock: pd.Timeout,
-			IncomingAmt:      pd.Amount,
+			// IncomingTimeLock: pd.Timeout,
+			// IncomingAmt:      pd.Amount,
 		},
 		eventType,
 		failure,
