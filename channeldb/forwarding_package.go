@@ -18,6 +18,7 @@ var ErrCorruptedFwdPkg = errors.New("fwding package db has been corrupted")
 // FwdState is an enum used to describe the lifecycle of a FwdPkg.
 type FwdState byte
 
+// Define a few interesting states for a ForwardingPackage to be in.
 const (
 	// FwdStateLockedIn is the starting state for all forwarding packages.
 	// Packages in this state have not yet committed to the exact set of
@@ -32,6 +33,9 @@ const (
 	// FwdStateCompleted signals that all Adds have been acked, and that all
 	// settles and fails have been delivered to their sources. Packages in
 	// this state can be removed permanently.
+	//
+	// NOTE(1/20/23): This is used only to decide whether to garbage
+	// collect/delete a forwarding package from disk.
 	FwdStateCompleted
 )
 
@@ -84,6 +88,8 @@ var (
 	// validation and are to be forwarded to the switch.
 	// NOTE: The presence of this key within a forwarding package indicates
 	// that the package has reached FwdStateProcessed.
+	// NOTE(1/20/23): Our decision on whether or not we have processed a package
+	// comes down to whether we can read bytes from this key from disk.
 	fwdFilterKey = []byte("fwd-filter-key")
 
 	// ackFilterKey is a key used to access the PkgFilter indicating which
@@ -108,6 +114,9 @@ type PkgFilter struct {
 	filter []byte
 }
 
+// Created in order to track the forward progress of the desired # of HTLCs.
+// Once an HTLC Add is irrevocably committed on an inbound link, we set
+// up this filter to track its lifecycle through the Switch.
 // NewPkgFilter initializes an empty PkgFilter supporting `count` elements.
 func NewPkgFilter(count uint16) *PkgFilter {
 	// We add 7 to ensure that the integer division yields properly rounded
@@ -164,6 +173,7 @@ func (f *PkgFilter) Equal(f2 *PkgFilter) bool {
 func (f *PkgFilter) IsFull() bool {
 	// Batch validate bytes that are fully used.
 	for i := uint16(0); i < f.count/8; i++ {
+		// Check that each byte in the bitvector has all bits set.
 		if f.filter[i] != 0xFF {
 			return false
 		}
@@ -415,6 +425,9 @@ type FwdPackager interface {
 	// 1) We are not the exit node
 	// 2) Passed all validation
 	// 3) Should be forwarded to the switch immediately after a failure
+	//
+	// NOTE(11/23/22): The link writes a package filter to disk before
+	// forwarding any HTLC ADD updates to the Switch.
 	SetFwdFilter(tx kvdb.RwTx, height uint64, fwdFilter *PkgFilter) error
 
 	// AckAddHtlcs atomically updates the add filters in this channel's
@@ -655,6 +668,9 @@ func loadFwdPkg(fwdPkgBkt kvdb.RBucket, source lnwire.ShortChannelID,
 	// Check to see if we have written the set exported filter adds to
 	// disk. If we haven't, processing of this package was never started, or
 	// failed during the last attempt.
+	//
+	// NOTE(11/25/22): We write the forward filter right before we send
+	// a batch of Adds to the Switch.
 	fwdFilterBytes := heightBkt.Get(fwdFilterKey)
 	if fwdFilterBytes == nil {
 		nAdds := uint16(len(adds))
@@ -752,6 +768,10 @@ func (p *ChannelPackager) AckAddHtlcs(tx kvdb.RwTx, addRefs ...AddRef) error {
 	if len(addRefs) == 0 {
 		return nil
 	}
+	fmt.Printf("[AckAddHtlcs(%s)]: add refs: %+v!\n",
+		p.source,
+		addRefs,
+	)
 
 	fwdPkgBkt := tx.ReadWriteBucket(fwdPackagesKey)
 	if fwdPkgBkt == nil {
@@ -777,6 +797,11 @@ func (p *ChannelPackager) AckAddHtlcs(tx kvdb.RwTx, addRefs ...AddRef) error {
 	// Load each height bucket once and remove all acked htlcs at that
 	// height.
 	for height, indexes := range heightDiffs {
+		fmt.Printf("[AckAddHtlcs(%s)]: height diff: %d, %+v!\n",
+			p.source,
+			height,
+			indexes,
+		)
 		err := ackAddHtlcsAtHeight(sourceBkt, height, indexes)
 		if err != nil {
 			return err
@@ -832,6 +857,10 @@ func ackAddHtlcsAtHeight(sourceBkt kvdb.RwBucket, height uint64,
 // the settle/fail, or it becomes otherwise safe to forgo retransmitting the
 // settle/fail after a restart.
 func (p *ChannelPackager) AckSettleFails(tx kvdb.RwTx, settleFailRefs ...SettleFailRef) error {
+	fmt.Printf("[Packager.AckSettleFails(%s)]: settle/fail refs: %+v!\n",
+		p.source,
+		settleFailRefs,
+	)
 	return ackSettleFails(tx, settleFailRefs)
 }
 

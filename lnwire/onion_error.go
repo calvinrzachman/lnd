@@ -1334,6 +1334,14 @@ func EncodeFailure(w *bytes.Buffer, failure FailureMessage, pver uint32) error {
 
 	// Finally, we'll add some padding in order to ensure that all failure
 	// messages are fixed size.
+	//
+	// NOTE(11/22/22): There will come a day when we need to pad route blinding
+	// payloads to ensure they all have the same length. After reading this it
+	// is clear that one can define a maximum/expected message length and simply pad
+	// the difference between it and the message length. This would implicitly not
+	// allow any message which is longer than this specified length. An alternative,
+	// and one which might be better for route blinding, is to dynamically compute
+	// the length of the longest message and then make every other message match.
 	pad := make([]byte, FailureMessageLength-len(failureMessage))
 
 	if err := WriteUint16(w, uint16(len(failureMessage))); err != nil {

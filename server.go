@@ -505,6 +505,10 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 	copy(serializedPubKey[:], nodeKeyDesc.PubKey.SerializeCompressed())
 
 	// Initialize the sphinx router.
+	//
+	// NOTE(11/25/22): We use a cool persistent log
+	// which garbage collects as we receive block
+	// notifications!
 	replayLog := htlcswitch.NewDecayedLog(
 		dbs.DecayedLogDB, cc.ChainNotifier,
 	)

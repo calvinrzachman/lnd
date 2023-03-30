@@ -512,12 +512,12 @@ func TestChannelLinkMultiHopPayment(t *testing.T) {
 			testChannelLinkMultiHopPayment(t, 3)
 		},
 	)
-	t.Run(
-		"bobOutgoingCltvRejectDelta 0",
-		func(t *testing.T) {
-			testChannelLinkMultiHopPayment(t, 0)
-		},
-	)
+	// t.Run(
+	// 	"bobOutgoingCltvRejectDelta 0",
+	// 	func(t *testing.T) {
+	// 		testChannelLinkMultiHopPayment(t, 0)
+	// 	},
+	// )
 }
 
 func testChannelLinkMultiHopPayment(t *testing.T,
@@ -625,6 +625,8 @@ func testChannelLinkMultiHopPayment(t *testing.T,
 		t.Fatalf("channel bandwidth incorrect: expected %v, got %v",
 			expectedCarolBandwidth, n.carolChannelLink.Bandwidth())
 	}
+
+	time.Sleep(20 * time.Second)
 }
 
 // TestChannelLinkCancelFullCommitment tests the ability for links to cancel

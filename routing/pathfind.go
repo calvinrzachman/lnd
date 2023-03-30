@@ -287,6 +287,15 @@ func edgeWeight(lockedAmt lnwire.MilliSatoshi, fee lnwire.MilliSatoshi,
 	timeLockPenalty := int64(lockedAmt) * int64(timeLockDelta) *
 		RiskFactorBillionths / 1000000000
 
+	// NOTE(1/7/23): At lower htlc values this is dominated by
+	// the fee. At higher htlc values the timelock penalty comes
+	// to be the influencing factor.
+	//
+	// Assuming a 0.03% total fee and cltv_delta of 40 we have:
+	// 100_000 --> 300 + 0.06 = 300.06       (100 sats)
+	// 1_000_000 --> 3000 + 0.6 = 3000.6     (1,000 sats)
+	// 10_000_000 --> 30_000 + 6 = 30006     (10,000 sats)
+	// 100_000_000 --> 300_000 + 60 = 300060 (100,000 sats)
 	return int64(fee) + timeLockPenalty
 }
 

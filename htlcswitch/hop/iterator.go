@@ -51,6 +51,9 @@ type sphinxHopIterator struct {
 
 // makeSphinxHopIterator converts a processed packet returned from a sphinx
 // router and converts it into an hop iterator for usage in the link.
+//
+// NOTE(11/27/22): This "hop iterator" is assembled during onion
+// packet decryption by DecodeHopIterators().
 func makeSphinxHopIterator(ogPacket *sphinx.OnionPacket,
 	packet *sphinx.ProcessedPacket) *sphinxHopIterator {
 
@@ -67,6 +70,9 @@ var _ Iterator = (*sphinxHopIterator)(nil)
 // Encode encodes iterator and writes it to the writer.
 //
 // NOTE: Part of the HopIterator interface.
+//
+// NOTE(11/27/22): This serializes the onion packet we are
+// meant to deliver to the next hop in the route.
 func (r *sphinxHopIterator) EncodeNextHop(w io.Writer) error {
 	return r.processedPacket.NextPacket.Encode(w)
 }
@@ -109,6 +115,10 @@ func (r *sphinxHopIterator) HopPayload() (*Payload, error) {
 func (r *sphinxHopIterator) ExtractErrorEncrypter(
 	extracter ErrorEncrypterExtracter) (ErrorEncrypter, lnwire.FailCode) {
 
+	// NOTE(11/27/22): The sender includes the public key of the
+	// ephemeral key pair they chose to use for encrypting this onion.
+	// It is this key with which we will establish a shared secret
+	// via ECDH with our node ID key pair in order to decrypt the onion.
 	return extracter(r.ogPacket.EphemeralKey)
 }
 
@@ -245,6 +255,8 @@ func (r *DecodeHopIteratorResponse) Result() (Iterator, lnwire.FailCode) {
 // NOTE: In order for the responses to be valid, the caller must guarantee that
 // the presented readers and rhashes *NEVER* deviate across invocations for the
 // same id.
+//
+// NOTE(1/16/23): Upon repeated invocations, this function will...
 func (p *OnionProcessor) DecodeHopIterators(id []byte,
 	reqs []DecodeHopIteratorRequest) ([]DecodeHopIteratorResponse, error) {
 
@@ -321,6 +333,7 @@ func (p *OnionProcessor) DecodeHopIterators(id []byte,
 	// in the replay set should be considered valid, as they are
 	// opportunistically computed.
 	packets, replays, err := tx.Commit()
+	fmt.Printf("[DecodeHopIterators()]: batch replays: %+v!\n", replays)
 	if err != nil {
 		log.Errorf("unable to process onion packet batch %x: %v",
 			id, err)
@@ -363,12 +376,26 @@ func (p *OnionProcessor) DecodeHopIterators(id []byte,
 		if replays.Contains(uint16(i)) {
 			log.Errorf("unable to process onion packet: %v",
 				sphinx.ErrReplayedPacket)
+
+			fmt.Printf("[DecodeHopIterators()]: unable to process %dth onion packet: %v!\n",
+				i, sphinx.ErrReplayedPacket)
+
+			// NOTE(1/16/23): Replayed ADD updates are marked with
+			// a failure code.
 			resp.FailCode = lnwire.CodeTemporaryChannelFailure
 			continue
 		}
 
+		fmt.Printf("[DecodeHopIterators()]: successfully processed %dth onion packet! "+
+			"creating hop iterator...\n", i)
+
 		// Finally, construct a hop iterator from our processed sphinx
 		// packet, simultaneously caching the original onion packet.
+		//
+		// NOTE(1/16/23): Only ADD updates which are NOT replays and for
+		// which the onion packet can be successfully decrypted will get
+		// a non-nil "hop iterator" which the caller can use to extract
+		// the forwarding information.
 		resp.HopIterator = makeSphinxHopIterator(&onionPkts[i], &packets[i])
 	}
 

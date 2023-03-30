@@ -283,6 +283,9 @@ type PaymentDescriptor struct {
 	// NOTE: This field will only be populated if EntryType is Fail or
 	// Settle, and the forwarded Add successfully included in an outgoing
 	// link's commitment txn.
+	// QUESTION(11/23/22): Does it also depend on whether the settle/fail
+	// is coming from the downstream link (and thus was included in that link's
+	// forwarding package) or from systems which handle on-chain HTLC resolution?
 	DestRef *channeldb.SettleFailRef
 
 	// OpenCircuitKey references the incoming Chan/HTLC ID of an Add HTLC
@@ -388,6 +391,15 @@ type PaymentDescriptor struct {
 //
 // NOTE: The provided `logUpdates` MUST corresponding exactly to either the Adds
 // or SettleFails in this channel's forwarding package at `height`.
+//
+// NOTE(11/23/22): SourceRef & DestRef are created here. When is this called?
+// - switch.reforwardSettleFails()
+// - link.resolveFwdPkg()
+// UPDATE(11/25/22): The link gets payments descriptors from its forwarding
+// packages on restart. It uses this function which, as the function name
+// indicates, converts from LogUpdate to PaymentDescriptors. Unlike elsewhere,
+// these LogUpdate come from the forwarding package serialized by ReceiveRevocation()
+// (ex: rather than from a channeldb.CommitDiff)
 func PayDescsFromRemoteLogUpdates(chanID lnwire.ShortChannelID, height uint64,
 	logUpdates []channeldb.LogUpdate) ([]*PaymentDescriptor, error) {
 
@@ -407,6 +419,22 @@ func PayDescsFromRemoteLogUpdates(chanID lnwire.ShortChannelID, height uint64,
 	// so that they can be ACK'd and garbage collected.
 	for i, logUpdate := range logUpdates {
 		var pd PaymentDescriptor
+
+		// NOTE(11/23/22):  We are restoring our in-memory state from
+		// LogUpdate which wraps an lnwire.Message.
+		// This function is GIVEN the LogUpdates from which the payment
+		// descriptors are built. The LogUpdates come from the forwarding
+		// package.
+		// I believe the message is internally constructed and does
+		// not as of yet have all the TLV extensions. Even if it did,
+		// the TLV extensions contain the incoming blinding point,
+		// but we want the outgoing link to receive the blinding point
+		// needed for the next node!
+		// UPDATE(11/23/22): The output of this function is given to
+		// l.processRemoteAdds(fwdPkg, adds) so we will be reprocessing
+		// the entire onion!? Why not persist the decrypted payload
+		// and only deal with that the second time around. Why decrypt
+		// twice?
 		switch wireMsg := logUpdate.UpdateMsg.(type) {
 
 		case *lnwire.UpdateAddHTLC:
@@ -730,6 +758,8 @@ func (c *commitment) toDiskCommit(ourCommit bool) *channeldb.ChannelCommitment {
 		Htlcs:           make([]channeldb.HTLC, 0, numHtlcs),
 	}
 
+	// NOTE(11/22/22): Here we convert from payment descriptors to
+	// the format expected for use in the database (channeldb.HTLC)
 	for _, htlc := range c.outgoingHTLCs {
 		outputIndex := htlc.localOutputIndex
 		if !ourCommit {
@@ -755,6 +785,8 @@ func (c *commitment) toDiskCommit(ourCommit bool) *channeldb.ChannelCommitment {
 		commit.Htlcs = append(commit.Htlcs, h)
 	}
 
+	// NOTE(11/22/22): Here we convert from payment descriptors to
+	// the format expected for use in the database (channeldb.HTLC)
 	for _, htlc := range c.incomingHTLCs {
 		outputIndex := htlc.localOutputIndex
 		if !ourCommit {
@@ -1166,6 +1198,7 @@ func (u *updateLog) htlcHasModification(i uint64) bool {
 // markHtlcModified marks an HTLC as modified based on its HTLC index. After a
 // call to this method, htlcHasModification will return true until the HTLC is
 // removed.
+// NOTE(1/31/23): A better name might be markAddHtlcResolved()
 func (u *updateLog) markHtlcModified(i uint64) {
 	u.modifiedHtlcs[i] = struct{}{}
 }
@@ -1737,6 +1770,13 @@ func (lc *LightningChannel) remoteLogUpdateToPayDesc(logUpdate *channeldb.LogUpd
 func (lc *LightningChannel) restoreCommitState(
 	localCommitState, remoteCommitState *channeldb.ChannelCommitment) error {
 
+	fmt.Printf("[channel.restoreCommitState(%s) - local_key=%x, remote_key=%x]: rebuilding in-memory"+
+		"commit/update log state using the information we have on disk.\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+	)
+
 	// In order to reconstruct the pkScripts on each of the pending HTLC
 	// outputs (if any) we'll need to regenerate the current revocation for
 	// this current un-revoked state as well as retrieve the current
@@ -1792,6 +1832,9 @@ func (lc *LightningChannel) restoreCommitState(
 
 	// Next, we'll check to see if we have an un-acked commitment state we
 	// extended to the remote party but which was never ACK'd.
+	//
+	// NOTE(11/19/22): This can happen if we restarted before getting a
+	// RevokeAndAck from the peer.
 	pendingRemoteCommitDiff, err = lc.channelState.RemoteCommitChainTip()
 	if err != nil && err != channeldb.ErrNoPendingCommit {
 		return err
@@ -1828,6 +1871,9 @@ func (lc *LightningChannel) restoreCommitState(
 	}
 
 	// Fetch remote updates that we have acked but not yet signed for.
+	//
+	// NOTE(11/19/22): This can happen if we died after sending
+	// RevokeAndAck but before sending CommitmentSigned.
 	unsignedAckedUpdates, err := lc.channelState.UnsignedAckedUpdates()
 	if err != nil {
 		return err
@@ -1951,6 +1997,9 @@ func (lc *LightningChannel) restoreStateLogs(
 	// remote update log. Since HTLCs are added first to the receiver's
 	// commitment, we don't have to restore outgoing HTLCs, as they will be
 	// restored from the remote commitment below.
+	//
+	// NOTE(11/19/22): An incoming HTLC came from the peer, so it must be
+	// in our update log we keep for the remote.
 	for i := range localCommitment.incomingHTLCs {
 		htlc := localCommitment.incomingHTLCs[i]
 
@@ -2779,6 +2828,12 @@ func (lc *LightningChannel) fetchHTLCView(theirLogIndex, ourLogIndex uint64) *ht
 // both local and remote commitment transactions in order to sign or verify new
 // commitment updates. A fully populated commitment is returned which reflects
 // the proper balances for both sides at this point in the commitment chain.
+//
+// The indexes passed to this function are done so intelligently so that we always
+// sign for the correct updates. Both when extending a remote commitment (include all
+// local updates and only the remote updates we have acknowledged to them that we have
+// received) or validating that our commitment has been extended properly (all remote udpates
+// and only our local updates that they have acknowledged).
 func (lc *LightningChannel) fetchCommitmentView(remoteChain bool,
 	ourLogIndex, ourHtlcIndex, theirLogIndex, theirHtlcIndex uint64,
 	keyRing *CommitmentKeyRing) (*commitment, error) {
@@ -2792,12 +2847,30 @@ func (lc *LightningChannel) fetchCommitmentView(remoteChain bool,
 
 	nextHeight := commitChain.tip().height + 1
 
+	fmt.Printf("[ReceiveNewCommitment --> fetchCommitmentView(%s) - local_key=%x, remote_key=%x]: "+
+		"our_log_index: %d, our_htlc_index: %d, remote_log_index: %d, remote_htlc_index: %d!\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+		ourLogIndex, ourHtlcIndex, theirLogIndex, theirHtlcIndex,
+	)
+
 	// Run through all the HTLCs that will be covered by this transaction
 	// in order to update their commitment addition height, and to adjust
 	// the balances on the commitment transaction accordingly. Note that
 	// these balances will be *before* taking a commitment fee from the
 	// initiator.
 	htlcView := lc.fetchHTLCView(theirLogIndex, ourLogIndex)
+	// fmt.Printf("[[ReceiveNewCommitment --> fetchCommitmentView(%s) - local_key=%x, remote_key=%x]: "+
+	// 	"htlc view: %+v\n",
+	// 	lc.ShortChanID(),
+	// 	lc.LocalFundingKey.SerializeCompressed()[:10],
+	// 	lc.RemoteFundingKey.SerializeCompressed()[:10],
+	// 	newLogClosure(func() string {
+	// 		return spew.Sdump(htlcView)
+	// 	}),
+	// )
+
 	ourBalance, theirBalance, _, filteredHTLCView, err := lc.computeView(
 		htlcView, remoteChain, true,
 	)
@@ -2805,6 +2878,13 @@ func (lc *LightningChannel) fetchCommitmentView(remoteChain bool,
 		return nil, err
 	}
 	feePerKw := filteredHTLCView.feePerKw
+	fmt.Printf("[ReceiveNewCommitment --> fetchCommitmentView(%s) - local_key=%x, remote_key=%x]: "+
+		"our_balance: %d, remote_balance: %d!\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+		ourBalance, theirBalance,
+	)
 
 	// Actually generate unsigned commitment transaction for this view.
 	commitTx, err := lc.commitBuilder.createUnsignedCommitmentTx(
@@ -2944,6 +3024,14 @@ func (lc *LightningChannel) evaluateHTLCView(view *htlcView, ourBalance,
 			return nil, err
 		}
 
+		fmt.Printf("[evaluateHTLCView(%s) - local_key=%x, remote_key=%x]: "+
+			"found the corresponding add for our settle/fail! our_balance: %s, remote_balance: %s!\n",
+			lc.ShortChanID(),
+			lc.LocalFundingKey.SerializeCompressed()[:10],
+			lc.RemoteFundingKey.SerializeCompressed()[:10],
+			*ourBalance, *theirBalance,
+		)
+
 		skipThem[addEntry.HtlcIndex] = struct{}{}
 		processRemoveEntry(entry, ourBalance, theirBalance,
 			nextHeight, remoteChain, true, mutateState)
@@ -2977,6 +3065,14 @@ func (lc *LightningChannel) evaluateHTLCView(view *htlcView, ourBalance,
 			return nil, err
 		}
 
+		fmt.Printf("[evaluateHTLCView(%s) - local_key=%x, remote_key=%x]: "+
+			"found the corresponding add for their settle/fail! our_balance: %s, remote_balance: %s!\n",
+			lc.ShortChanID(),
+			lc.LocalFundingKey.SerializeCompressed()[:10],
+			lc.RemoteFundingKey.SerializeCompressed()[:10],
+			*ourBalance, *theirBalance,
+		)
+
 		skipUs[addEntry.HtlcIndex] = struct{}{}
 		processRemoveEntry(entry, ourBalance, theirBalance,
 			nextHeight, remoteChain, false, mutateState)
@@ -2991,6 +3087,14 @@ func (lc *LightningChannel) evaluateHTLCView(view *htlcView, ourBalance,
 			continue
 		}
 
+		fmt.Printf("[evaluateHTLCView(%s) - local_key=%x, remote_key=%x]: "+
+			"found our Add update! our_balance: %s, remote_balance: %s!\n",
+			lc.ShortChanID(),
+			lc.LocalFundingKey.SerializeCompressed()[:10],
+			lc.RemoteFundingKey.SerializeCompressed()[:10],
+			*ourBalance, *theirBalance,
+		)
+
 		processAddEntry(entry, ourBalance, theirBalance, nextHeight,
 			remoteChain, false, mutateState)
 		newView.ourUpdates = append(newView.ourUpdates, entry)
@@ -3000,6 +3104,14 @@ func (lc *LightningChannel) evaluateHTLCView(view *htlcView, ourBalance,
 		if _, ok := skipThem[entry.HtlcIndex]; !isAdd || ok {
 			continue
 		}
+
+		fmt.Printf("[evaluateHTLCView(%s) - local_key=%x, remote_key=%x]: "+
+			"found a remote Add update! our_balance: %s, remote_balance: %s!\n",
+			lc.ShortChanID(),
+			lc.LocalFundingKey.SerializeCompressed()[:10],
+			lc.RemoteFundingKey.SerializeCompressed()[:10],
+			*ourBalance, *theirBalance,
+		)
 
 		processAddEntry(entry, ourBalance, theirBalance, nextHeight,
 			remoteChain, true, mutateState)
@@ -3114,7 +3226,20 @@ func processRemoveEntry(htlc *PaymentDescriptor, ourBalance,
 
 	// Ignore any removal entries which have already been processed.
 	if *removeHeight != 0 {
+		fmt.Printf("[evaluateHTLCView --> processRemoveEntry()]: "+
+			"ignoring entry! our_balance: %s, remote_balance: %s! remote_chain: %t, remove_height: %d "+
+			"add_height_local: %d, add_height_remote: %d\n",
+			*ourBalance, *theirBalance, remoteChain, removeHeight,
+			htlc.addCommitHeightLocal, htlc.addCommitHeightRemote,
+		)
 		return
+	} else {
+		fmt.Printf("[evaluateHTLCView --> processRemoveEntry()]: "+
+			"NOT ignoring entry! our_balance: %s, remote_balance: %s! remote_chain: %t, remove_height: %d "+
+			"add_height_local: %d, add_height_remote: %d\n",
+			*ourBalance, *theirBalance, remoteChain, removeHeight,
+			htlc.addCommitHeightLocal, htlc.addCommitHeightRemote,
+		)
 	}
 
 	switch {
@@ -3143,8 +3268,24 @@ func processRemoveEntry(htlc *PaymentDescriptor, ourBalance,
 		*ourBalance += htlc.Amount
 	}
 
+	// NOTE(2/1/23): If mutate is set, which should NOT be the case for validation,
+	// then we set the remove height for the update by setting this pointer?
+	// Where is this pointer used?
 	if mutateState {
+		fmt.Printf("[evaluateHTLCView --> processRemoveEntry()]: "+
+			"MUTATING state! our_balance: %s, remote_balance: %s! remote_chain: %t, remove_height: %d "+
+			"remove height: %d, add_height_local: %d, add_height_remote: %d\n",
+			*ourBalance, *theirBalance, remoteChain, removeHeight,
+			nextHeight, htlc.addCommitHeightLocal, htlc.addCommitHeightRemote,
+		)
 		*removeHeight = nextHeight
+	} else {
+		fmt.Printf("[evaluateHTLCView --> processRemoveEntry()]: "+
+			"NOT mutating state. This could be validation! our_balance: %s, remote_balance: %s! remote_chain: %t, remove_height: %d "+
+			"add_height_local: %d, add_height_remote: %d\n",
+			*ourBalance, *theirBalance, remoteChain, removeHeight,
+			htlc.addCommitHeightLocal, htlc.addCommitHeightRemote,
+		)
 	}
 }
 
@@ -3327,9 +3468,21 @@ func genRemoteHtlcSigJobs(keyRing *CommitmentKeyRing,
 // validate this new state. This function is called right before sending the
 // new commitment to the remote party. The commit diff returned contains all
 // information necessary for retransmission.
+//
+// NOTE(11/23/22):
+// - Pay careful attention to what we set up to be acknowledged
+//   in the construction of the CommitDiff.
+// - This is used when extending the remote party's commitment transaction
+//   via SignNextCommitment()
 func (lc *LightningChannel) createCommitDiff(
 	newCommit *commitment, commitSig lnwire.Sig,
 	htlcSigs []lnwire.Sig) (*channeldb.CommitDiff, error) {
+
+	fmt.Printf("[SignNextCommittment --> createCommitDiff(%s) - local_key=%x, remote_key=%x]: signing committment for peer!\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+	)
 
 	// First, we need to convert the funding outpoint into the ID that's
 	// used on the wire to identify this channel. We'll use this shortly
@@ -3345,10 +3498,26 @@ func (lc *LightningChannel) createCommitDiff(
 		closedCircuitKeys []models.CircuitKey
 	)
 
+	// NOTE(11/23/22): We use the channel's local and remote update log
+	// to determine what we'll be signing for. Is there any chance this
+	// differs from the incoming/outgoing HTLCs listed on the commitment{}
+	// payDescs := newCommit.incomingHTLCs
+	// payDescks := newCommit.outgoingHTLCs
+
 	// We'll now run through our local update log to locate the items which
 	// were only just committed within this pending state. This will be the
 	// set of items we need to retransmit if we reconnect and find that
 	// they didn't process this new state fully.
+	//
+	// NOTE(11/23/22): HTLC updates from our link's local update log
+	// (ie: outgoing) are the updates which we have the responsibility of
+	// retransmitting externally to our peer.
+	//
+	// NOTE(11/23/22): When sending a commitment (ie: extending our peer’s
+	// commitment chain) and creating a new remote view, we include _all_ of
+	// our changes (pending or committed). I think this was already
+	// computed in fetchCommitmentView(). Are we not redoing some of
+	// that work here?
 	for e := lc.localUpdateLog.Front(); e != nil; e = e.Next() {
 		pd := e.Value.(*PaymentDescriptor)
 
@@ -3373,6 +3542,14 @@ func (lc *LightningChannel) createCommitDiff(
 		// messages obtained, we can simply read from disk and re-send
 		// them in the case of a needed channel sync.
 		switch pd.EntryType {
+
+		// NOTE(11/23/22): Here we take each of our pending (see drawings)
+		// local updates and build a corresponding LogUpdate. The LogUpdate wraps
+		// a locally constructed HTLC update message. It appears we do NOT
+		// persist the lnwire.Message (Add,Settle, Fail) we receive from
+		// our peer directly, but rather we persist a locally constructed
+		// version of the message which has been stripped down a bit.
+		// Relevant for route blinding, it does NOT include the TLV extensions.
 		case Add:
 			htlc := &lnwire.UpdateAddHTLC{
 				ChanID:      chanID,
@@ -3434,9 +3611,38 @@ func (lc *LightningChannel) createCommitDiff(
 		// packets, if they exist.
 		if pd.SourceRef != nil {
 			ackAddRefs = append(ackAddRefs, *pd.SourceRef)
+			fmt.Printf("[SignNextCommittment --> createCommitDiff(%s) - local_key=%x, remote_key=%x]: incoming (this) link fwd pkg add ref: %+v!\n",
+				lc.ShortChanID(),
+				lc.LocalFundingKey.SerializeCompressed()[:10],
+				lc.RemoteFundingKey.SerializeCompressed()[:10],
+				pd.SourceRef,
+			)
 		}
+
+		// NOTE(11/23/22): This means that the settle/fail came in
+		// via another link, which created its own forwarding package
+		// which contains the settle/fail. The settle/fail has made
+		// it through the switch back to us (we are the link on which
+		// the corresponding 'add' first came in)
+		// The reference to the settle/fail in the (from perspective of
+		// 'add') forwarding package of the outgoing link (Note: we are
+		// the outgoing link for this settle/fail) will have been created
+		// when the outgoing link added the settle/fail to a forwarding
+		// package it created in ReceiveRevocation()
+		//
+		// As discussed in other comments, this value may be nil if
+		// the Settle/Fail was never added to the commitment transaction
+		// of an outgoing link (ie: never forwarded) or if the Settle/Fail
+		// update is coming, not from the downstream link, but from systems
+		// which handle on-chain HTLC resolution.
 		if pd.DestRef != nil {
 			settleFailRefs = append(settleFailRefs, *pd.DestRef)
+			fmt.Printf("[SignNextCommittment --> createCommitDiff(%s) - local_key=%x, remote_key=%x]: outgoing link's fwd pkg ref: %+v!\n",
+				lc.ShortChanID(),
+				lc.LocalFundingKey.SerializeCompressed()[:10],
+				lc.RemoteFundingKey.SerializeCompressed()[:10],
+				pd.DestRef,
+			)
 		}
 		if pd.ClosedCircuitKey != nil {
 			closedCircuitKeys = append(closedCircuitKeys,
@@ -3460,7 +3666,10 @@ func (lc *LightningChannel) createCommitDiff(
 			CommitSig: commitSig,
 			HtlcSigs:  htlcSigs,
 		},
-		LogUpdates:        logUpdates,
+		// NOTE(11/23/22): We have built the log updates which will
+		// be persisted to disk inside lc.channelState.AppendRemoteCommitChain(commitDiff)!
+		LogUpdates: logUpdates,
+		// TODO(1/20/23): Understamd this.
 		OpenedCircuitKeys: openCircuitKeys,
 		ClosedCircuitKeys: closedCircuitKeys,
 		AddAcks:           ackAddRefs,
@@ -3568,6 +3777,13 @@ func (lc *LightningChannel) validateCommitmentSanity(theirLogCounter,
 	ourLogCounter uint64, remoteChain bool,
 	predictOurAdd, predictTheirAdd *PaymentDescriptor) error {
 
+	fmt.Printf("[validateCommitmentSanity(%s) - local_key=%x, remote_key=%x]: "+
+		"beginning commitment output construction/validation!\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+	)
+
 	// Fetch all updates not committed.
 	view := lc.fetchHTLCView(theirLogCounter, ourLogCounter)
 
@@ -3588,6 +3804,9 @@ func (lc *LightningChannel) validateCommitmentSanity(theirLogCounter,
 	ourInitialBalance := commitChain.tip().ourBalance
 	theirInitialBalance := commitChain.tip().theirBalance
 
+	// NOTE(2/1/23): We do NOT mutate state when validating.
+	// I think this means that we shoud not ignore the HTLC updates
+	// when they are processed again later.
 	ourBalance, theirBalance, commitWeight, filteredView, err := lc.computeView(
 		view, remoteChain, false,
 	)
@@ -3595,6 +3814,14 @@ func (lc *LightningChannel) validateCommitmentSanity(theirLogCounter,
 		return err
 	}
 	feePerKw := filteredView.feePerKw
+
+	fmt.Printf("[validateCommitmentSanity(%s) - local_key=%x, remote_key=%x]: "+
+		"computed balances! our_balance: %d, remote_balance: %d!\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+		ourBalance, theirBalance,
+	)
 
 	// Calculate the commitment fee, and subtract it from the initiator's
 	// balance.
@@ -3813,6 +4040,28 @@ func (lc *LightningChannel) SignNextCommitment() (lnwire.Sig, []lnwire.Sig,
 		}),
 	)
 
+	fmt.Printf("[SignNextCommittment(%s) - local_key=%x, remote_key=%x]: "+
+		"extending remote chain to height %v, "+
+		"local_log=%v, remote_log=%v\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+		newCommitView.height,
+		lc.localUpdateLog.logIndex, remoteACKedIndex)
+
+	fmt.Printf("[SignNextCommittment(%s) - local_key=%x, remote_key=%x]: "+
+		"remote chain: our_balance=%v, "+
+		"their_balance=%v, commit_tx: %v\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+		newCommitView.ourBalance,
+		newCommitView.theirBalance,
+		newLogClosure(func() string {
+			return spew.Sdump(newCommitView.txn)
+		}),
+	)
+
 	// With the commitment view constructed, if there are any HTLC's, we'll
 	// need to generate signatures of each of them for the remote party's
 	// commitment state. We do so in two phases: first we generate and
@@ -3872,10 +4121,39 @@ func (lc *LightningChannel) SignNextCommitment() (lnwire.Sig, []lnwire.Sig,
 	// As we're about to proposer a new commitment state for the remote
 	// party, we'll write this pending state to disk before we exit, so we
 	// can retransmit it if necessary.
+	// NOTE(11/23/22): Recall, we are signing for any and all HTLC updates
+	// in our local update log! Because we can and it's correct with in
+	// order message delivery. These are updates we are forwarding to our peer.
+	// - Any Settle/Fail updates in our local update log are responses to
+	//   previous ADDs, and will be acknowledged when we write the commitment
+	//   diff to disk below.
+	// - Any ADD updates in our local update log, are ADD updates we have received
+	//   from our switch. These will be placed in a forwarding package once
+	//   we get Revocation and Acknowledgement from our peer. They do not need
+	//   internal acknowledgement. (might be wrong. FwdPkg only for incoming
+	//   remote updates!)
+	// - When responding to a CommitmentSigned which extends our commitment
+	//   with an extending commitment for our peer, the new commitment view
+	//   will contain the remote peer's updates we would have just acknowledged
+	//   via RevokeAndAck(). These are remote updates and do not have
 	commitDiff, err := lc.createCommitDiff(newCommitView, sig, htlcSigs)
 	if err != nil {
 		return sig, htlcSigs, nil, err
 	}
+
+	// IMPORTANT NOTE: Adds, Settles, and Fails are always (internally?) ack'd
+	// atomically with commitment signing.
+	// NOTE(11/23/22):
+	// - Pay careful attention to what we set up
+	//   to be acknowledged in the construction of the CommitDiff.
+	// - This is where we write the LogUpdates to disk!
+	fmt.Printf("[SignNextCommittment(%s) - local_key=%x, remote_key=%x]: "+
+		"add refs: %+v, settle refs: %+v!\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+		commitDiff.AddAcks, commitDiff.SettleFailAcks,
+	)
 	err = lc.channelState.AppendRemoteCommitChain(commitDiff)
 	if err != nil {
 		return sig, htlcSigs, nil, err
@@ -3904,6 +4182,7 @@ func (lc *LightningChannel) SignNextCommitment() (lnwire.Sig, []lnwire.Sig,
 //
 //   - CommitSig+Updates: if we have a pending remote commit which they claim to
 //     have not received
+//     NOTE(11/27/22): Message order surely matters in the retransmission!
 //   - RevokeAndAck: if we sent a revocation message that they claim to have
 //     not received
 //
@@ -3913,6 +4192,9 @@ func (lc *LightningChannel) SignNextCommitment() (lnwire.Sig, []lnwire.Sig,
 // previous commitment txn. This allows the link to clear its mailbox of those
 // circuits in case they are still in memory, and ensure the switch's circuit
 // map has been updated by deleting the closed circuits.
+//
+// NOTE(11/27/22): This is involved in an outgoing link's determination on
+// whether we have any local HTLC updates which need to be retrasnmitted!!
 func (lc *LightningChannel) ProcessChanSyncMsg(
 	msg *lnwire.ChannelReestablish) ([]lnwire.Message, []models.CircuitKey,
 	[]models.CircuitKey, error) {
@@ -4047,6 +4329,9 @@ func (lc *LightningChannel) ProcessChanSyncMsg(
 		// revocation, but also initiate a state transition to re-sync
 		// them.
 		if lc.OweCommitment() {
+			// NOTE(11/27/22): We also use SignNextCommitment to help us
+			// recover from a restart/reconnection to our peer.
+			// TODO: Consider how, if at all, this usage differs from the other.
 			commitSig, htlcSigs, _, err := lc.SignNextCommitment()
 			switch {
 
@@ -4123,6 +4408,10 @@ func (lc *LightningChannel) ProcessChanSyncMsg(
 		// Grab the current remote chain tip from the database.  This
 		// commit diff contains all the information required to re-sync
 		// our states.
+		//
+		// NOTE(11/27/22): Making good on Conner's claim that:
+		// “Once an HTLC is included into a channeldb.CommitDiff,
+		// channel resync will ensure it is delivered to the remote party.”
 		commitDiff, err := lc.channelState.RemoteCommitChainTip()
 		if err != nil {
 			return nil, nil, nil, err
@@ -4132,6 +4421,10 @@ func (lc *LightningChannel) ProcessChanSyncMsg(
 
 		// Next, we'll need to send over any updates we sent as part of
 		// this new proposed commitment state.
+		//
+		// NOTE(11/27/22): As these updates are restored from a
+		// channeldb.CommitDiff, they will not (yet) have any blinding
+		// points set. These will be outgoing HTLCs, thus next blinding points?
 		for _, logUpdate := range commitDiff.LogUpdates {
 			commitUpdates = append(commitUpdates, logUpdate.UpdateMsg)
 		}
@@ -4541,6 +4834,12 @@ var _ error = (*InvalidCommitSigError)(nil)
 func (lc *LightningChannel) ReceiveNewCommitment(commitSig lnwire.Sig,
 	htlcSigs []lnwire.Sig) error {
 
+	fmt.Printf("[ReceiveNewCommitment(%s) - local_key=%x, remote_key=%x]: got new commitment!\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+	)
+
 	lc.Lock()
 	defer lc.Unlock()
 
@@ -4570,6 +4869,12 @@ func (lc *LightningChannel) ReceiveNewCommitment(commitSig lnwire.Sig,
 		return err
 	}
 
+	fmt.Printf("[ReceiveNewCommitment(%s) - local_key=%x, remote_key=%x]: validated commitment sanity!\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+	)
+
 	// We're receiving a new commitment which attempts to extend our local
 	// commitment chain height by one, so fetch the proper commitment point
 	// as this will be needed to derive the keys required to construct the
@@ -4585,6 +4890,12 @@ func (lc *LightningChannel) ReceiveNewCommitment(commitSig lnwire.Sig,
 		&lc.channelState.LocalChanCfg, &lc.channelState.RemoteChanCfg,
 	)
 
+	fmt.Printf("[ReceiveNewCommitment(%s) - local_key=%x, remote_key=%x]: building local commitment view!\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+	)
+
 	// With the current commitment point re-calculated, construct the new
 	// commitment view which includes all the entries (pending or committed)
 	// we know of in the remote node's HTLC log, but only our local changes
@@ -4598,6 +4909,12 @@ func (lc *LightningChannel) ReceiveNewCommitment(commitSig lnwire.Sig,
 		return err
 	}
 
+	fmt.Printf("[ReceiveNewCommitment(%s) - local_key=%x, remote_key=%x]: built local view of commitment we received signature for!\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+	)
+
 	lc.log.Tracef("extending local chain to height %v, "+
 		"local_log=%v, remote_log=%v",
 		localCommitmentView.height,
@@ -4605,6 +4922,27 @@ func (lc *LightningChannel) ReceiveNewCommitment(commitSig lnwire.Sig,
 
 	lc.log.Tracef("local chain: our_balance=%v, "+
 		"their_balance=%v, commit_tx: %v",
+		localCommitmentView.ourBalance, localCommitmentView.theirBalance,
+		newLogClosure(func() string {
+			return spew.Sdump(localCommitmentView.txn)
+		}),
+	)
+
+	fmt.Printf("[ReceiveNewCommitment(%s) - local_key=%x, remote_key=%x]: "+
+		"extending local chain to height %v, "+
+		"local_log=%v, remote_log=%v\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+		localCommitmentView.height,
+		localACKedIndex, lc.remoteUpdateLog.logIndex)
+
+	fmt.Printf("[ReceiveNewCommitment(%s) - local_key=%x, remote_key=%x]: "+
+		"local chain: our_balance=%v, "+
+		"their_balance=%v, commit_tx: %v\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
 		localCommitmentView.ourBalance, localCommitmentView.theirBalance,
 		newLogClosure(func() string {
 			return spew.Sdump(localCommitmentView.txn)
@@ -4706,6 +5044,9 @@ func (lc *LightningChannel) ReceiveNewCommitment(commitSig lnwire.Sig,
 
 	// The signature checks out, so we can now add the new commitment to
 	// our local commitment chain.
+	//
+	// NOTE(11/27/22): This adds a new commitment transaction to our
+	// in-memory update log. It does not persist the commitment to disk.
 	localCommitmentView.sig = commitSig.ToSignatureBytes()
 	lc.localCommitChain.addCommitment(localCommitmentView)
 
@@ -4956,6 +5297,8 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 	// log updates and payment descriptors, allowing us to persist the log
 	// updates to disk and optimistically buffer the forwarding package in
 	// memory.
+	// NOTE(11/23/22): We are building LogUpdates for the received update
+	// case here! Sending case is in SignNextCommitment().
 	var (
 		addsToForward        []*PaymentDescriptor
 		addUpdates           []channeldb.LogUpdate
@@ -4964,8 +5307,22 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 	)
 
 	var addIndex, settleFailIndex uint16
+
+	// NOTE(11/23/22): We are going to determine the set of htlc updates we
+	// have received from our remote peer which need to be forwarded onwards
+	// through the Switch to towards their destination. Updates in our local
+	// update log have already came from the Switch and thus do NOT need
+	// to be forwarded.
 	for e := lc.remoteUpdateLog.Front(); e != nil; e = e.Next() {
 		pd := e.Value.(*PaymentDescriptor)
+		// NOTE(11/23/22): These payment descriptors will have a blinding
+		// point if the htlc we received via ReceiveHTLC() had one in its
+		// TLV extension. It is this very payment descriptor which the
+		// incoming link will eventually process in processRemoteAdds().
+		// This will be the incoming (route) blinding point needed to
+		// decrypt the onion and route blinding payload.
+		// The LogUpdate we create below will not have the blinding point
+		// directly or via TLV extension though so be careful!
 
 		// Fee updates are local to this particular channel, and should
 		// never be forwarded.
@@ -4973,7 +5330,17 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 			continue
 		}
 
+		// NOTE(1/31/23): Some updates in the HTLC update log may have been sitting
+		// on our commitment for an arbitrary amount of time. We would like to forward
+		// only those updates which have not already been forwarded to avoid forcing
+		// our Switch's duplicate detection logic from having to work as hard.
 		if pd.isForwarded {
+			fmt.Printf("[ReceiveRevocation(%s) - local_key=%x, remote_key=%x]: "+
+				"Payment Descriptor marked as forwarded. Skipping!\n",
+				lc.ShortChanID(),
+				lc.LocalFundingKey.SerializeCompressed()[:10],
+				lc.RemoteFundingKey.SerializeCompressed()[:10],
+			)
 			continue
 		}
 
@@ -4981,6 +5348,18 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 		// both of the remote and local heights are non-zero. If either
 		// of these values is zero, it has yet to be committed in both
 		// the local and remote chains.
+		//
+		// TODO(11/23/22): I have never looked at these fields. Check them out.
+		//
+		// NOTE(1/22/23): When revoke an old commitment and move to
+		// a newer commitment it needn't be that every HTLC update
+		// is candidate for forwarding. As an example, in a transition
+		// such as CommitOld(A1, A2) --> CommitNew(A1, A2, A3),
+		// only A3 would be a new add which requires forwarding.
+		// This must be where these
+		//
+		// NOTE(1/31/23): A payment descriptor receives its commit
+		// remote/local heights when...
 		committedAdd := pd.addCommitHeightRemote > 0 &&
 			pd.addCommitHeightLocal > 0
 		committedRmv := pd.removeCommitHeightRemote > 0 &&
@@ -4990,6 +5369,17 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 		// preemptively compute whether or not to forward this HTLC for
 		// the case in which this in an Add HTLC, or if this is a
 		// Settle, Fail, or MalformedFail.
+		//
+		// NOTE(11/23/22): This is a tricky bit. See if we can
+		// decipher it. Expand this comment when finished.
+		// UPDATE(1/31/23): I think these checks determine whether or
+		// not an HTLC is "freshly locked in" as mentioned below.
+		// - remoteChainTail == pd.addCommitHeightRemote will only be true
+		// when we are handling updates for the commitment at which this pd
+		// was locked in (ie: when it is fresh).
+		// - recall the order in which an HTLC we forward is committed.
+		//   It is first pending on local, committed locally, then pending
+		//   on remote, then finally committed remotely.
 		shouldFwdAdd := remoteChainTail == pd.addCommitHeightRemote &&
 			localChainTail >= pd.addCommitHeightLocal
 		shouldFwdRmv := remoteChainTail == pd.removeCommitHeightRemote &&
@@ -5000,15 +5390,48 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 		// locked-in at this new state. By doing this we ensure that we
 		// don't re-forward any already processed HTLC's after a
 		// restart.
+		//
+		// NOTE(1/20/23): The channel state machine does not reforward HTLCs?
+		// The Switch weeds out duplicates, but we attempt to do that elsewhere too.
 		switch {
 		case pd.EntryType == Add && committedAdd && shouldFwdAdd:
 			// Construct a reference specifying the location that
 			// this forwarded Add will be written in the forwarding
 			// package constructed at this remote height.
+			//
+			// NOTE(11/23/22): A payment descriptor first receives a
+			// forwarding package source reference when the HTLC
+			// update it describes, namely a new (add), arrives at our link
+			// from a peer and has been commmited to. We are the incoming
+			// link and will need to forward this HTLC through the switch
+			// on its way to the recipient. We will add a source reference
+			// to the payment descriptor. Will our outgoing link's payment
+			// descriptor have the same source reference?
+			// - Check AddHTLC()
+			// - Yes! Though payment descriptors remain local to the link
+			// for whose HTLC update log they were created, the channeldb.AddRefs
+			// are passed through the Switch via the htlcPacket structure!
 			pd.SourceRef = &channeldb.AddRef{
 				Height: remoteChainTail,
 				Index:  addIndex,
 			}
+			fmt.Printf("[ReceiveRevocation(%s) - local_key=%x, remote_key=%x]: "+
+				"forwarding package add reference: %+v!\n",
+				lc.ShortChanID(),
+				lc.LocalFundingKey.SerializeCompressed()[:10],
+				lc.RemoteFundingKey.SerializeCompressed()[:10],
+				pd.SourceRef,
+			)
+			fmt.Printf("[ReceiveRevocation(%s) - local_key=%x, remote_key=%x]: "+
+				"committed add: %t, add_commit_height_remote: %d, add_commit_height_local: %d "+
+				"should forward: %t, remote_chain_tail: %d, !\n",
+				lc.ShortChanID(),
+				lc.LocalFundingKey.SerializeCompressed()[:10],
+				lc.RemoteFundingKey.SerializeCompressed()[:10],
+				committedAdd, pd.addCommitHeightRemote, pd.addCommitHeightLocal,
+				shouldFwdAdd, remoteChainTail, pd.addCommitHeightRemote,
+				localChainTail, pd.addCommitHeightLocal,
+			)
 			addIndex++
 
 			pd.isForwarded = true
@@ -5018,17 +5441,51 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 			// Construct a reference specifying the location that
 			// this forwarded Settle/Fail will be written in the
 			// forwarding package constructed at this remote height.
+			//
+			// NOTE(11/23/22): An payment descriptor first receives a
+			// forwarding package destination reference when the HTLC
+			// update it describes, namely a (settle/fail) response
+			// to a previously forwarded (add), arrives at our link
+			// from a peer and has been commmited to. From the perspective
+			// of the original (add), the response has arrived and
+			// been committed to by the outgoing link. It just needs
+			// to be returned to the incoming link via the switch
+			// and continued on its journey back towards the sender.
+			// Will our incoming link's payment descriptor have the
+			// same destination reference?
+			// - Check SettleHTLC() or FailHTLC()
+			// - Yes! Though payment descriptors remain local to the link
+			// for whose HTLC update log they were created, the channeldb.SettleFailRefs
+			// are passed through the Switch via the htlcPacket structure
 			pd.DestRef = &channeldb.SettleFailRef{
 				Source: source,
 				Height: remoteChainTail,
 				Index:  settleFailIndex,
 			}
+			fmt.Printf("[ReceiveRevocation(%s) - local_key=%x, remote_key=%x]: "+
+				"forwarding package settle/fail reference: %+v!\n",
+				lc.ShortChanID(),
+				lc.LocalFundingKey.SerializeCompressed()[:10],
+				lc.RemoteFundingKey.SerializeCompressed()[:10],
+				pd.DestRef,
+			)
 			settleFailIndex++
 
 			pd.isForwarded = true
 			settleFailsToForward = append(settleFailsToForward, pd)
 
 		default:
+			// NOTE(1/31/23): I think this default case will avoid duplicate
+			// forwards in the case where our link has restarted and the
+			// payment descriptor does not indicate that we have already
+			// forwarded the HTLC.
+			// Our integration test (itest) retransmit_vs_replay seems to confirm this.
+			fmt.Printf("[ReceiveRevocation(%s) - local_key=%x, remote_key=%x]: "+
+				"Catching duplicate !\n",
+				lc.ShortChanID(),
+				lc.LocalFundingKey.SerializeCompressed()[:10],
+				lc.RemoteFundingKey.SerializeCompressed()[:10],
+			)
 			continue
 		}
 
@@ -5044,6 +5501,14 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 		// updates into Adds and Settle/Fail/MalformedFail such that
 		// they can be written in the forwarding package. Adds are
 		// aggregated separately from the other types of HTLCs.
+		//
+		// NOTE(11/23/22): Here we take each of our pending/committed? (see drawings)
+		// remote updates and build a corresponding LogUpdate. The LogUpdate wraps a
+		// locally constructed HTLC update message. It appears we do NOT
+		// persist the lnwire.Message (Add,Settle, Fail) we receive from
+		// our peer directly, but rather we persist a locally constructed
+		// version of the message which has been stripped down a bit.
+		// Relevant for route blinding, it does NOT include the TLV extensions.
 		switch pd.EntryType {
 		case Add:
 			htlc := &lnwire.UpdateAddHTLC{
@@ -5055,6 +5520,15 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 			}
 			copy(htlc.OnionBlob[:], pd.OnionBlob)
 			logUpdate.UpdateMsg = htlc
+			fmt.Printf("[ReceiveRevocation(%s) - local_key=%x, remote_key=%x]: "+
+				"created LogUpdate for ADD, (chan_id=%s, amount=%d, expiry=%d)\n",
+				lc.ShortChanID(),
+				lc.LocalFundingKey.SerializeCompressed()[:10],
+				lc.RemoteFundingKey.SerializeCompressed()[:10],
+				htlc.ChanID.String(),
+				htlc.Amount,
+				htlc.Expiry,
+			)
 			addUpdates = append(addUpdates, logUpdate)
 
 		case Settle:
@@ -5096,8 +5570,21 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 	// Now that we have gathered the set of HTLCs to forward, separated by
 	// type, construct a forwarding package using the height that the remote
 	// commitment chain will be extended after persisting the revocation.
+	//
+	// NOTE(11/23/22): This is where a forwarding package is created for
+	// the very first time! The forwarding package contains the LogUpdates
+	// from our remote peer only??
+	// UPDATE(11/25/22): The forwarding package is written to disk below
+	// via AdvanceCommitChainTail().
 	fwdPkg := channeldb.NewFwdPkg(
 		source, remoteChainTail, addUpdates, settleFailUpdates,
+	)
+	fmt.Printf("[ReceiveRevocation(%s) - local_key=%x, remote_key=%x]: "+
+		"forwarding package(%x): state: %+v, pkg: %+v!\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+		fwdPkg.ID(), fwdPkg.State, fwdPkg.String(),
 	)
 
 	// We will soon be saving the current remote commitment to revocation
@@ -5118,6 +5605,12 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 	// sync now to ensure the revocation producer state is consistent with
 	// the current commitment height and also to advance the on-disk
 	// commitment chain.
+	//
+	// NOTE(11/25/22): We write the forwarding package to disk inside this
+	// function. After serialization, a restarting link will recover the
+	// blinding points from any HTLC updates contained in the forwarding package.
+	// There is some other pathways we need to consider as it seems like the
+	// payment descriptors are not always restored from the forwarding package.
 	err = lc.channelState.AdvanceCommitChainTail(
 		fwdPkg, localPeerUpdates,
 		ourOutputIndex, theirOutputIndex,
@@ -5140,6 +5633,9 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 
 	remoteHTLCs := lc.channelState.RemoteCommitment.Htlcs
 
+	// NOTE(1/20/23): We have a forwarding package containing all ADD
+	// updates alongside the collection of non duplicate ADDs which
+	// should be forwarded.
 	return fwdPkg, addsToForward, settleFailsToForward, remoteHTLCs, nil
 }
 
@@ -5219,6 +5715,9 @@ func (lc *LightningChannel) InitNextRevocation(revKey *btcec.PublicKey) error {
 // format. See https://github.com/lightningnetwork/lightning-rfc/issues/728
 //
 // NOTE: It is okay for sourceRef to be nil when unit testing the wallet.
+// NOTE(1/20/23): Otherwise all *forwarded* ADDs we receive from the Switch
+// will have an AddRef pointing to the forwarding package of the incoming link
+// on which this HTLC was first commmitted.
 func (lc *LightningChannel) AddHTLC(htlc *lnwire.UpdateAddHTLC,
 	openKey *models.CircuitKey) (uint64, error) {
 
@@ -5230,6 +5729,11 @@ func (lc *LightningChannel) AddHTLC(htlc *lnwire.UpdateAddHTLC,
 		return 0, err
 	}
 
+	// NOTE(11/23/22): We just recieved this HTLC (add) update from our
+	// switch so we'll add it to the local update log. Recall, that HTLCs
+	// are batched and process asynchronously. We won't proces this HTLC
+	// straight away, but rather add it to our log of updates which will
+	// soon be sent to our peer
 	lc.localUpdateLog.appendHtlc(pd)
 
 	return pd.HtlcIndex, nil
@@ -5349,15 +5853,33 @@ func (lc *LightningChannel) MayAddOutgoingHtlc(amt lnwire.MilliSatoshi) error {
 func (lc *LightningChannel) htlcAddDescriptor(htlc *lnwire.UpdateAddHTLC,
 	openKey *models.CircuitKey) *PaymentDescriptor {
 
+	fmt.Printf("[AddHTLC(%s) - local_key=%x, remote_key=%x]: circuit key: %+v!\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+		openKey,
+	)
+
 	return &PaymentDescriptor{
-		EntryType:      Add,
-		RHash:          PaymentHash(htlc.PaymentHash),
-		Timeout:        htlc.Expiry,
-		Amount:         htlc.Amount,
-		LogIndex:       lc.localUpdateLog.logIndex,
-		HtlcIndex:      lc.localUpdateLog.htlcCounter,
-		OnionBlob:      htlc.OnionBlob[:],
+		EntryType: Add,
+		RHash:     PaymentHash(htlc.PaymentHash),
+		Timeout:   htlc.Expiry,
+		Amount:    htlc.Amount,
+		LogIndex:  lc.localUpdateLog.logIndex,
+		HtlcIndex: lc.localUpdateLog.htlcCounter,
+		OnionBlob: htlc.OnionBlob[:],
+		// NOTE(11/23/22): AddHTLC is called by the outgoing link.
+		// If the (add) came to us via the switch, then  we will
+		// have an open circuit key. The circuit will later be
+		// commited once we...
 		OpenCircuitKey: openKey,
+		// IMPORTANT NOTE(11/18/22):
+		// If an HTLC contains an ephemeral (route) blinding
+		// point, then we must store a reference to it inside
+		// the update log. Later, if the Add is failed, we
+		// may be able to use it to determine how to forward the
+		// error back towards the sender.
+		// BlindingPoint: htlc.BlindingPoint,
 	}
 }
 
@@ -5413,6 +5935,19 @@ func (lc *LightningChannel) ReceiveHTLC(htlc *lnwire.UpdateAddHTLC) (uint64, err
 		LogIndex:  lc.remoteUpdateLog.logIndex,
 		HtlcIndex: lc.remoteUpdateLog.htlcCounter,
 		OnionBlob: htlc.OnionBlob[:],
+		// NOTE(11/21/22): We batch process HTLC updates in an asynchronous
+		// manner. The incoming link for an HTLC Add update received a
+		// blinding point. We'll make sure to include it in the payment
+		// descriptor we store (in-memory) on our update log so that it
+		// is available to decrypt the onion with when we begin batch
+		// processing this HTLC.
+		//
+		// KEY QUESTION(11/21/22): When an HTLC update is added to our
+		// LN channel state machine, how is it represented and where
+		// does it go (ie: live so that we can recover it later)?
+		// I am not sure that PaymenDescriptors in our in-memory
+		// update log or LogUpdate is the full story here!!
+		// BlindingPoint: htlc.BlindingPoint,
 	}
 
 	localACKedIndex := lc.remoteCommitChain.tail().ourMessageIndex
@@ -5426,6 +5961,8 @@ func (lc *LightningChannel) ReceiveHTLC(htlc *lnwire.UpdateAddHTLC) (uint64, err
 		return 0, err
 	}
 
+	// NOTE(11/23/22): We just recieved this HTLC (add) update from our
+	// peer so we'll add it to the log we keep of updates from them.
 	lc.remoteUpdateLog.appendHtlc(pd)
 
 	return pd.HtlcIndex, nil
@@ -5448,10 +5985,28 @@ func (lc *LightningChannel) ReceiveHTLC(htlc *lnwire.UpdateAddHTLC) (uint64, err
 //     HTLC does not originate as a response from the peer on the outgoing
 //     link, e.g. on-chain resolutions.
 //
-//   - closeKey: identifies the circuit that should be deleted after this Settle
-//     HTLC is included in a commitment txn. This value should only be nil if
-//     the HTLC was settled locally before committing a circuit to the circuit
-//     map.
+//      NOTE(11/23/22): This makes sense! SettleHTLC will be called by an outgoing
+//      link seeking to push the settle update to its peer. In "normal" operation,
+//      this settle is responding to a previous add, and thus will have came in on
+//      another link. This type of sail WILL have a destRef so that we can acknowledge
+//      the complete processing of the HTLC (add, settle) with the downstream link.
+//      If, as is said here, the incoming link is settling back an add which is not
+//      coming to our link (incoming) from the outgoing link, but rather systems which
+//      handle on-chain HTLC resolution, then the settle will of course NOT be in any
+//      other link's forwarding package, thus this 'destRef' will be nil!
+//      TODO: Find out where and when the AddRefs and SettleFailRefs are created!
+//      - This might be wrong.
+//
+//  * closeKey: identifies the circuit that should be deleted after this Settle
+//      HTLC is included in a commitment txn. This value should only be nil if
+//      the HTLC was settled locally before committing a circuit to the circuit
+//      map.
+//
+//     NOTE(11/27/22): The CloseKey (channeldb.CircuitKey) is only set for a
+//     payment descriptor in SettleHTLC or FailHTLC, which will be called
+//     by the link on which the corresponding ADD came in. This makes sense
+//     since the incoming link commiting to the reponse does mark the HTLC
+//     fully processed.
 //
 // NOTE: It is okay for sourceRef, destRef, and closeKey to be nil when unit
 // testing the wallet.
@@ -5459,9 +6014,20 @@ func (lc *LightningChannel) SettleHTLC(preimage [32]byte,
 	htlcIndex uint64, sourceRef *channeldb.AddRef,
 	destRef *channeldb.SettleFailRef, closeKey *models.CircuitKey) error {
 
+	fmt.Printf("[SettleHTLC(%s) - local_key=%x, remote_key=%x]: incoming (this) "+
+		"link fwd pkg add ref: %+v, outgoing link fwd pkg ref: %+v "+
+		"htlcIndex: %d!\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+		sourceRef, destRef, htlcIndex,
+	)
+
 	lc.Lock()
 	defer lc.Unlock()
 
+	// NOTE(11/23/22): This HTLC (settle) update must be responding
+	// to a previous (add) we received from our peer.
 	htlc := lc.remoteUpdateLog.lookupHtlc(htlcIndex)
 	if htlc == nil {
 		return ErrUnknownHtlcIndex{lc.ShortChanID(), htlcIndex}
@@ -5489,6 +6055,11 @@ func (lc *LightningChannel) SettleHTLC(preimage [32]byte,
 		ClosedCircuitKey: closeKey,
 	}
 
+	// NOTE(11/23/22): We just recieved this HTLC (settle) update from our
+	// switch so we'll add it to the local update log. Recall, that HTLCs
+	// are batched and process asynchronously. We won't proces this HTLC
+	// straight away, but rather add it to our log of updates which will
+	// soon be sent to our peer
 	lc.localUpdateLog.appendUpdate(pd)
 
 	// With the settle added to our local log, we'll now mark the HTLC as
@@ -5507,6 +6078,16 @@ func (lc *LightningChannel) ReceiveHTLCSettle(preimage [32]byte, htlcIndex uint6
 	lc.Lock()
 	defer lc.Unlock()
 
+	fmt.Printf("[ReceiveHTLCSettle(%s) - local_key=%x, remote_key=%x]: "+
+		"preimage: %+v, htlc index: %d!\n",
+		lc.ShortChanID(),
+		lc.LocalFundingKey.SerializeCompressed()[:10],
+		lc.RemoteFundingKey.SerializeCompressed()[:10],
+		preimage, htlcIndex,
+	)
+
+	// NOTE(11/23/22): This HTLC (settle) update must be responding
+	// to a previous (add) we sent to the peer.
 	htlc := lc.localUpdateLog.lookupHtlc(htlcIndex)
 	if htlc == nil {
 		return ErrUnknownHtlcIndex{lc.ShortChanID(), htlcIndex}
@@ -5532,6 +6113,8 @@ func (lc *LightningChannel) ReceiveHTLCSettle(preimage [32]byte, htlcIndex uint6
 		EntryType:   Settle,
 	}
 
+	// NOTE(11/23/22): We just recieved this HTLC (settle) update from our
+	// peer so we'll add it to the log we keep of updates from them.
 	lc.remoteUpdateLog.appendUpdate(pd)
 
 	// With the settle added to the remote log, we'll now mark the HTLC as
@@ -5544,7 +6127,7 @@ func (lc *LightningChannel) ReceiveHTLCSettle(preimage [32]byte, htlcIndex uint6
 
 // FailHTLC attempts to fail a targeted HTLC by its payment hash, inserting an
 // entry which will remove the target log entry within the next commitment
-// update. This method is intended to be called in order to cancel in
+// update. This method is intended to be called in order to cancel an
 // _incoming_ HTLC.
 //
 // The additional arguments correspond to:
@@ -5559,10 +6142,26 @@ func (lc *LightningChannel) ReceiveHTLCSettle(preimage [32]byte, htlcIndex uint6
 //     originate as a response from the peer on the outgoing link, e.g.
 //     on-chain resolutions.
 //
-//   - closeKey: identifies the circuit that should be deleted after this Fail
-//     HTLC is included in a commitment txn. This value should only be nil if
-//     the HTLC was failed locally before committing a circuit to the circuit
-//     map.
+//      NOTE(11/23/22): This makes sense! FailHTLC will be called by an outgoing
+//      link seeking to push the fail update to its peer. In "normal" operation,
+//      this fail is responding to a previous add, and thus will have came in on
+//      another link. This type of fail WILL have a destRef so that we can acknowledge
+//      the complete processing of the HTLC (add, fail) with the downstream link.
+//      If, as is said here, the incoming link is failing back an add which never
+//      made it through our Switch and downstream to a peer, then the fail will
+//      of course NOT be in any other link's forwarding package, thus this 'destRef'
+//      will be nil!
+//
+//  * closeKey: identifies the circuit that should be deleted after this Fail
+//      HTLC is included in a commitment txn. This value should only be nil if
+//      the HTLC was failed locally before committing a circuit to the circuit
+//      map.
+//
+//     NOTE(11/27/22): The CloseKey (channeldb.CircuitKey) is only set for a
+//     payment descriptor in SettleHTLC or FailHTLC, which will be called
+//     by the link on which the corresponding ADD came in. This makes sense
+//     since the incoming link commiting to the reponse does mark the HTLC
+//     fully processed.
 //
 // NOTE: It is okay for sourceRef, destRef, and closeKey to be nil when unit
 // testing the wallet.
@@ -5573,6 +6172,9 @@ func (lc *LightningChannel) FailHTLC(htlcIndex uint64, reason []byte,
 	lc.Lock()
 	defer lc.Unlock()
 
+	// NOTE(11/21/22): Any HTLC failure we're about to send
+	// to our peer MUST correspond to an ADD they've previously
+	// told us about, thus it'll be in our remote update log.
 	htlc := lc.remoteUpdateLog.lookupHtlc(htlcIndex)
 	if htlc == nil {
 		return ErrUnknownHtlcIndex{lc.ShortChanID(), htlcIndex}
@@ -5594,8 +6196,23 @@ func (lc *LightningChannel) FailHTLC(htlcIndex uint64, reason []byte,
 		SourceRef:        sourceRef,
 		DestRef:          destRef,
 		ClosedCircuitKey: closeKey,
+		// IMPORTANT NOTE(11/17/22):
+		// The LN state machine stores the blinding point
+		// associated with an Add if the ADD was associated
+		// with a blinded route. If that Add is now being
+		// failed, we'll want a reference to its ephemeral
+		// blinding point so we can use it to determine which
+		// error will be forwarded back towards the sender.
+		// NOTE(11/17/22): Not sure whether this should be set
+		// here or somewhere similar like ReceiveFailHTLC().
+		// BlindingPoint: htlc.BlindingPoint,
 	}
 
+	// NOTE(11/23/22): We just recieved this HTLC (fail) update from our
+	// switch so we'll add it to the local update log. Recall, that HTLCs
+	// are batched and processed asynchronously. We won't proces this HTLC
+	// straight away, but rather add it to our log of updates which will
+	// soon be sent to our peer
 	lc.localUpdateLog.appendUpdate(pd)
 
 	// With the fail added to the remote log, we'll now mark the HTLC as
@@ -5623,6 +6240,9 @@ func (lc *LightningChannel) MalformedFailHTLC(htlcIndex uint64,
 	lc.Lock()
 	defer lc.Unlock()
 
+	// NOTE(11/21/22): Any HTLC failure we're about to send
+	// to our peer MUST correspond to an ADD they've previously
+	// told us about, thus it'll be in our remote update log.
 	htlc := lc.remoteUpdateLog.lookupHtlc(htlcIndex)
 	if htlc == nil {
 		return ErrUnknownHtlcIndex{lc.ShortChanID(), htlcIndex}
@@ -5645,6 +6265,11 @@ func (lc *LightningChannel) MalformedFailHTLC(htlcIndex uint64,
 		SourceRef:    sourceRef,
 	}
 
+	// NOTE(11/23/22): We just recieved this HTLC (fail) update from our
+	// switch so we'll add it to the local update log. Recall, that HTLCs
+	// are batched and processed asynchronously. We won't proces this HTLC
+	// straight away, but rather add it to our log of updates which will
+	// soon be sent to our peer
 	lc.localUpdateLog.appendUpdate(pd)
 
 	// With the fail added to the remote log, we'll now mark the HTLC as
@@ -5665,6 +6290,8 @@ func (lc *LightningChannel) ReceiveFailHTLC(htlcIndex uint64, reason []byte,
 	lc.Lock()
 	defer lc.Unlock()
 
+	// NOTE(11/21/22): Any HTLC failure MUST correspond to an ADD
+	// we previously put in our local update log.
 	htlc := lc.localUpdateLog.lookupHtlc(htlcIndex)
 	if htlc == nil {
 		return ErrUnknownHtlcIndex{lc.ShortChanID(), htlcIndex}
@@ -5683,8 +6310,21 @@ func (lc *LightningChannel) ReceiveFailHTLC(htlcIndex uint64, reason []byte,
 		LogIndex:    lc.remoteUpdateLog.logIndex,
 		EntryType:   Fail,
 		FailReason:  reason,
+		// IMPORTANT NOTE(11/17/22):
+		// Where we need the blinding point in channel state machine's
+		// update log depends on how errors are to be processed and
+		// possibly on how HTLC retransmission is handled.
+		//
+		// The LN state machine stores the blinding point
+		// associated with an Add if the ADD was associated
+		// with a blinded route. If that Add is now being
+		// failed, we may want a reference to its ephemeral
+		// blinding point so we can use it to determine which
+		// error will be forwarded back towards the sender.
 	}
 
+	// NOTE(11/23/22): We just recieved this HTLC (fail) update from our
+	// peer so we'll add it to the log we keep of updates from them.
 	lc.remoteUpdateLog.appendUpdate(pd)
 
 	// With the fail added to the remote log, we'll now mark the HTLC as

@@ -27,6 +27,9 @@ type ClearTextError interface {
 
 // LinkError is an implementation of the ClearTextError interface which
 // represents failures that occur on our incoming or outgoing link.
+//
+// NOTE(11/30/22): This wraps the failure message itself (UpdateFailHTLC)
+// and provides some additional information contextualizing the error.
 type LinkError struct {
 	// msg returns the wire failure associated with the error.
 	// This value should *not* be nil, because we should always
@@ -47,6 +50,10 @@ func NewLinkError(msg lnwire.FailureMessage) *LinkError {
 
 // NewDetailedLinkError returns a link error that enriches a wire message with
 // a failure detail.
+//
+// NOTE(11/30/22): This goes above an beyond the spec level errors
+// in 'lnwire' and also includes some additional information on the
+// error from the perspective of the 'htlcswitch' package.
 func NewDetailedLinkError(msg lnwire.FailureMessage,
 	detail FailureDetail) *LinkError {
 

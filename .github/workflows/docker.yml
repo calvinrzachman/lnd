@@ -20,6 +20,8 @@ jobs:
   main:
     runs-on: ubuntu-latest
     steps:
+      # NOTE(2/11/23): LL maintains a set of prebuilt GH actions scripts
+      # in a separate repo here: https://github.com/lightninglabs/gh-actions
       - name: Set up QEMU
         uses: lightninglabs/gh-actions/setup-qemu-action@2021.01.25.00
 
@@ -37,6 +39,7 @@ jobs:
           echo "RELEASE_VERSION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
           echo "IMAGE_TAG=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
       
+      # LL builds an image daily off master to test
       - name: Set daily tag
         if: github.event.schedule == '0 0 * * *'
         run: |
@@ -48,6 +51,7 @@ jobs:
         uses: lightninglabs/gh-actions/build-push-action@2021.01.25.00
         with:
           push: true
+          # NOTE(2/11/23): We do not build for M1 so we must not test locally?
           platforms: linux/amd64,linux/arm64
           tags: "${{ env.DOCKER_REPO }}/${{ env.DOCKER_IMAGE }}:${{ env.IMAGE_TAG }}"
           build-args: checkout=${{ env.RELEASE_VERSION }}

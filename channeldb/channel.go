@@ -1375,6 +1375,10 @@ func (c *OpenChannel) SecondCommitmentPoint() (*btcec.PublicKey, error) {
 // If this is a restored channel, having status ChanStatusRestored, then we'll
 // modify our typical chan sync message to ensure they force close even if
 // we're on the very first state.
+//
+// NOTE(11/27/22): This is involved in an outgoing link's determination on
+// whether we have any local HTLC updates which need to be retrasnmitted!!
+// I think we may expect a similar message from them upon reconnect.
 func (c *OpenChannel) ChanSyncMsg() (*lnwire.ChannelReestablish, error) {
 	c.Lock()
 	defer c.Unlock()
@@ -2177,6 +2181,19 @@ type CommitDiff struct {
 	// transition in question. Upon reconnection, if we detect that they
 	// don't have the commitment, then we re-send this along with the
 	// proper signature.
+	//
+	// NOTE(11/27/22): This contains the set of pending local HTLC updates over
+	// which we are signing. Recall that when sending a commitment
+	// (ie: extending our peer’s commitment chain) and creating a new remote
+	// view, we include _all_ of our changes (pending or committed) but only
+	// the remote node's changes up to the last change we've acknowledged.
+	// We can assume (as long as we guarantee in order message delivery) that
+	// the remote node will have heard about all HTLC updates we sent prior to
+	// receiving this commitment signature, but only if we take care to resend
+	// the updates in the case we are retransmitting after a restart!
+	// We can make sure these local/outgoing log updates which have yet to be
+	// committed with our downstream peer contain the blinding point our peer
+	// will need to process their onion!
 	LogUpdates []LogUpdate
 
 	// CommitSig is the exact CommitSig message that should be sent after
@@ -2261,6 +2278,8 @@ func serializeCommitDiff(w io.Writer, diff *CommitDiff) error { // nolint: dupl
 		return err
 	}
 
+	// NOTE(11/23/22): All LogUpdates which are part of this commit diff
+	// are persisted to disk here!
 	if err := serializeLogUpdates(w, diff.LogUpdates); err != nil {
 		return err
 	}
@@ -2369,6 +2388,8 @@ func (c *OpenChannel) AppendRemoteCommitChain(diff *CommitDiff) error {
 		return ErrNoRestoredChannelMutation
 	}
 
+	// NOTE(11/22/22): Here is where we write some juicy forwarding packages
+	// to disk?
 	return kvdb.Update(c.Db.backend, func(tx kvdb.RwTx) error {
 		// First, we'll grab the writable bucket where this channel's
 		// data resides.
@@ -2394,6 +2415,11 @@ func (c *OpenChannel) AppendRemoteCommitChain(diff *CommitDiff) error {
 		// Mark all of these as being fully processed in our forwarding
 		// package, which prevents us from reprocessing them after
 		// startup.
+		// QUESTION(11/22/22): What happens with ADDs that are not
+		// fully processed? Are they sent to the Switch again?
+		// I believe we may rely on the Switch to decline to forward
+		// the same HTLC a second time, but our Link might be too dumb
+		// to know not to do that.
 		err = c.Packager.AckAddHtlcs(tx, diff.AddAcks...)
 		if err != nil {
 			return err
@@ -2404,6 +2430,17 @@ func (c *OpenChannel) AppendRemoteCommitChain(diff *CommitDiff) error {
 		// prevents the same fails and settles from being retransmitted
 		// after restarts. The actual fail or settle we need to
 		// propagate to the remote party is now in the commit diff.
+		//
+		// NOTE(1/20/23): We don't actually do any internal acknowlegment
+		// to the outgoing link here anymore! Ever since we moved to
+		// pipeline (ie: immediately send without waiting for commitment
+		// tx update) settles/fails, this is often (always?) called with empty
+		// SettleFailReferences. Instead settles/fails are acked in
+		// batches periodically by the Switch. I guess the Settle/Fail
+		// will be resent internally until that batch internal
+		// acknowledgement occurs.
+		// https://github.com/lightningnetwork/lnd/pull/3143#discussion_r304190259
+		fmt.Println("[AppendRemoteCommitChain]: AckSettleFails...")
 		err = c.Packager.AckSettleFails(tx, diff.SettleFailAcks...)
 		if err != nil {
 			return err
@@ -2423,6 +2460,9 @@ func (c *OpenChannel) AppendRemoteCommitChain(diff *CommitDiff) error {
 
 		// With the bucket retrieved, we'll now serialize the commit
 		// diff itself, and write it to disk.
+		//
+		// NOTE(11/23/22): All LogUpdates which are part of this commit diff
+		// are persisted to disk here!
 		var b2 bytes.Buffer
 		if err := serializeCommitDiff(&b2, diff); err != nil {
 			return err
@@ -2582,6 +2622,9 @@ func (c *OpenChannel) InsertNextRevocation(revKey *btcec.PublicKey) error {
 // commitment to the current remote commitment. The updates parameter is the
 // set of local updates that the peer still needs to send us a signature for.
 // We store this set of updates in case we go down.
+//
+// NOTE(11/27/22): Recall in principle we have local updates which our peer
+// either has not heard of (has not included in a RevokeAndAck)
 func (c *OpenChannel) AdvanceCommitChainTail(fwdPkg *FwdPkg,
 	updates []LogUpdate, ourOutputIndex, theirOutputIndex uint32) error {
 
@@ -2835,6 +2878,7 @@ func (c *OpenChannel) AckAddHtlcs(addRefs ...AddRef) error {
 func (c *OpenChannel) AckSettleFails(settleFailRefs ...SettleFailRef) error {
 	c.Lock()
 	defer c.Unlock()
+	fmt.Println("[OpenChannel.AckSettleFails]")
 
 	return kvdb.Update(c.Db.backend, func(tx kvdb.RwTx) error {
 		return c.Packager.AckSettleFails(tx, settleFailRefs...)
