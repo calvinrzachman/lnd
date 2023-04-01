@@ -1480,7 +1480,8 @@ func TestChannelLinkMultiHopDecodeError(t *testing.T) {
 
 	// Replace decode function with another which throws an error.
 	n.carolChannelLink.cfg.ExtractErrorEncrypter = func(
-		*btcec.PublicKey) (hop.ErrorEncrypter, lnwire.FailCode) {
+		*btcec.PublicKey, *btcec.PublicKey) (hop.ErrorEncrypter,
+		lnwire.FailCode) {
 		return nil, lnwire.CodeInvalidOnionVersion
 	}
 
@@ -1865,7 +1866,7 @@ func newSingleLinkTestHarness(t *testing.T, chanAmt, chanReserve btcutil.Amount)
 			return aliceSwitch.ForwardPackets(linkQuit, packets...)
 		},
 		DecodeHopIterators: decoder.DecodeHopIterators,
-		ExtractErrorEncrypter: func(*btcec.PublicKey) (
+		ExtractErrorEncrypter: func(*btcec.PublicKey, *btcec.PublicKey) (
 			hop.ErrorEncrypter, lnwire.FailCode) {
 			return obfuscator, lnwire.CodeNone
 		},
@@ -4304,7 +4305,7 @@ func (h *persistentLinkHarness) restartLink(
 			return aliceSwitch.ForwardPackets(linkQuit, packets...)
 		},
 		DecodeHopIterators: decoder.DecodeHopIterators,
-		ExtractErrorEncrypter: func(*btcec.PublicKey) (
+		ExtractErrorEncrypter: func(*btcec.PublicKey, *btcec.PublicKey) (
 			hop.ErrorEncrypter, lnwire.FailCode) {
 
 			return obfuscator, lnwire.CodeNone

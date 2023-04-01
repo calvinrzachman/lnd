@@ -632,6 +632,10 @@ func (cm *circuitMap) decodeCircuit(v []byte) (*PaymentCircuit, error) {
 
 	// Otherwise, we need to reextract the encrypter, so that the shared
 	// secret is rederived from what was decoded.
+	//
+	// NOTE(4/1/23): The CircuitMap is configured with the method by which
+	// it extracts error encryptors. The method is not pinned to the implementation
+	// and as a result is more easily changeable?
 	err := circuit.ErrorEncrypter.Reextract(
 		cm.cfg.ExtractErrorEncrypter,
 	)

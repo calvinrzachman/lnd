@@ -398,6 +398,13 @@ type channelLink struct {
 	// registry.
 	hodlQueue *queue.ConcurrentQueue
 
+	// errorQueue is a multi-producer, single-consumer queue and serves as
+	// the central point from which all errors, both local and downstream,
+	// for a given link are processed. Having a central point through which
+	// all errors flow allows us to handle blinded route errors in a privacy
+	// preserving manner.
+	errorQueue *queue.ConcurrentQueue
+
 	// hodlMap stores related htlc data for a circuit key. It allows
 	// resolving those htlcs when we receive a message on hodlQueue.
 	hodlMap map[models.CircuitKey]hodlHtlc
@@ -1371,6 +1378,7 @@ func (l *channelLink) processHtlcResolution(resolution invoices.HtlcResolution,
 		// result.
 		failure := getResolutionFailure(res, htlc.pd.Amount)
 
+		// NOTE(4/1/23): We send an error to our peer here!
 		l.sendHTLCError(
 			htlc.pd, failure, htlc.obfuscator, true,
 		)
@@ -1577,7 +1585,15 @@ func (l *channelLink) handleDownstreamPkt(pkt *htlcPacket) {
 		// Immediately update the commitment tx to minimize latency.
 		l.updateCommitTxOrFail()
 
+	// NOTE(4/1/23): Take note of the lack of UpdateFailMalformedHTLC in this switch
+	// statement. This implies that we do not expect to receive such an error message
+	// from our Switch. Do we only expect UpdateFailMalformedHTLC from downstream peers?
+	// If so, where does the conversion take place? Perhaps part of the work is already
+	// here.
 	case *lnwire.UpdateFailHTLC:
+		// NOTE(4/1/23): We could update so that MalformedHTLC messages can flow through
+		// the switch and we defer converting them until we reach the incoming link.
+		// case *lnwire.UpdateFailHTLC, *lnwire.UpdateFailMalformedHTLC:
 		// If hodl.FailOutgoing mode is active, we exit early to
 		// simulate arbitrary delays between the switch adding a FAIL to
 		// the mailbox, and the HTLC being added to the commitment
@@ -1632,6 +1648,13 @@ func (l *channelLink) handleDownstreamPkt(pkt *htlcPacket) {
 
 		// We send the HTLC message to the peer which initially created
 		// the HTLC.
+		//
+		// NOTE(4/2/23): We want to condition whether this is UpdateFailHTLC or
+		// UpdateFailMalformedHTLC based upon the _location_ of the incoming
+		// blinding point. So we need BOTH the blinding point and whether it
+		// was in the onion payload (intro) or TLV extension (other)?
+		// pkt.circuit.IsBlind()
+		// pkt.circuit.IsIntro()
 		l.cfg.Peer.SendMessage(false, htlc)
 
 		// If the packet does not have a link failure set, it failed
@@ -1804,6 +1827,10 @@ func (l *channelLink) handleUpstreamMsg(msg lnwire.Message) {
 		// Pipeline this settle, send it to the switch.
 		go l.forwardBatch(false, settlePacket)
 
+	// NOTE(4/1/23): We only ever expect to see this message from our peer,
+	// never from the Switch. We do not expect to forward UpdateFailMalformedHTLC
+	// through the switch, but rather convert it to UpdateFailHTLC before forwarding
+	// back upstream (towards payment sender).
 	case *lnwire.UpdateFailMalformedHTLC:
 		// Convert the failure type encoded within the HTLC fail
 		// message to the proper generic lnwire error code.
@@ -1820,6 +1847,15 @@ func (l *channelLink) handleUpstreamMsg(msg lnwire.Message) {
 
 		case lnwire.CodeInvalidOnionKey:
 			failure = &lnwire.FailInvalidOnionKey{
+				OnionSHA256: msg.ShaOnionBlob,
+			}
+
+		case lnwire.CodeInvalidOnionBlinding:
+			l.log.Infof("Received InvalidOnionBlinding Malformed HTLC error "+
+				"from peer: %v", msg.FailureCode)
+			fmt.Printf("Received InvalidOnionBlinding Malformed HTLC error "+
+				"from peer: %v\n", msg.FailureCode)
+			failure = &lnwire.InvalidOnionBlinding{
 				OnionSHA256: msg.ShaOnionBlob,
 			}
 		default:
@@ -2857,6 +2893,11 @@ func (l *channelLink) processRemoteSettleFails(fwdPkg *channeldb.FwdPkg,
 		// been received. As a result a new slot will be freed up in
 		// our commitment state, so we'll forward this to the switch so
 		// the backwards undo can continue.
+		//
+		// NOTE(4/1/23): Regardless of whether the message we received
+		// from our peer was UpdateFailHTLC or UpdateFailMalformedHTLC,
+		// we convert to an UpdateFailHTLC to be forwarded through the
+		// Switch.
 		case lnwallet.Fail:
 			// If hodl.SettleIncoming is requested, we will not
 			// forward the FAIL to the switch and will not signal a
@@ -2865,6 +2906,8 @@ func (l *channelLink) processRemoteSettleFails(fwdPkg *channeldb.FwdPkg,
 				l.log.Warnf(hodl.FailIncoming.Warning())
 				continue
 			}
+			l.log.Infof("We received a FAIL update!")
+			fmt.Printf("We received a FAIL update!")
 
 			// Fetch the reason the HTLC was canceled so we can
 			// continue to propagate it. This failure originated
@@ -2890,8 +2933,13 @@ func (l *channelLink) processRemoteSettleFails(fwdPkg *channeldb.FwdPkg,
 			// that we need to convert this error within the switch
 			// to an actual error, by encrypting it as if we were
 			// the originating hop.
+			// NOTE(4/1/23): Understand this!
 			convertedErrorSize := lnwire.FailureMessageLength + 4
 			if len(pd.FailReason) == convertedErrorSize {
+				l.log.Infof("We received this FAIL update as an "+
+					"UpdateFailMalformedHTLC message: %v, len: %d", pd.FailReason, len(pd.FailReason))
+				fmt.Printf("We received this FAIL update as an "+
+					"UpdateFailMalformedHTLC message: %v, len: %d\n", pd.FailReason, len(pd.FailReason))
 				failPacket.convertedError = true
 			}
 
@@ -2994,6 +3042,7 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 			// If we're unable to process the onion blob than we
 			// should send the malformed htlc error to payment
 			// sender.
+			// NOTE(4/1/23): We send an error to our peer here!
 			l.sendMalformedHTLCError(pd.HtlcIndex, failureCode,
 				onionBlob[:], pd.SourceRef)
 
@@ -3004,6 +3053,10 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 
 		// Retrieve onion obfuscator from onion blob in order to
 		// produce initial obfuscation of the onion failureCode.
+		//
+		// The method on hop.Iterator is a container method which simply
+		// calls the functionality passed to it. The "extractor" we are
+		// passing is the sphinx implementation in this case.
 		obfuscator, failureCode := chanIterator.ExtractErrorEncrypter(
 			l.cfg.ExtractErrorEncrypter,
 		)
@@ -3011,6 +3064,7 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 			// If we're unable to process the onion blob than we
 			// should send the malformed htlc error to payment
 			// sender.
+			// NOTE(4/1/23): We send an error to our peer here!
 			l.sendMalformedHTLCError(
 				pd.HtlcIndex, failureCode, onionBlob[:], pd.SourceRef,
 			)
@@ -3019,6 +3073,12 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 				"obfuscator: %v", failureCode)
 			continue
 		}
+		// NOTE(4/1/23): In order to produce a "real" protocol compliant
+		// error we need to decrypt the onion? We extract __ from the decrypted
+		// onion. The type of error message we use is based upon
+		// whether or not we can decrypt the onion. If we can decrypt,
+		// then we can send a "real" error with UpdateFailHTLC. If we
+		// cannot decrypt and extract __, then we use UpdateFailMalformedHTLC.
 
 		heightNow := l.cfg.BestHeight()
 
@@ -3040,6 +3100,7 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 			// payloads. Deferring this non-trival effort till a
 			// later date
 			failure := lnwire.NewInvalidOnionPayload(failedType, 0)
+			// NOTE(4/1/23): We send an error to our peer here!
 			l.sendHTLCError(
 				pd, NewLinkError(failure), obfuscator, false,
 			)
@@ -3160,6 +3221,7 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 					true, hop.Source, cb,
 				)
 
+				// NOTE(4/1/23): We send an error to our peer here!
 				l.sendHTLCError(
 					pd, NewLinkError(failure), obfuscator, false,
 				)
@@ -3251,6 +3313,7 @@ func (l *channelLink) processExitHop(pd *lnwallet.PaymentDescriptor,
 		failure := NewLinkError(
 			lnwire.NewFinalIncorrectHtlcAmount(pd.Amount),
 		)
+		// NOTE(4/1/23): We send an error to our peer here!
 		l.sendHTLCError(pd, failure, obfuscator, true)
 
 		return nil
@@ -3266,6 +3329,7 @@ func (l *channelLink) processExitHop(pd *lnwallet.PaymentDescriptor,
 		failure := NewLinkError(
 			lnwire.NewFinalIncorrectCltvExpiry(pd.Timeout),
 		)
+		// NOTE(4/1/23): We send an error to our peer here!
 		l.sendHTLCError(pd, failure, obfuscator, true)
 
 		return nil
@@ -3380,6 +3444,8 @@ func (l *channelLink) forwardBatch(replay bool, packets ...*htlcPacket) {
 func (l *channelLink) sendHTLCError(pd *lnwallet.PaymentDescriptor,
 	failure *LinkError, e hop.ErrorEncrypter, isReceive bool) {
 
+	// NOTE(4/1/23): We are the source of the error so we'll encrypt a
+	// clear text error message and add an HMAC.
 	reason, err := e.EncryptFirstHop(failure.WireMessage())
 	if err != nil {
 		l.log.Errorf("unable to obfuscate error: %v", err)
@@ -3392,11 +3458,18 @@ func (l *channelLink) sendHTLCError(pd *lnwallet.PaymentDescriptor,
 		return
 	}
 
+	// NOTE(4/1/23): We will replace all call sites where we send our peer
+	// an error with an addition to the error queue. Errors will be read
+	// from the queue and forwarded to our peer.
+	//
+	// UpdateFailHTLC delivers an encrypted error message to our peer.
 	l.cfg.Peer.SendMessage(false, &lnwire.UpdateFailHTLC{
 		ChanID: l.ChanID(),
 		ID:     pd.HtlcIndex,
 		Reason: reason,
 	})
+	// Add error to queue for eventual forwarding to peer.
+	// l.errorQueue.ChanIn()
 
 	// Notify a link failure on our incoming link. Outgoing htlc information
 	// is not available at this point, because we have not decrypted the
@@ -3437,6 +3510,9 @@ func (l *channelLink) sendMalformedHTLCError(htlcIndex uint64,
 		return
 	}
 
+	// NOTE(4/1/23): We will replace all call sites where we send our peer
+	// an error with an addition to the error queue. Errors will be read
+	// from the queue and forwarded to our peer.
 	l.cfg.Peer.SendMessage(false, &lnwire.UpdateFailMalformedHTLC{
 		ChanID:       l.ChanID(),
 		ID:           htlcIndex,

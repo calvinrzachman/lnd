@@ -66,8 +66,15 @@ func initTestExtracter() {
 	onionProcessor := newOnionProcessor(nil)
 	defer onionProcessor.Stop()
 
+	// NOTE(4/1/23): Done this way, we have to have the blinding point
+	// We have an aspect of the error encryptor which does NOT change
+	// depending on whether the HTLC is normal or blind (our node ID key),
+	// and we have an aspect which DOES change depending on whether the HTLC
+	// is normal or blind (the blinding point). When do we want the mixing of
+	// blinding with node ID key pair to take place in the context of error
+	// encryption?
 	obfuscator, _ := onionProcessor.ExtractErrorEncrypter(
-		testEphemeralKey,
+		testEphemeralKey, nil,
 	)
 
 	sphinxExtracter, ok := obfuscator.(*hop.SphinxErrorEncrypter)
@@ -215,6 +222,8 @@ func TestHalfCircuitSerialization(t *testing.T) {
 		// reextract it from it's decoded state, as this requires an
 		// ECDH with the onion processor's private key. For mock error
 		// encrypters, this will be a NOP.
+		//
+		// NOTE(4/1/23): Consider this comment.
 		if circuit2.ErrorEncrypter != nil {
 			err := circuit2.ErrorEncrypter.Reextract(
 				onionProcessor.ExtractErrorEncrypter,

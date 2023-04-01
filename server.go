@@ -3711,15 +3711,19 @@ func (s *server) peerConnected(conn net.Conn, connReq *connmgr.ConnReq,
 		Wallet:                  s.cc.Wallet,
 		ChainNotifier:           s.cc.ChainNotifier,
 		RoutingPolicy:           s.cc.RoutingPolicy,
-		Sphinx:                  s.sphinx,
-		WitnessBeacon:           s.witnessBeacon,
-		Invoices:                s.invoices,
-		ChannelNotifier:         s.channelNotifier,
-		HtlcNotifier:            s.htlcNotifier,
-		TowerClient:             s.towerClient,
-		AnchorTowerClient:       s.anchorTowerClient,
-		DisconnectPeer:          s.DisconnectPeer,
-		GenNodeAnnouncement:     s.genNodeAnnouncement,
+		// NOTE(4/1/23): This contains the hop.OnionProcessor we thread
+		// through when creating channel links. It contains a Sphinx
+		// specific implementation for extracting information needed
+		// to encrypt errors.
+		Sphinx:              s.sphinx,
+		WitnessBeacon:       s.witnessBeacon,
+		Invoices:            s.invoices,
+		ChannelNotifier:     s.channelNotifier,
+		HtlcNotifier:        s.htlcNotifier,
+		TowerClient:         s.towerClient,
+		AnchorTowerClient:   s.anchorTowerClient,
+		DisconnectPeer:      s.DisconnectPeer,
+		GenNodeAnnouncement: s.genNodeAnnouncement,
 
 		PongBuf: s.pongBuf,
 

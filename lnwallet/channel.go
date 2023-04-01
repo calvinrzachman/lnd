@@ -5632,6 +5632,8 @@ func (lc *LightningChannel) FailHTLC(htlcIndex uint64, reason []byte,
 		SourceRef:        sourceRef,
 		DestRef:          destRef,
 		ClosedCircuitKey: closeKey,
+		// NOTE(4/2/23): Will this restore our blinding point?
+		BlindingPoint: htlc.BlindingPoint,
 	}
 
 	lc.localUpdateLog.appendUpdate(pd)

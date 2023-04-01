@@ -58,6 +58,10 @@ type sphinxHopIterator struct {
 // router and converts it into an hop iterator for usage in the link. A
 // blinding kit is passed through for the link to obtain forwarding information
 // for blinded routes.
+//
+// NOTE(4/1/23): This iterator contains the result of having decrypted an onion
+// packet. It also retains a reference to the OG (ie: unprocessed) onion packet.
+// With the addition of route blinding it also contains a reference.
 func makeSphinxHopIterator(ogPacket *sphinx.OnionPacket,
 	packet *sphinx.ProcessedPacket,
 	blindingKit *BlindingKit) *sphinxHopIterator {
@@ -115,10 +119,20 @@ func (r *sphinxHopIterator) HopPayload() (*Payload, error) {
 // a payment fails.
 //
 // NOTE: Part of the HopIterator interface.
+//
+// NOTE(4/1/23): Like our circuit map, our hop iterator also does not commit to
+// a particular method of extracting the information needed to encrypt errors.
 func (r *sphinxHopIterator) ExtractErrorEncrypter(
 	extracter ErrorEncrypterExtracter) (ErrorEncrypter, lnwire.FailCode) {
 
-	return extracter(r.ogPacket.EphemeralKey)
+	// NOTE(4/1/23): We use the ephmeral public key the sender included in
+	// the onion packet (as the basis for ECDH) to encrypt errors.
+	//
+	// NOTE(4/1/23): This may be transparent to the caller. If the blinding
+	// point is present on the hop iterator, then we will create an error
+	// encrypter which uses a modified version of our node ID key pair.
+	// Otherwise we will function like normal!
+	return extracter(r.ogPacket.EphemeralKey, r.blindingKit.BlindingPoint)
 }
 
 // BlindingProcessor is an interface that provides the cryptographic operations
@@ -527,11 +541,21 @@ func (p *OnionProcessor) DecodeHopIterators(id []byte,
 // ErrorEncrypter instance using the derived shared secret. In the case that en
 // error occurs, a lnwire failure code detailing the parsing failure will be
 // returned.
-func (p *OnionProcessor) ExtractErrorEncrypter(ephemeralKey *btcec.PublicKey) (
+//
+// NOTE(4/1/23): This comment is out of date? The onion processor (decryptor)
+// DOES commit to an implementation, namely the sphinx library's implementation.
+func (p *OnionProcessor) ExtractErrorEncrypter(
+	ephemeralKey *btcec.PublicKey, blindingPoint *btcec.PublicKey) (
 	ErrorEncrypter, lnwire.FailCode) {
 
+	log.Infof("OnionProcessor.ExtractErrorEncrypter(): extracting!")
+	fmt.Println("OnionProcessor.ExtractErrorEncrypter(): extracting!")
+
+	// NOTE(4/1/23): In order for us to encrypt using the appropriate key
+	// we need to use the ephemeral blinding point here when handling errors
+	// for a blinded route. How should we thread the blinding point through?
 	onionObfuscator, err := sphinx.NewOnionErrorEncrypter(
-		p.router, ephemeralKey, nil,
+		p.router, ephemeralKey, blindingPoint,
 	)
 	if err != nil {
 		switch err {

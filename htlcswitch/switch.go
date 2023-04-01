@@ -163,6 +163,9 @@ type Config struct {
 	// ExtractErrorEncrypter is an interface allowing switch to reextract
 	// error encrypters stored in the circuit map on restarts, since they
 	// are not stored directly within the database.
+	//
+	// NOTE(4/1/23): Why not store in DB? Too much space? Redundant if it
+	// can simply be re-derived from other on-disk state I think.
 	ExtractErrorEncrypter hop.ErrorEncrypterExtracter
 
 	// FetchLastChannelUpdate retrieves the latest routing policy for a
@@ -354,9 +357,11 @@ func New(cfg Config, currentHeight uint32) (*Switch, error) {
 	resStore := newResolutionStore(cfg.DB)
 
 	circuitMap, err := NewCircuitMap(&CircuitMapConfig{
-		DB:                    cfg.DB,
-		FetchAllOpenChannels:  cfg.FetchAllOpenChannels,
-		FetchClosedChannels:   cfg.FetchClosedChannels,
+		DB:                   cfg.DB,
+		FetchAllOpenChannels: cfg.FetchAllOpenChannels,
+		FetchClosedChannels:  cfg.FetchClosedChannels,
+		// NOTE(4/1/23): Why is the error encypter extractor a part
+		// of the Circuit Map? Convenience? Or necessity?
 		ExtractErrorEncrypter: cfg.ExtractErrorEncrypter,
 		CheckResolutionMsg:    resStore.checkResolutionMsg,
 	})
@@ -1276,6 +1281,8 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 		packet.outgoingChanID = destination.ShortChanID()
 		return destination.handleSwitchPacket(packet)
 
+	// NOTE(4/1/23): Nowhere in this function do we expect an UpdateFailMalformedHTLC!
+	// This means that it will have already been converted.
 	case *lnwire.UpdateFailHTLC, *lnwire.UpdateFulfillHTLC:
 		// If the source of this packet has not been set, use the
 		// circuit map to lookup the origin.
@@ -1321,7 +1328,15 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 					"(%s, %d) <-> (%s, %d))", packet.circuit.PaymentHash,
 					packet.incomingChanID, packet.incomingHTLCID,
 					packet.outgoingChanID, packet.outgoingHTLCID)
+				fmt.Printf("Converting malformed HTLC error "+
+					"for circuit for Circuit(%x: "+
+					"(%s, %d) <-> (%s, %d))\n", packet.circuit.PaymentHash,
+					packet.incomingChanID, packet.incomingHTLCID,
+					packet.outgoingChanID, packet.outgoingHTLCID)
 
+				// NOTE(4/1/23): We encrypt the failure reason here.
+				// Does the encryption key need to be different for blind HTLCs?
+				// What key is normally used to encrypt errors?
 				fail.Reason = circuit.ErrorEncrypter.EncryptMalformedError(
 					fail.Reason,
 				)
@@ -1543,6 +1558,9 @@ func (s *Switch) closeCircuit(pkt *htlcPacket) (*PaymentCircuit, error) {
 	case nil:
 		pkt.incomingChanID = circuit.Incoming.ChanID
 		pkt.incomingHTLCID = circuit.Incoming.HtlcID
+		// NOTE(4/2/23): We add the payment circuit back to the htlc packet.
+		// If the blinding point/location info is recoverable from the payment
+		// circuit, then we will be able to use it to decide how to handle the error!
 		pkt.circuit = circuit
 		pkt.sourceRef = &circuit.AddRef
 

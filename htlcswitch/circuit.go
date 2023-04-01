@@ -86,6 +86,11 @@ func newPaymentCircuit(hash *[32]byte, pkt *htlcPacket) *PaymentCircuit {
 		PaymentHash:    *hash,
 		IncomingAmount: pkt.incomingAmount,
 		OutgoingAmount: pkt.amount,
+		// NOTE(4/1/23): this payment circuit will be constructed with
+		// an obfuscator (key) built using the blinding point.
+		// It does not mean that we can recover the blinding point.
+		// Only, that we should be using the correct key for
+		// error encryption for both normal and blind hops.
 		ErrorEncrypter: pkt.obfuscator,
 	}
 }
