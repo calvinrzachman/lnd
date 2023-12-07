@@ -2,7 +2,7 @@
 
 set -ev
 
-BITCOIND_VERSION=${BITCOIN_VERSION:-25.0}
+BITCOIND_VERSION=${BITCOIN_VERSION:-26.0}
 
 docker pull lightninglabs/bitcoin-core:$BITCOIND_VERSION
 CONTAINER_ID=$(docker create lightninglabs/bitcoin-core:$BITCOIND_VERSION)
