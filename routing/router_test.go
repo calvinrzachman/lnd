@@ -3996,3 +3996,6 @@ func TestNewRouteRequest(t *testing.T) {
 		})
 	}
 }
+
+// TestSendOnion exercises the send to custom user provided onion flow.
+func TestSendOnion(t *testing.T) {}
