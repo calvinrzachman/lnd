@@ -531,6 +531,7 @@ func (s *Switch) SendHTLC(firstHop lnwire.ShortChannelID, attemptID uint64,
 	packet := &htlcPacket{
 		incomingChanID: hop.Source,
 		incomingHTLCID: attemptID,
+		// NOTE(calvin): the first hop is set here.
 		outgoingChanID: firstHop,
 		htlc:           htlc,
 		amount:         htlc.Amount,
@@ -539,6 +540,9 @@ func (s *Switch) SendHTLC(firstHop lnwire.ShortChannelID, attemptID uint64,
 	// Attempt to fetch the target link before creating a circuit so that
 	// we don't leave dangling circuits. The getLocalLink method does not
 	// require the circuit variable to be set on the *htlcPacket.
+	//
+	// NOTE(calvin): We use the 'firstHop' to find the correct link to
+	// dispatch our HTLC.
 	link, linkErr := s.getLocalLink(packet, htlc)
 	if linkErr != nil {
 		// Notify the htlc notifier of a link failure on our outgoing
@@ -857,6 +861,10 @@ func (s *Switch) getLocalLink(pkt *htlcPacket, htlc *lnwire.UpdateAddHTLC) (
 
 	// Try to find links by node destination.
 	s.indexMtx.RLock()
+	// NOTE(calvin): We use the 'firstHop' here to determine the proper
+	// link to handle the HTLC. In the current implementation the ChannelRouter
+	// sets this by inspecting the route either built via SendPayment or
+	// SendToRouteV2.
 	link, err := s.getLinkByShortID(pkt.outgoingChanID)
 	defer s.indexMtx.RUnlock()
 	if err != nil {

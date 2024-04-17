@@ -911,13 +911,20 @@ var sendToRouteCommand = cli.Command{
 	   * passing the route as a positional argument:
 	         (lncli sendtoroute --payment_hash=pay_hash <route>)
 
-	   * or reading in the route from stdin, which can allow chaining the
+	   * reading in the route from stdin, which can allow chaining the
 	     response from queryroutes or buildroute, or even read in a file
 	     with a pre-computed route:
 	         (lncli queryroutes --args.. | lncli sendtoroute --payment_hash= -
 
 	     notice the '-' at the end, which signals that lncli should read
 	     the route in from stdin
+
+	The route can also be provided via a custom onion blob. In this case,
+	the information provided by other arguments (eg: payment_hash) is
+	contained within the onion.
+	   * passing the route as a custom onion blob:
+	         (lncli sendtoroute --onion_blob=<onion>)
+
 	`,
 	Flags: []cli.Flag{
 		cli.StringFlag{
@@ -935,6 +942,10 @@ var sendToRouteCommand = cli.Command{
 				"failed when a temporary error occurred. Set " +
 				"it to true so the payment won't be failed " +
 				"unless a terminal error has occurred.",
+		},
+		cli.StringFlag{
+			Name:  "onion_blob",
+			Usage: "a custom onion to use when sending the payment.",
 		},
 	},
 	Action: sendToRoute,
@@ -1028,10 +1039,21 @@ func sendToRoute(ctx *cli.Context) error {
 		route = routes.Route
 	}
 
+	var onionBlob []byte
+
+	if ctx.IsSet("onion_blob") {
+		onionBlob, err = hex.DecodeString(ctx.String("onion_blob"))
+
+		if err != nil {
+			return err
+		}
+	}
+
 	req := &routerrpc.SendToRouteRequest{
 		PaymentHash: rHash,
 		Route:       route,
 		SkipTempErr: ctx.Bool("skip_temp_err"),
+		OnionBlob:   onionBlob,
 	}
 
 	return sendToRouteRequest(ctx, req)

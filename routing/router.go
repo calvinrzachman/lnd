@@ -2494,17 +2494,19 @@ func (r *ChannelRouter) PreparePayment(payment *LightningPayment) (
 // SendToRoute sends a payment using the provided route and fails the payment
 // when an error is returned from the attempt.
 func (r *ChannelRouter) SendToRoute(htlcHash lntypes.Hash,
-	rt *route.Route) (*channeldb.HTLCAttempt, error) {
+	rt *route.Route, customOnionBlob []byte) (*channeldb.HTLCAttempt,
+	error) {
 
-	return r.sendToRoute(htlcHash, rt, false)
+	return r.sendToRoute(htlcHash, rt, false, customOnionBlob)
 }
 
 // SendToRouteSkipTempErr sends a payment using the provided route and fails
 // the payment ONLY when a terminal error is returned from the attempt.
 func (r *ChannelRouter) SendToRouteSkipTempErr(htlcHash lntypes.Hash,
-	rt *route.Route) (*channeldb.HTLCAttempt, error) {
+	rt *route.Route, customOnionBlob []byte) (*channeldb.HTLCAttempt,
+	error) {
 
-	return r.sendToRoute(htlcHash, rt, true)
+	return r.sendToRoute(htlcHash, rt, true, customOnionBlob)
 }
 
 // sendToRoute attempts to send a payment with the given hash through the
@@ -2514,7 +2516,8 @@ func (r *ChannelRouter) SendToRouteSkipTempErr(htlcHash lntypes.Hash,
 // was initiated, both return values will be non-nil. If skipTempErr is true,
 // the payment won't be failed unless a terminal error has occurred.
 func (r *ChannelRouter) sendToRoute(htlcHash lntypes.Hash, rt *route.Route,
-	skipTempErr bool) (*channeldb.HTLCAttempt, error) {
+	skipTempErr bool, customOnionBlob []byte) (*channeldb.HTLCAttempt,
+	error) {
 
 	// Calculate amount paid to receiver.
 	amt := rt.ReceiverAmt()
@@ -2593,6 +2596,9 @@ func (r *ChannelRouter) sendToRoute(htlcHash lntypes.Hash, rt *route.Route,
 	// NOTE: we use zero `remainingAmt` here to simulate the same effect of
 	// setting the lastShard to be false, which is used by previous
 	// implementation.
+	//
+	// NOTE(calvin): This assumes that we have route information. Will
+	// we or should we in the scenario in which the user provides the onion?
 	attempt, err := p.registerAttempt(rt, 0)
 	if err != nil {
 		return nil, err
@@ -2602,7 +2608,7 @@ func (r *ChannelRouter) sendToRoute(htlcHash lntypes.Hash, rt *route.Route,
 	// the `err` returned here has already been processed by
 	// `handleSwitchErr`, which means if there's a terminal failure, the
 	// payment has been failed.
-	result, err := p.sendAttempt(attempt)
+	result, err := p.sendAttempt(attempt, customOnionBlob)
 	if err != nil {
 		return nil, err
 	}

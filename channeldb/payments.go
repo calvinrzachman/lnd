@@ -204,6 +204,7 @@ func htlcBucketKey(prefix, id []byte) []byte {
 
 // FetchPayments returns all sent payments found in the DB.
 //
+// NOTE(calvin): We pull the route information here!
 // nolint: dupl
 func (d *DB) FetchPayments() ([]*MPPayment, error) {
 	var payments []*MPPayment
@@ -223,6 +224,7 @@ func (d *DB) FetchPayments() ([]*MPPayment, error) {
 					"payments bucket")
 			}
 
+			// NOTE(calvin): We pull the route information here!
 			p, err := fetchPayment(bucket)
 			if err != nil {
 				return err
@@ -285,6 +287,8 @@ func fetchPayment(bucket kvdb.RBucket) (*MPPayment, error) {
 	htlcsBucket := bucket.NestedReadBucket(paymentHtlcsBucket)
 	if htlcsBucket != nil {
 		// Get the payment attempts. This can be empty.
+		// NOTE(calvin): We read the HTLC attempt info including the route
+		// taken here!
 		htlcs, err = fetchHtlcAttempts(htlcsBucket)
 		if err != nil {
 			return nil, err
@@ -392,6 +396,7 @@ func fetchHtlcAttempts(bucket kvdb.RBucket) ([]HTLCAttempt, error) {
 // readHtlcAttemptInfo reads the payment attempt info for this htlc.
 func readHtlcAttemptInfo(b []byte) (*HTLCAttemptInfo, error) {
 	r := bytes.NewReader(b)
+	// NOTE(calvin): We read the HTLC attempt info including the route
 	return deserializeHTLCAttemptInfo(r)
 }
 
@@ -417,6 +422,8 @@ func fetchFailedHtlcKeys(bucket kvdb.RBucket) ([][]byte, error) {
 	var htlcs []HTLCAttempt
 	var err error
 	if htlcsBucket != nil {
+		// NOTE(calvin): We read the HTLC attempt info including the route
+		// taken here!
 		htlcs, err = fetchHtlcAttempts(htlcsBucket)
 		if err != nil {
 			return nil, err
@@ -511,6 +518,8 @@ type PaymentsResponse struct {
 // QueryPayments is a query to the payments database which is restricted
 // to a subset of payments by the payments query, containing an offset
 // index and a maximum number of returned payments.
+//
+// NOTE(calvin): We pull the route information here!
 func (d *DB) QueryPayments(query PaymentsQuery) (PaymentsResponse, error) {
 	var resp PaymentsResponse
 
@@ -542,6 +551,7 @@ func (d *DB) QueryPayments(query PaymentsQuery) (PaymentsResponse, error) {
 				return false, err
 			}
 
+			// NOTE(calvin): We pull the route information here!
 			payment, err := fetchPaymentWithSequenceNumber(
 				tx, paymentHash, sequenceKey,
 			)

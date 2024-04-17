@@ -306,6 +306,9 @@ func (p *PaymentControl) RegisterAttempt(paymentHash lntypes.Hash,
 	attempt *HTLCAttemptInfo) (*MPPayment, error) {
 
 	// Serialize the information before opening the db transaction.
+	//
+	// NOTE(calvin): We write attempt info for the HTLC including the route
+	// to the DB here!
 	var a bytes.Buffer
 	err := serializeHTLCAttemptInfo(&a, attempt)
 	if err != nil {

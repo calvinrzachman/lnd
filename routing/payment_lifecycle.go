@@ -286,7 +286,10 @@ lifecycle:
 		}
 
 		// Once the attempt is created, send it to the htlcswitch.
-		result, err := p.sendAttempt(attempt)
+		//
+		// TODO(calvin): Do we need to allow custom onion blob in this
+		// flow as well?
+		result, err := p.sendAttempt(attempt, nil)
 		if err != nil {
 			return exitWithErr(err)
 		}
@@ -584,6 +587,8 @@ func (p *paymentLifecycle) registerAttempt(rt *route.Route,
 
 	// Using the route received from the payment session, create a new
 	// shard to send.
+	//
+	// NOTE(calvin): We pass the route object here.
 	attempt, err := p.createNewPaymentAttempt(rt, isLastAttempt)
 	if err != nil {
 		return nil, err
@@ -594,6 +599,13 @@ func (p *paymentLifecycle) registerAttempt(rt *route.Route,
 	// of the payment that we attempted to send, such that we can query the
 	// Switch for its whereabouts. The route is needed to handle the result
 	// when it eventually comes back.
+	//
+	// NOTE(calvin): How important is it that the route be persisted?
+	// Can we tolerate not perisisting a route in the case where the RPC
+	// caller provides the entire onion?
+	//
+	// So far I haven't found the route inspected once persisted, so maybe
+	// we can get by without a route.
 	err = p.router.cfg.Control.RegisterAttempt(
 		p.identifier, &attempt.HTLCAttemptInfo,
 	)
@@ -630,6 +642,8 @@ func (p *paymentLifecycle) createNewPaymentAttempt(rt *route.Route,
 
 	// If this shard carries MPP or AMP options, add them to the last hop
 	// on the route.
+	//
+	// NOTE(calvin): We directly interrogate the route object here!
 	hop := rt.Hops[len(rt.Hops)-1]
 	if shard.MPP() != nil {
 		hop.MPP = shard.MPP()
@@ -653,8 +667,8 @@ func (p *paymentLifecycle) createNewPaymentAttempt(rt *route.Route,
 // sendAttempt attempts to send the current attempt to the switch to complete
 // the payment. If this attempt fails, then we'll continue on to the next
 // available route.
-func (p *paymentLifecycle) sendAttempt(
-	attempt *channeldb.HTLCAttempt) (*attemptResult, error) {
+func (p *paymentLifecycle) sendAttempt(attempt *channeldb.HTLCAttempt,
+	customOnionBlob []byte) (*attemptResult, error) {
 
 	log.Debugf("Attempting to send payment %v (pid=%v)", p.identifier,
 		attempt.AttemptID)
@@ -662,38 +676,55 @@ func (p *paymentLifecycle) sendAttempt(
 	rt := attempt.Route
 
 	// Construct the first hop.
+	//
+	// NOTE(calvin): The first hop is read from the route object. We could
+	// force users who provide a custom onion blob to *also* provide a route
+	// but it would be cool if we could use *just* the onion, thus provide
+	// optional privacy for callers who specify only the onion.
+	//
+	// The first hop is used by the switch to determine which link should
+	// handle the HTLC. Perhaps users of the 'SendOnion' style RPC will
+	// need to at least indicate the first hop if this cannot easily be
+	// determined by inspecting the onion itself.
 	firstHop := lnwire.NewShortChanIDFromInt(rt.Hops[0].ChannelID)
 
 	// Craft an HTLC packet to send to the htlcswitch. The metadata within
 	// this packet will be used to route the payment through the network,
 	// starting with the first-hop.
+	//
+	// NOTE(calvin): We'll need to allow onion override via CLI here?
 	htlcAdd := &lnwire.UpdateAddHTLC{
 		Amount:      rt.TotalAmount,
 		Expiry:      rt.TotalTimeLock,
 		PaymentHash: *attempt.Hash,
 	}
 
-	// Generate the raw encoded sphinx packet to be included along
+	// Use the custom onion blob if it is provided. Otherwise, we will
+	// generate the raw encoded sphinx packet to be included along
 	// with the htlcAdd message that we send directly to the
 	// switch.
-	onionBlob, _, err := generateSphinxPacket(
-		&rt, attempt.Hash[:], attempt.SessionKey(),
-	)
-	if err != nil {
-		log.Errorf("Failed to create onion blob: attempt=%d in "+
-			"payment=%v, err:%v", attempt.AttemptID,
-			p.identifier, err)
+	if customOnionBlob != nil {
+		copy(htlcAdd.OnionBlob[:], customOnionBlob)
+	} else {
+		onionBlob, _, err := generateSphinxPacket(
+			&rt, attempt.Hash[:], attempt.SessionKey(),
+		)
+		if err != nil {
+			log.Errorf("Failed to create onion blob: attempt=%d in "+
+				"payment=%v, err:%v", attempt.AttemptID,
+				p.identifier, err)
 
-		return p.failAttempt(attempt.AttemptID, err)
+			return p.failAttempt(attempt.AttemptID, err)
+		}
+
+		copy(htlcAdd.OnionBlob[:], onionBlob)
 	}
-
-	copy(htlcAdd.OnionBlob[:], onionBlob)
 
 	// Send it to the Switch. When this method returns we assume
 	// the Switch successfully has persisted the payment attempt,
 	// such that we can resume waiting for the result after a
 	// restart.
-	err = p.router.cfg.Payer.SendHTLC(firstHop, attempt.AttemptID, htlcAdd)
+	err := p.router.cfg.Payer.SendHTLC(firstHop, attempt.AttemptID, htlcAdd)
 	if err != nil {
 		log.Errorf("Failed sending attempt %d for payment %v to "+
 			"switch: %v", attempt.AttemptID, p.identifier, err)
