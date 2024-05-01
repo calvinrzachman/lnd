@@ -16,6 +16,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/htlcswitch"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/invoicesrpc"
 	"github.com/lightningnetwork/lnd/lntypes"
@@ -994,12 +995,15 @@ func (s *Server) SendOnion(ctx context.Context,
 
 	// Convert public key to channel ID.
 	//
-	// NOTE(calvin): An alternative would be to require the RPC caller to
-	// provide the channel ID directly.
-	chanID, err := s.resolveChannelID(firstHop)
+	// NOTE(calvin): This allows us to preserve non-strict forwarding and
+	// provide a slightly more user friendly API to callers. An alternative
+	// would be to require the RPC caller to provide the channel ID directly.
+	chanID, err := s.findEligibleChannelID(
+		firstHop, lnwire.MilliSatoshi(req.Amount),
+	)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal,
-			"no channel for pubkey: %v", err)
+			"unable to find eligible channel ID: %v", err)
 	}
 
 	hash, err := lntypes.MakeHash(req.PaymentHash)
@@ -1037,11 +1041,46 @@ func (s *Server) SendOnion(ctx context.Context,
 	}, nil
 }
 
-func (s *Server) resolveChannelID(
-	pubKey *btcec.PublicKey) (lnwire.ShortChannelID, error) {
+// ChannelInfoAccessor defines an interface for accessing channel information
+// necessary for routing payments, specifically methods for fetching links by
+// public key.
+type ChannelInfoAccessor interface {
+	GetLinksByPubkey(pubKey [33]byte) ([]htlcswitch.ChannelInfoProvider, error)
+}
 
-	return lnwire.ShortChannelID{}, nil
+// findEligibleChannelID attempts to find an eligible channel based on the
+// provided public key and the amount to be sent. It returns a channel ID that
+// can carry the given payment amount.
+func (s *Server) findEligibleChannelID(pubKey *btcec.PublicKey,
+	amount lnwire.MilliSatoshi) (lnwire.ShortChannelID, error) {
 
+	var pubKeyArray [33]byte
+	copy(pubKeyArray[:], pubKey.SerializeCompressed())
+	links, err := s.cfg.ChannelInfoAccessor.GetLinksByPubkey(pubKeyArray)
+	if err != nil {
+		return lnwire.ShortChannelID{},
+			fmt.Errorf("failed to retrieve channels: %w", err)
+	}
+
+	for _, link := range links {
+		// Ensure the link is eligible to forward payments.
+		if !link.EligibleToForward() {
+			continue
+		}
+
+		// Check if the channel has sufficient bandwidth.
+		if link.Bandwidth() >= amount {
+			// Check if adding an HTLC of this amount is possible.
+			if err := link.MayAddOutgoingHtlc(amount); err == nil {
+
+				return link.ShortChanID(), nil
+			}
+		}
+	}
+
+	return lnwire.ShortChannelID{},
+		fmt.Errorf("no suitable channel found for amount: %d msat",
+			amount)
 }
 
 // ResetMissionControl clears all mission control state and starts with a clean

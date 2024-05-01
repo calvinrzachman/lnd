@@ -51,6 +51,8 @@ type Config struct {
 	// main rpc server.
 	// HtlcSwitch     *htlcswitch.Switch
 	HtlcDispatcher routing.PaymentAttemptDispatcher
+
+	ChannelInfoAccessor ChannelInfoAccessor
 }
 
 // DefaultConfig defines the config defaults.
