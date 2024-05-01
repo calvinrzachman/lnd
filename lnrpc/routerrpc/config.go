@@ -51,6 +51,13 @@ type Config struct {
 	// AliasMgr is the alias manager instance that is used to handle all the
 	// SCID alias related information for channels.
 	AliasMgr *aliasmgr.Manager
+
+	// HTLCSwitch contains shared logic between this sub server and the
+	// main rpc server.
+	// HtlcSwitch     *htlcswitch.Switch
+	HtlcDispatcher routing.PaymentAttemptDispatcher
+
+	ChannelInfoAccessor ChannelInfoAccessor
 }
 
 // DefaultConfig defines the config defaults.
