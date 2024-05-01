@@ -714,4 +714,8 @@ var allTestCases = []*lntest.TestCase{
 		Name:     "quiescence",
 		TestFunc: testQuiescence,
 	},
+	{
+		Name:     "send onion",
+		TestFunc: testSendOnion,
+	},
 }
