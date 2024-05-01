@@ -2683,7 +2683,7 @@ func TestEmptyRoutesGenerateSphinxPacket(t *testing.T) {
 
 	sessionKey, _ := btcec.NewPrivateKey()
 	emptyRoute := &route.Route{}
-	_, _, err := generateSphinxPacket(emptyRoute, testHash[:], sessionKey)
+	_, _, err := GenerateSphinxPacket(emptyRoute, testHash[:], sessionKey)
 	if err != route.ErrNoRouteHopsProvided {
 		t.Fatalf("expected empty hops error: instead got: %v", err)
 	}
