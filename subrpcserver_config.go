@@ -321,6 +321,19 @@ func (s *subRPCServerConfigs) PopulateDependencies(cfg *Config,
 				reflect.ValueOf(htlcSwitch),
 			)
 
+			subCfgValue.FieldByName("HtlcDispatcher").Set(
+				reflect.ValueOf(htlcSwitch),
+			)
+
+			subCfgValue.FieldByName("ChannelInfoAccessor").Set(
+				reflect.ValueOf(htlcSwitch),
+			)
+
+			// Populate switchrpc dependencies.
+			// s.SwitchRPC.Switch = htlcSwitch
+			// s.SwitchRPC.HtlcDispatcher = htlcSwitch
+			// s.SwitchRPC.ChannelInfoAccessor = htlcSwitch
+
 		case *watchtowerrpc.Config:
 			subCfgValue := extractReflectValue(subCfg)
 
@@ -390,6 +403,8 @@ func (s *subRPCServerConfigs) PopulateDependencies(cfg *Config,
 	s.RouterRPC.MacService = macService
 	s.RouterRPC.Router = chanRouter
 	s.RouterRPC.RouterBackend = routerBackend
+	// s.RouterRPC.HtlcDispatcher = htlcSwitch
+	// s.RouterRPC.ChannelInfoAccessor = htlcSwitch
 
 	return nil
 }
