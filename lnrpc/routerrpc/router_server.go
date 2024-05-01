@@ -15,6 +15,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
+	sphinx "github.com/lightningnetwork/lightning-onion"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/htlcswitch"
 	"github.com/lightningnetwork/lnd/lnrpc"
@@ -92,6 +93,10 @@ var (
 			Action: "read",
 		}},
 		"/routerrpc.Router/TrackPayments": {{
+			Entity: "offchain",
+			Action: "read",
+		}},
+		"/routerrpc.Router/TrackOnion": {{
 			Entity: "offchain",
 			Action: "read",
 		}},
@@ -1038,6 +1043,117 @@ func (s *Server) SendOnion(ctx context.Context,
 
 	return &SendOnionResponse{
 		Success: true,
+	}, nil
+}
+
+func reconstructCircuit(sessionKey *btcec.PrivateKey,
+	pubKeys []*btcec.PublicKey) *sphinx.Circuit {
+
+	return &sphinx.Circuit{
+		SessionKey:  sessionKey,
+		PaymentPath: pubKeys,
+	}
+}
+
+// TrackOnion provides callers the means to query whether or not a payment
+// dispatched via SendOnion succeeded or failed.
+//
+// NOTE(calvin): The Switch stores payment results keyed by the attempt ID.
+// TODO(calvin): What is the payment hash used for in this context? Error processing?
+func (s *Server) TrackOnion(ctx context.Context,
+	req *TrackOnionRequest) (*TrackOnionResponse, error) {
+
+	// NOTE(calvin): In order to decrypt errors server side we require
+	// either the combination of session key and hop public keys from which
+	// we can construct the shared secrets used to build the
+	// onion or, alternatively, the caller can provide the list of shared
+	// secrets used during onion construction directly.
+	//
+	// If we want to support completely "oblivious sends", then we'll need
+	// to update the Switch such that it doesn't fall over with a nil
+	// error decryptor. In this scenario, we should defer all error handling
+	// and return raw error blobs to the caller.
+
+	// TODO(calvin): Validate that the session key makes a valid private
+	// key? This is untrusted input received via RPC.
+	sessionKey, _ := btcec.PrivKeyFromBytes(req.SessionKey)
+
+	var pubKeys []*btcec.PublicKey
+	for _, keyBytes := range req.HopPubkeys {
+		pubKey, err := btcec.ParsePubKey(keyBytes)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument,
+				"invalid public key: %v", err)
+		}
+		pubKeys = append(pubKeys, pubKey)
+	}
+
+	// Construct the sphinx circuit needed for error decryption using the
+	// provided session key and hop public keys.
+	// NOTE(calvin): Could also provide an lnrpc.Route in TrackOnionRequest
+	// and use with routing.GenerateSphinxPacket(...).
+	circuit := reconstructCircuit(sessionKey, pubKeys)
+
+	// Using the created circuit, initialize the error decrypter so we can
+	// parse+decode any failures incurred by this payment within the
+	// switch.
+	errorDecryptor := &htlcswitch.SphinxErrorDecrypter{
+		OnionErrorDecrypter: sphinx.NewOnionErrorDecrypter(circuit),
+	}
+
+	log.Debugf("Looking up status of onion payment for HTLC hash %x and "+
+		"attempt_id=%d", req.PaymentHash, req.AttemptId)
+
+	// Query the switch for the result of the payment attempt via onion.
+	resultChan, err := s.cfg.HtlcDispatcher.GetAttemptResult(
+		req.AttemptId, lntypes.Hash(req.PaymentHash), errorDecryptor,
+	)
+	if err != nil {
+		return &TrackOnionResponse{
+				Success:      false,
+				ErrorMessage: err.Error(),
+			}, status.Errorf(codes.Internal,
+				"failed locate payment attempt: %v", err)
+	}
+
+	// The switch knows about this payment, we'll wait for a result to be
+	// available.
+	var (
+		result *htlcswitch.PaymentResult
+		ok     bool
+	)
+
+	select {
+	case result, ok = <-resultChan:
+		if !ok {
+			// NOTE(calvin): Can RPC clients see this error type or
+			// will they need to string match?
+			return nil, status.Errorf(codes.Internal,
+				"failed locate payment attempt: %v",
+				htlcswitch.ErrSwitchExiting)
+			// return nil, htlcswitch.ErrSwitchExiting
+		}
+
+	case <-ctx.Done():
+		return nil, nil
+	}
+
+	// In case of a payment failure, fail the attempt with the control
+	// tower and return.
+	if result.Error != nil {
+		log.Errorf("Payment via onion failed for hash %x",
+			req.PaymentHash)
+
+		return &TrackOnionResponse{
+				Success:      false,
+				ErrorMessage: result.Error.Error(),
+			}, status.Errorf(codes.Internal,
+				"payment failed: %v", result.Error)
+	}
+
+	return &TrackOnionResponse{
+		Success:  true,
+		Preimage: result.Preimage[:],
 	}, nil
 }
 
