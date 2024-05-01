@@ -1681,6 +1681,19 @@
         }
       }
     },
+    "routerrpcSendOnionResponse": {
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean",
+          "description": "Indicates if the onion was successfully sent or not."
+        },
+        "error_message": {
+          "type": "string",
+          "description": "In case of failure, this field will provide more information about the\nerror."
+        }
+      }
+    },
     "routerrpcSendPaymentRequest": {
       "type": "object",
       "properties": {
