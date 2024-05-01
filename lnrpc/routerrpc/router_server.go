@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
@@ -78,6 +79,10 @@ var (
 			Action: "write",
 		}},
 		"/routerrpc.Router/SendToRoute": {{
+			Entity: "offchain",
+			Action: "write",
+		}},
+		"/routerrpc.Router/SendOnion": {{
 			Entity: "offchain",
 			Action: "write",
 		}},
@@ -884,6 +889,99 @@ func (s *Server) SendToRouteV2(ctx context.Context,
 	}
 
 	return nil, err
+}
+
+// SendOnion handles the incoming request to send a payment using a preconstructed
+// onion blob provided by the caller.
+func (s *Server) SendOnion(ctx context.Context,
+	req *SendOnionRequest) (*SendOnionResponse, error) {
+
+	if len(req.OnionBlob) == 0 {
+		return nil, status.Error(codes.InvalidArgument,
+			"onion blob is required")
+	}
+	if len(req.OnionBlob) > lnwire.OnionPacketSize {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"onion blob size exceeds limit of %d bytes",
+			lnwire.OnionPacketSize)
+	}
+
+	if len(req.FirstHopPubkey) == 0 {
+		return nil, status.Error(codes.InvalidArgument,
+			"first hop pubkey is required")
+	}
+
+	if len(req.PaymentHash) == 0 {
+		return nil, status.Error(codes.InvalidArgument,
+			"payment hash is required")
+	}
+
+	if req.Amount <= 0 {
+		return nil, status.Error(codes.InvalidArgument,
+			"amount must be greater than zero")
+	}
+
+	// Convert the first hop pubkey into a format usable by the routing subsystem.
+	//
+	// NOTE(calvin): We'll either need to require clients provide the short
+	// channel ID to use as a first hop OR lookup an acceptable channel ID
+	// for the given first hop public key.
+	firstHop, err := btcec.ParsePubKey(req.FirstHopPubkey[:])
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"invalid first hop pubkey: %v", err)
+	}
+
+	// Convert public key to channel ID.
+	//
+	// NOTE(calvin): An alternative would be to require the RPC caller to
+	// provide the channel ID directly.
+	chanID, err := s.resolveChannelID(firstHop)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal,
+			"no channel for pubkey: %v", err)
+	}
+
+	hash, err := lntypes.MakeHash(req.PaymentHash)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"invalid payment hash: %v", err)
+	}
+
+	// Craft an HTLC packet to send to the htlcswitch. The metadata within
+	// this packet will be used to route the payment through the network,
+	// starting with the first-hop.
+	htlcAdd := &lnwire.UpdateAddHTLC{
+		Amount:      lnwire.MilliSatoshi(req.Amount),
+		Expiry:      req.Timelock,
+		PaymentHash: hash,
+		OnionBlob:   [1366]byte(req.OnionBlob),
+	}
+
+	log.Debugf("Dispatching SendOnion for HTLC hash %x via %s",
+		htlcAdd.PaymentHash, chanID)
+
+	// Send the HTLC to the first hop directly by way of the HTLCSwitch.
+	// err = s.cfg.HtlcSwitch.SendHTLC(firstScid, attemptID, htlcAdd)
+	err = s.cfg.HtlcDispatcher.SendHTLC(chanID, req.AttemptId, htlcAdd)
+	if err != nil {
+		return &SendOnionResponse{
+				Success:      false,
+				ErrorMessage: err.Error(),
+			}, status.Errorf(codes.Internal,
+				"failed to send HTLC: %v", err)
+	}
+
+	return &SendOnionResponse{
+		Success: true,
+	}, nil
+}
+
+func (s *Server) resolveChannelID(
+	pubKey *btcec.PublicKey) (lnwire.ShortChannelID, error) {
+
+	return lnwire.ShortChannelID{}, nil
+
 }
 
 // ResetMissionControl clears all mission control state and starts with a clean
