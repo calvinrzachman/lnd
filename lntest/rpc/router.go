@@ -5,6 +5,7 @@ import (
 
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/routerrpc"
+	"github.com/lightningnetwork/lnd/lnrpc/switchrpc"
 	"github.com/stretchr/testify/require"
 )
 
@@ -135,6 +136,45 @@ func (h *HarnessRPC) SendToRouteV2(
 
 	resp, err := h.Router.SendToRouteV2(ctxt, req)
 	h.NoError(err, "SendToRouteV2")
+
+	return resp
+}
+
+// SendOnion makes a RPC call to SendOnion and asserts.
+func (h *HarnessRPC) SendOnion(
+	req *switchrpc.SendOnionRequest) *switchrpc.SendOnionResponse {
+
+	ctxt, cancel := context.WithTimeout(h.runCtx, DefaultTimeout)
+	defer cancel()
+
+	resp, err := h.Switch.SendOnion(ctxt, req)
+	h.NoError(err, "SendOnion")
+
+	return resp
+}
+
+// TrackOnion makes a RPC call to TrackOnion and asserts.
+func (h *HarnessRPC) TrackOnion(
+	req *switchrpc.TrackOnionRequest) *switchrpc.TrackOnionResponse {
+
+	ctxt, cancel := context.WithTimeout(h.runCtx, DefaultTimeout)
+	defer cancel()
+
+	resp, err := h.Switch.TrackOnion(ctxt, req)
+	h.NoError(err, "TrackOnion")
+
+	return resp
+}
+
+// BuildOnion makes a RPC call to BuildOnion and asserts.
+func (h *HarnessRPC) BuildOnion(
+	req *routerrpc.BuildOnionRequest) *routerrpc.BuildOnionResponse {
+
+	ctxt, cancel := context.WithTimeout(h.runCtx, DefaultTimeout)
+	defer cancel()
+
+	resp, err := h.Router.BuildOnion(ctxt, req)
+	h.NoError(err, "BuildOnion")
 
 	return resp
 }
