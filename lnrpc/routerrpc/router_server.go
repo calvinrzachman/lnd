@@ -1034,15 +1034,6 @@ func (s *Server) SendOnion(ctx context.Context,
 	}, nil
 }
 
-func reconstructCircuit(sessionKey *btcec.PrivateKey,
-	pubKeys []*btcec.PublicKey) *sphinx.Circuit {
-
-	return &sphinx.Circuit{
-		SessionKey:  sessionKey,
-		PaymentPath: pubKeys,
-	}
-}
-
 // TrackOnion provides callers the means to query whether or not a payment
 // dispatched via SendOnion succeeded or failed.
 //
@@ -1061,36 +1052,23 @@ func (s *Server) TrackOnion(ctx context.Context,
 	// to update the Switch such that it doesn't fall over with a nil
 	// error decryptor. In this scenario, we should defer all error handling
 	// and return raw error blobs to the caller.
-
-	// TODO(calvin): Validate that the session key makes a valid private
-	// key? This is untrusted input received via RPC.
-	sessionKey, _ := btcec.PrivKeyFromBytes(req.SessionKey)
-
-	var pubKeys []*btcec.PublicKey
-	for _, keyBytes := range req.HopPubkeys {
-		pubKey, err := btcec.ParsePubKey(keyBytes)
-		if err != nil {
-			return nil, status.Errorf(codes.InvalidArgument,
-				"invalid public key: %v", err)
-		}
-		pubKeys = append(pubKeys, pubKey)
-	}
-
-	// Construct the sphinx circuit needed for error decryption using the
-	// provided session key and hop public keys.
-	// NOTE(calvin): Could also provide an lnrpc.Route in TrackOnionRequest
-	// and use with routing.GenerateSphinxPacket(...).
-	circuit := reconstructCircuit(sessionKey, pubKeys)
-
-	// Using the created circuit, initialize the error decrypter so we can
-	// parse+decode any failures incurred by this payment within the
-	// switch.
-	errorDecryptor := &htlcswitch.SphinxErrorDecrypter{
-		OnionErrorDecrypter: sphinx.NewOnionErrorDecrypter(circuit),
-	}
-
 	log.Debugf("Looking up status of onion payment for HTLC hash %x and "+
 		"attempt_id=%d", req.PaymentHash, req.AttemptId)
+
+	// Attempt to build the error decryptor with the provided session key
+	// and hop public keys.
+	errorDecryptor, err := buildErrorDecryptor(
+		req.SessionKey, req.HopPubkeys,
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"error building decryptor: %v", err)
+	}
+
+	if errorDecryptor == nil {
+		log.Debug("Unable to build error decrypter with information " +
+			"provided. Will defer error handling to caller")
+	}
 
 	// Query the switch for the result of the payment attempt via onion.
 	resultChan, err := s.cfg.HtlcDispatcher.GetAttemptResult(
@@ -1139,10 +1117,68 @@ func (s *Server) TrackOnion(ctx context.Context,
 				"payment failed: %v", result.Error)
 	}
 
+	// In case we don't process the error, we'll return the encrypted
+	// error blob for handling by the caller.
+	if result.EncryptedError != nil {
+		log.Errorf("Payment via onion failed for hash %x",
+			req.PaymentHash)
+
+		// NOTE(calvin): gRPC will not return a repsonse object if the
+		// error is non-nil. So if we want to return the encrypted
+		// error blob to the caller, then we need to return a nil error.
+		return &TrackOnionResponse{
+			Success:        false,
+			EncryptedError: result.EncryptedError,
+		}, nil
+	}
+
 	return &TrackOnionResponse{
 		Success:  true,
 		Preimage: result.Preimage[:],
 	}, nil
+}
+
+func buildErrorDecryptor(sessionKeyBytes []byte,
+	hopPubkeys [][]byte) (htlcswitch.ErrorDecrypter, error) {
+
+	if len(sessionKeyBytes) == 0 || len(hopPubkeys) == 0 {
+		return nil, nil
+	}
+
+	// TODO(calvin): Validate that the session key makes a valid private
+	// key? This is untrusted input received via RPC.
+	sessionKey, _ := btcec.PrivKeyFromBytes(sessionKeyBytes)
+
+	var pubKeys []*btcec.PublicKey
+	for _, keyBytes := range hopPubkeys {
+		pubKey, err := btcec.ParsePubKey(keyBytes)
+		if err != nil {
+			return nil, fmt.Errorf("invalid public key: %v", err)
+		}
+		pubKeys = append(pubKeys, pubKey)
+	}
+
+	// Construct the sphinx circuit needed for error decryption using the
+	// provided session key and hop public keys.
+	// NOTE(calvin): Could also provide an lnrpc.Route in TrackOnionRequest
+	// and use with routing.GenerateSphinxPacket(...).
+	circuit := reconstructCircuit(sessionKey, pubKeys)
+
+	// Using the created circuit, initialize the error decrypter so we can
+	// parse+decode any failures incurred by this payment within the
+	// switch.
+	return &htlcswitch.SphinxErrorDecrypter{
+		OnionErrorDecrypter: sphinx.NewOnionErrorDecrypter(circuit),
+	}, nil
+}
+
+func reconstructCircuit(sessionKey *btcec.PrivateKey,
+	pubKeys []*btcec.PublicKey) *sphinx.Circuit {
+
+	return &sphinx.Circuit{
+		SessionKey:  sessionKey,
+		PaymentPath: pubKeys,
+	}
 }
 
 // ChannelInfoAccessor defines an interface for accessing channel information
