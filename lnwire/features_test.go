@@ -223,6 +223,50 @@ func TestFeatureVectorUnknownFeatures(t *testing.T) {
 	}
 }
 
+// TestFeatureVectorHasFeatures tests that a base feature vector signals support
+// for at least the features specified in the supplied vector.
+func TestFeatureVectorHasFeatures(t *testing.T) {
+	t.Parallel()
+
+	// Create several feature vectors for comparison.
+	emptyFeatures := EmptyFeatureVector()
+	rfv1 := NewRawFeatureVector(
+		TLVOnionPayloadRequired,
+	)
+	rfv2 := NewRawFeatureVector(
+		TLVOnionPayloadRequired,
+	)
+	fv1 := NewFeatureVector(rfv1, nil)
+	fv2 := NewFeatureVector(rfv2, nil)
+
+	// A feature vector trivially satisfies requirements imposed
+	// by the empty vector.
+	require.True(t, fv1.HasFeatures(emptyFeatures))
+	require.True(t, fv1.HasFeatures(nil))
+
+	// A feature vector also trivally has all features specified by itself.
+	require.True(t, fv1.HasFeatures(fv1))
+
+	// A feature vector should have all the necessary features when compared
+	// to a different vector with the same features.
+	require.Equal(t, fv1.Features(), fv2.Features())
+	require.True(t, fv1.HasFeatures(fv2))
+
+	// Now compare two different feature vectors. We expect that the first
+	// vector does *not* have all features specified by the second vector.
+	fv2.Set(AnchorsRequired)
+	require.False(t, fv1.HasFeatures(fv2))
+
+	// Update the first feature vector and it should now satisfy the
+	// features of the second vector.
+	fv1.Set(AnchorsRequired)
+	require.True(t, fv1.HasFeatures(fv2))
+
+	// Some sanity checks comparing against the empty feature vector.
+	require.True(t, emptyFeatures.HasFeatures(nil))
+	require.False(t, emptyFeatures.HasFeatures(fv1))
+}
+
 func TestFeatureNames(t *testing.T) {
 	t.Parallel()
 

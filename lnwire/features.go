@@ -742,6 +742,24 @@ func (fv *FeatureVector) HasFeature(feature FeatureBit) bool {
 		(fv.isFeatureBitPair(feature) && fv.IsSet(feature^1))
 }
 
+// HasFeatures determines whether a feature vector contains all
+// features specified by a given vector of required features.
+func (fv *FeatureVector) HasFeatures(req *FeatureVector) bool {
+	// Automatically pass when there are no required features.
+	if req == nil {
+		return true
+	}
+
+	// Verify that we have all required features.
+	for b := range req.RawFeatureVector.features {
+		if !fv.HasFeature(b) {
+			return false
+		}
+	}
+
+	return true
+}
+
 // RequiresFeature returns true if the referenced feature vector *requires*
 // that the given required bit be set. This method can be used with both
 // optional and required feature bits as a parameter.

@@ -64,6 +64,10 @@ const (
 	// errMissingDependentFeature is returned when the destination node
 	// misses a feature that a feature that we require depends on.
 	errMissingDependentFeature
+
+	// errMissingPathDependentFeature is returned when there is no
+	// path which fully supports a list of the features we require.
+	errMissingPathDependentFeature
 )
 
 var (
@@ -97,6 +101,9 @@ func (e noRouteError) Error() string {
 	case errMissingDependentFeature:
 		return "missing dependent feature"
 
+	case errMissingPathDependentFeature:
+		return "missing path dependent feature"
+
 	default:
 		return "unknown no-route error"
 	}
@@ -111,7 +118,8 @@ func (e noRouteError) FailureReason() channeldb.FailureReason {
 		errNoPathFound,
 		errEmptyPaySession,
 		errUnknownRequiredFeature,
-		errMissingDependentFeature:
+		errMissingDependentFeature,
+		errMissingPathDependentFeature:
 
 		return channeldb.FailureReasonNoRoute
 
@@ -257,6 +265,7 @@ func (p *paymentSession) RequestRoute(maxAmt, feeLimit lnwire.MilliSatoshi,
 		CltvLimit:          cltvLimit,
 		DestCustomRecords:  p.payment.DestCustomRecords,
 		DestFeatures:       p.payment.DestFeatures,
+		HopFeatures:        p.payment.HopFeatures,
 		PaymentAddr:        p.payment.PaymentAddr,
 		Amp:                p.payment.amp,
 		Metadata:           p.payment.Metadata,

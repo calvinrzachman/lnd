@@ -361,6 +361,14 @@ func (r *RouterBackend) parseQueryRoutesRequest(in *lnrpc.QueryRoutesRequest) (
 		return nil, err
 	}
 
+	// Some use cases (eg: route blinding) require that all
+	// nodes in the route signal support for a feature so
+	// we'll parse intermediate hop feature bits as well.
+	hopFeatures, err := UnmarshalFeatures(in.HopFeatures)
+	if err != nil {
+		return nil, err
+	}
+
 	restrictions := &routing.RestrictParams{
 		FeeLimit: feeLimit,
 		ProbabilitySource: func(fromNode, toNode route.Vertex,
@@ -390,6 +398,7 @@ func (r *RouterBackend) parseQueryRoutesRequest(in *lnrpc.QueryRoutesRequest) (
 		DestCustomRecords: record.CustomSet(in.DestCustomRecords),
 		CltvLimit:         cltvLimit,
 		DestFeatures:      destinationFeatures,
+		HopFeatures:       hopFeatures,
 		BlindedPayment:    blindedPmt,
 	}
 
