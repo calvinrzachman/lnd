@@ -975,7 +975,14 @@ func (s *Server) SendOnion(ctx context.Context,
 			"amount must be greater than zero")
 	}
 
-	// Convert the first hop pubkey into a format usable by the routing subsystem.
+	hash, err := lntypes.MakeHash(req.PaymentHash)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"invalid payment hash: %v", err)
+	}
+
+	// Convert the first hop pubkey into a format usable by the forwarding
+	// subsystem (eg: HTLCSwitch).
 	//
 	// NOTE(calvin): We'll either need to require clients provide the short
 	// channel ID to use as a first hop OR lookup an acceptable channel ID
@@ -999,12 +1006,6 @@ func (s *Server) SendOnion(ctx context.Context,
 			"unable to find eligible channel ID: %v", err)
 	}
 
-	hash, err := lntypes.MakeHash(req.PaymentHash)
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument,
-			"invalid payment hash: %v", err)
-	}
-
 	// Craft an HTLC packet to send to the htlcswitch. The metadata within
 	// this packet will be used to route the payment through the network,
 	// starting with the first-hop.
@@ -1019,7 +1020,6 @@ func (s *Server) SendOnion(ctx context.Context,
 		htlcAdd.PaymentHash, chanID)
 
 	// Send the HTLC to the first hop directly by way of the HTLCSwitch.
-	// err = s.cfg.HtlcSwitch.SendHTLC(firstScid, attemptID, htlcAdd)
 	err = s.cfg.HtlcDispatcher.SendHTLC(chanID, req.AttemptId, htlcAdd)
 	if err != nil {
 		return &SendOnionResponse{
