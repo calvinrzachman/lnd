@@ -622,4 +622,12 @@ var allTestCases = []*lntest.TestCase{
 		Name:     "sweep commit output and anchor",
 		TestFunc: testSweepCommitOutputAndAnchor,
 	},
+	{
+		Name:     "send onion",
+		TestFunc: testSendOnion,
+	},
+	{
+		Name:     "track onion",
+		TestFunc: testTrackOnion,
+	},
 }

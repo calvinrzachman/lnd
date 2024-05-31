@@ -1001,6 +1001,16 @@ func (s *Switch) extractResult(deobfuscator ErrorDecrypter, n *networkResult,
 	// We've received a fail update which means we can finalize the
 	// user payment and return fail response.
 	case *lnwire.UpdateFailHTLC:
+		// If the caller did not provide a deobfuscator, then we'll
+		// return the onion-encrypted blob that details why the HTLC was
+		// failed. This blob is only fully decryptable by the entity
+		// which built the onion packet.
+		if deobfuscator == nil {
+			return &PaymentResult{
+				EncryptedError: htlc.Reason,
+			}, nil
+		}
+
 		// TODO(yy): construct deobfuscator here to avoid creating it
 		// in paymentLifecycle even for settled HTLCs.
 		paymentErr := s.parseFailedPayment(
@@ -2684,6 +2694,30 @@ func (s *Switch) GetLinksByInterface(hop [33]byte) ([]ChannelUpdateHandler,
 	defer s.indexMtx.RUnlock()
 
 	var handlers []ChannelUpdateHandler
+
+	links, err := s.getLinks(hop)
+	if err != nil {
+		return nil, err
+	}
+
+	// Range over the returned []ChannelLink to convert them into
+	// []ChannelUpdateHandler.
+	for _, link := range links {
+		handlers = append(handlers, link)
+	}
+
+	return handlers, nil
+}
+
+// GetLinksByPubkey fetches all the links connected to a particular node
+// identified by the serialized compressed form of its public key.
+func (s *Switch) GetLinksByPubkey(hop [33]byte) ([]ChannelInfoProvider,
+	error) {
+
+	s.indexMtx.RLock()
+	defer s.indexMtx.RUnlock()
+
+	var handlers []ChannelInfoProvider
 
 	links, err := s.getLinks(hop)
 	if err != nil {
