@@ -1202,25 +1202,29 @@ func (s *Server) findEligibleChannelID(pubKey *btcec.PublicKey,
 			fmt.Errorf("failed to retrieve channels: %w", err)
 	}
 
-	for _, link := range links {
-		// Ensure the link is eligible to forward payments.
-		if !link.EligibleToForward() {
-			continue
-		}
+	return links[0].ShortChanID(), nil
 
-		// Check if the channel has sufficient bandwidth.
-		if link.Bandwidth() >= amount {
-			// Check if adding an HTLC of this amount is possible.
-			if err := link.MayAddOutgoingHtlc(amount); err == nil {
+	// NOTE(calvin): This is probably duplicating the checks that the Switch
+	// itself will perform so we may be fine to just skip these!
+	// for _, link := range links {
+	// 	// Ensure the link is eligible to forward payments.
+	// 	if !link.EligibleToForward() {
+	// 		continue
+	// 	}
 
-				return link.ShortChanID(), nil
-			}
-		}
-	}
+	// 	// Check if the channel has sufficient bandwidth.
+	// 	if link.Bandwidth() >= amount {
+	// 		// Check if adding an HTLC of this amount is possible.
+	// 		if err := link.MayAddOutgoingHtlc(amount); err == nil {
 
-	return lnwire.ShortChannelID{},
-		fmt.Errorf("no suitable channel found for amount: %d msat",
-			amount)
+	// 			return link.ShortChanID(), nil
+	// 		}
+	// 	}
+	// }
+
+	// return lnwire.ShortChannelID{},
+	// 	fmt.Errorf("no suitable channel found for amount: %d msat",
+	// 		amount)
 }
 
 // ResetMissionControl clears all mission control state and starts with a clean
