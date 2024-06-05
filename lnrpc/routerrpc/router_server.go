@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	crand "crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	sphinx "github.com/lightningnetwork/lightning-onion"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/errorcodes"
 	"github.com/lightningnetwork/lnd/htlcswitch"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/invoicesrpc"
@@ -1034,16 +1036,52 @@ func (s *Server) SendOnion(ctx context.Context,
 	// Send the HTLC to the first hop directly by way of the HTLCSwitch.
 	err = s.cfg.HtlcDispatcher.SendHTLC(chanID, req.AttemptId, htlcAdd)
 	if err != nil {
+		message, code := s.translateErrorForRPC(err)
 		return &SendOnionResponse{
-				Success:      false,
-				ErrorMessage: err.Error(),
-			}, status.Errorf(codes.Internal,
-				"failed to send HTLC: %v", err)
+			Success:      false,
+			ErrorMessage: message,
+			ErrorCode:    code,
+		}, nil
 	}
 
-	return &SendOnionResponse{
-		Success: true,
-	}, nil
+	return &SendOnionResponse{Success: true}, nil
+}
+
+func (s *Server) translateErrorForRPC(err error) (string, string) {
+	switch {
+	case errors.Is(err, htlcswitch.ErrPaymentIDNotFound):
+		return err.Error(), errorcodes.ErrCodePaymentIDNotFound
+
+	case errors.Is(err, htlcswitch.ErrUnreadableFailureMessage):
+		return err.Error(), errorcodes.ErrCodeUnreadableFailureMessage
+
+	case errors.Is(err, htlcswitch.ErrSwitchExiting):
+		return err.Error(), errorcodes.ErrCodeSwitchExiting
+
+	default:
+		// Handling ClearTextError and ForwardingError
+		var clearTextErr htlcswitch.ClearTextError
+		if errors.As(err, &clearTextErr) {
+			switch e := err.(type) {
+			case *htlcswitch.ForwardingError:
+				var buf bytes.Buffer
+				err := lnwire.EncodeFailure(&buf, e.WireMessage(), 0)
+				if err != nil {
+					return fmt.Sprintf("failed to encode wire message: %v", err), errorcodes.ErrCodeInternal
+				}
+				return fmt.Sprintf("%d@%s", e.FailureSourceIdx, hex.EncodeToString(buf.Bytes())), errorcodes.ErrCodeForwardingError
+			default:
+				var buf bytes.Buffer
+				err := lnwire.EncodeFailure(&buf, clearTextErr.WireMessage(), 0)
+				if err != nil {
+					return fmt.Sprintf("failed to encode wire message: %v", err), errorcodes.ErrCodeInternal
+				}
+				return hex.EncodeToString(buf.Bytes()), errorcodes.ErrCodeClearTextError
+			}
+		}
+	}
+
+	return err.Error(), errorcodes.ErrCodeInternal
 }
 
 // TrackOnion provides callers the means to query whether or not a payment
