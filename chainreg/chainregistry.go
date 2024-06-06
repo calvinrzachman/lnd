@@ -230,6 +230,8 @@ func NewPartialChainControl(cfg *Config) (*PartialChainControl, func(), error) {
 		),
 	}
 
+	log.Infof("Creating Partial Chain Control")
+
 	var err error
 	heightHintCacheConfig := channeldb.CacheConfig{
 		QueryDisable: cfg.HeightHintCacheQueryDisable,
@@ -239,6 +241,7 @@ func NewPartialChainControl(cfg *Config) (*PartialChainControl, func(), error) {
 	}
 
 	// Initialize the height hint cache within the chain directory.
+	log.Infof("Initializing height hint cache with DB path: %v", cfg.HeightHintDB)
 	hintCache, err := channeldb.NewHeightHintCache(
 		heightHintCacheConfig, cfg.HeightHintDB,
 	)
@@ -286,6 +289,8 @@ func NewPartialChainControl(cfg *Config) (*PartialChainControl, func(), error) {
 		}
 
 	case "bitcoind":
+		log.Infof("[Creating Partial Chain Control]: using bitcoind backend")
+
 		bitcoindMode := cfg.BitcoindMode
 
 		// Otherwise, we'll be speaking directly via RPC and ZMQ to a
@@ -326,6 +331,8 @@ func NewPartialChainControl(cfg *Config) (*PartialChainControl, func(), error) {
 			}
 		}
 
+		log.Infof("Connecting to bitcoind RPC at host: %v", bitcoindHost)
+
 		bitcoindCfg := &chain.BitcoindConfig{
 			ChainParams:        cfg.ActiveNetParams.Params,
 			Host:               bitcoindHost,
@@ -351,6 +358,10 @@ func NewPartialChainControl(cfg *Config) (*PartialChainControl, func(), error) {
 			}
 		}
 
+		log.Infof("Bitcoind Config: %+v", bitcoindCfg)
+		log.Infof("Bitcoind Chain Parameters: %+v", bitcoindCfg.ChainParams)
+		log.Infof("Bitcoind ZMQ Config: %+v", bitcoindCfg.ZMQConfig)
+
 		// Establish the connection to bitcoind and create the clients
 		// required for our relevant subsystems.
 		bitcoindConn, err := chain.NewBitcoindConn(bitcoindCfg)
@@ -358,10 +369,14 @@ func NewPartialChainControl(cfg *Config) (*PartialChainControl, func(), error) {
 			return nil, nil, err
 		}
 
+		log.Infof("[Creating Partial Chain Control]: starting bitcoind connection")
+
 		if err := bitcoindConn.Start(); err != nil {
 			return nil, nil, fmt.Errorf("unable to connect to "+
 				"bitcoind: %v", err)
 		}
+
+		log.Infof("[Creating Partial Chain Control]: started bitcoind connection")
 
 		chainNotifier := bitcoindnotify.New(
 			bitcoindConn, cfg.ActiveNetParams.Params, hintCache,
