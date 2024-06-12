@@ -53,7 +53,13 @@ func (u *nodeEdgeUnifier) addPolicy(fromNode route.Vertex,
 	edge *models.CachedEdgePolicy, inboundFee models.InboundFee,
 	capacity btcutil.Amount, hopPayloadSizeFn PayloadSizeFunc) {
 
+	// NOTE(calvin): We want the payment service to see the channels of
+	// our backend lnd instances as its own! If we have fake/virtual
+	// channels with each instance, then I'm not sure this will work as is.
 	localChan := fromNode == u.sourceNode
+
+	// Debug: Print the graph policies before adding them
+	log.Infof("Adding policy for node (%v): %+v, local=%v", fromNode, edge, localChan)
 
 	// Skip channels if there is an outgoing channel restriction.
 	if localChan && u.outChanRestr != nil {
@@ -70,6 +76,8 @@ func (u *nodeEdgeUnifier) addPolicy(fromNode route.Vertex,
 		}
 		u.edgeUnifiers[fromNode] = unifier
 	}
+
+	log.Infof("Adding policy for node (%v): %+v, local=%v", fromNode, edge, localChan)
 
 	// In case no payload size function was provided a graceful shutdown
 	// is requested, because this function is not used as intended.
@@ -102,8 +110,11 @@ func (u *nodeEdgeUnifier) addGraphPolicies(g routingGraph) error {
 		// Note that we are searching backwards so this node would have
 		// come prior to the pivot node in the route.
 		if channel.InPolicy == nil {
+			log.Infof("Skipping policy add for channel: %v", channel.OtherNode)
 			return nil
 		}
+
+		log.Infof("Policy add for %v channel with: %+v", u.toNode, channel)
 
 		// Add this policy to the corresponding edgeUnifier. We default
 		// to the clear hop payload size function because
@@ -120,6 +131,8 @@ func (u *nodeEdgeUnifier) addGraphPolicies(g routingGraph) error {
 
 		return nil
 	}
+
+	log.Infof("Policy add for channel: %+v", u.toNode)
 
 	// Iterate over all channels of the to node.
 	return g.forEachNodeChannel(u.toNode, cb)
@@ -185,11 +198,13 @@ func (u *edgeUnifier) getEdge(netAmtReceived lnwire.MilliSatoshi,
 	nextOutFee lnwire.MilliSatoshi) *unifiedEdge {
 
 	if u.localChan {
+		log.Infof("Getting edge for local channel")
 		return u.getEdgeLocal(
 			netAmtReceived, bandwidthHints, nextOutFee,
 		)
 	}
 
+	log.Infof("Getting edge for non-local channel")
 	return u.getEdgeNetwork(netAmtReceived, nextOutFee)
 }
 
