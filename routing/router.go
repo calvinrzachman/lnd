@@ -1303,6 +1303,8 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 
 	// We'll attempt to obtain a set of bandwidth hints that helps us select
 	// the best outgoing channel to use in case no outgoing channel is set.
+	//
+	// NOTE(calvin): Does this bandwidth manager operate on the cached graph?
 	bandwidthHints, err := newBandwidthManager(
 		r.cfg.RoutingGraph, r.cfg.SelfNode, r.cfg.GetLink,
 	)
@@ -1377,10 +1379,27 @@ func getRouteUnifiers(source route.Vertex, hops []route.Vertex,
 			source, toNode, false, outgoingChans,
 		)
 
+		// Debug: Print the graph policies before adding them
+		log.Infof("Graph before adding policies: %+v", graph)
+		log.Infof("Source Node: %s", source)
+		graph.ForEachNodeChannel(source, func(channel *channeldb.DirectedChannel) error {
+			log.Infof("Channel: %+v", channel)
+			return nil
+		})
+
 		err := u.addGraphPolicies(graph)
 		if err != nil {
 			return nil, 0, err
 		}
+
+		// Debug: Print the graph policies before adding them
+		log.Infof("Graph AFTER policies: %+v", graph)
+		graph.ForEachNodeChannel(source, func(channel *channeldb.DirectedChannel) error {
+			log.Infof("Channel: %+v", channel)
+			return nil
+		})
+
+		log.Infof("Checking for policy from node (%v) to node (%v): local=%v", fromNode, toNode, localChan)
 
 		// Exit if there are no channels.
 		edgeUnifier, ok := u.edgeUnifiers[fromNode]
