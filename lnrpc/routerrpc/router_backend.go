@@ -779,6 +779,8 @@ func (r *RouterBackend) UnmarshallRoute(rpcroute *lnrpc.Route) (
 func (r *RouterBackend) extractIntentFromSendRequest(
 	rpcPayReq *SendPaymentRequest) (*routing.LightningPayment, error) {
 
+	log.Infof("Extract Intent From Payment Request: %+v", rpcPayReq)
+
 	payIntent := &routing.LightningPayment{}
 
 	// Pass along time preference.
@@ -820,6 +822,7 @@ func (r *RouterBackend) extractIntentFromSendRequest(
 	if err != nil {
 		return nil, err
 	}
+	log.Infof("Using cltv limit: %d", cltvLimit)
 	payIntent.CltvLimit = cltvLimit
 
 	// Attempt to parse the max parts value set by the user, if this value
