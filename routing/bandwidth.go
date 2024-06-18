@@ -49,11 +49,17 @@ func newBandwidthManager(graph routingGraph, sourceNode route.Vertex,
 
 	// First, we'll collect the set of outbound edges from the target
 	// source node and add them to our bandwidth manager's map of channels.
+	//
+	// NOTE(calvin): Rather than make this a persistent object which dynamically
+	// handles changing channel links, it's life-cycle is more narrowly scoped.
+	// We create a bandwidth manager for every payment and use the channels
+	// available at the instance the manager's creation.
 	err := graph.forEachNodeChannel(sourceNode,
 		func(channel *channeldb.DirectedChannel) error {
 			shortID := lnwire.NewShortChanIDFromInt(
 				channel.ChannelID,
 			)
+			log.Infof("Adding channel edge to list of local channels: %+v", channel)
 			manager.localChans[shortID] = struct{}{}
 
 			return nil
@@ -62,6 +68,11 @@ func newBandwidthManager(graph routingGraph, sourceNode route.Vertex,
 	if err != nil {
 		return nil, err
 	}
+
+	// // Add remote channels as if they were local.
+	// for _, chanID := range remoteChannels {
+	// 	manager.localChans[chanID] = struct{}{}
+	// }
 
 	return manager, nil
 }
@@ -110,6 +121,7 @@ func (b *bandwidthManager) availableChanBandwidth(channelID uint64,
 
 	shortID := lnwire.NewShortChanIDFromInt(channelID)
 	_, ok := b.localChans[shortID]
+	// NOTE(calvin): If the channel is not considered local
 	if !ok {
 		return 0, false
 	}
