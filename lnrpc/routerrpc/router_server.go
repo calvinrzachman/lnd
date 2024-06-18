@@ -343,7 +343,7 @@ func (r *ServerShell) CreateSubServer(configRegistry lnrpc.SubServerConfigDispat
 func (s *Server) SendPaymentV2(req *SendPaymentRequest,
 	stream Router_SendPaymentV2Server) error {
 
-	payment, err := s.cfg.RouterBackend.extractIntentFromSendRequest(req)
+	payment, err := s.cfg.RouterBackend.ExtractIntentFromSendRequest(req)
 	if err != nil {
 		return err
 	}
@@ -372,7 +372,7 @@ func (s *Server) SendPaymentV2(req *SendPaymentRequest,
 
 	// Subscribe to the payment before sending it to make sure we won't
 	// miss events.
-	sub, err := s.subscribePayment(payHash)
+	sub, err := s.SubscribePayment(payHash)
 	if err != nil {
 		return err
 	}
@@ -1637,7 +1637,7 @@ func (s *Server) TrackPaymentV2(request *TrackPaymentRequest,
 	log.Debugf("TrackPayment called for payment %v", payHash)
 
 	// Make the subscription.
-	sub, err := s.subscribePayment(payHash)
+	sub, err := s.SubscribePayment(payHash)
 	if err != nil {
 		return err
 	}
@@ -1647,7 +1647,7 @@ func (s *Server) TrackPaymentV2(request *TrackPaymentRequest,
 
 // subscribePayment subscribes to the payment updates for the given payment
 // hash.
-func (s *Server) subscribePayment(identifier lntypes.Hash) (
+func (s *Server) SubscribePayment(identifier lntypes.Hash) (
 	routing.ControlTowerSubscriber, error) {
 
 	// Make the subscription.

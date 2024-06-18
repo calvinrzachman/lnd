@@ -773,10 +773,10 @@ func (r *RouterBackend) UnmarshallRoute(rpcroute *lnrpc.Route) (
 	return route, nil
 }
 
-// extractIntentFromSendRequest attempts to parse the SendRequest details
+// ExtractIntentFromSendRequest attempts to parse the SendRequest details
 // required to dispatch a client from the information presented by an RPC
 // client.
-func (r *RouterBackend) extractIntentFromSendRequest(
+func (r *RouterBackend) ExtractIntentFromSendRequest(
 	rpcPayReq *SendPaymentRequest) (*routing.LightningPayment, error) {
 
 	payIntent := &routing.LightningPayment{}
