@@ -110,11 +110,14 @@ func (u *nodeEdgeUnifier) addGraphPolicies(g Graph) error {
 		// Note that we are searching backwards so this node would have
 		// come prior to the pivot node in the route.
 		if channel.InPolicy == nil {
-			log.Infof("Skipping policy add for channel: %v", channel.OtherNode)
+			log.Infof("Skipping policy add for channel between: other_node=%v, in_policy_nodekey=%v",
+				channel.OtherNode, channel.InPolicy.ToNodePubKey)
+
 			return nil
 		}
 
-		log.Infof("Policy add for %v channel with: %+v", u.toNode, channel)
+		log.Infof("Policy add for channel between: other_node=%v, in_policy_nodekey=%v",
+			channel.OtherNode, channel.InPolicy.ToNodePubKey)
 
 		// Add this policy to the corresponding edgeUnifier. We default
 		// to the clear hop payload size function because

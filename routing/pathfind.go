@@ -372,6 +372,11 @@ type graphParams struct {
 	// or blinded edges when a payment to a blinded path is made.
 	additionalEdges map[route.Vertex][]AdditionalEdge
 
+	// permanentAdditionalEdges is a set of edges that should be
+	// considered during path finding permanently, not specific to any
+	// particular payment session.
+	permanentAdditionalEdges map[route.Vertex][]AdditionalEdge
+
 	// bandwidthHints is an interface that provides bandwidth hints that
 	// can provide a better estimate of the current channel bandwidth than
 	// what is found in the graph. It will override the capacities and
@@ -595,9 +600,20 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 		}
 	}
 
+	log.Debugf("Outgoing channels: %+v", outgoingChanMap)
+
 	// If we are routing from ourselves, check that we have enough local
 	// balance available.
+	//
+	// NOTE(calvin): We'll be routing from our fake lightning proxy node ID.
+
+	// NOTE(calvin): This is a pre-pathfind check so that we don't waste
+	// any time searching for routes if we don't have enough outbound to
+	// complete the payment.
 	if source == self {
+		// NOTE(calvin): We should always have enough balance on the
+		// virtual channels. It is actually the balance of the remote
+		// channels of our lnd backends that we are concerned with!
 		max, total, err := getOutgoingBalance(
 			self, outgoingChanMap, g.bandwidthHints, g.graph,
 		)
@@ -607,6 +623,10 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 
 		// If the total outgoing balance isn't sufficient, it will be
 		// impossible to complete the payment.
+		//
+		// NOTE(calvin): We hit this when testing the SendPaymentV2 flow.
+		// I think the answer was to wait until the proxy had a chance
+		// to add virtual edges.
 		if total < amt {
 			log.Warnf("Not enough outbound balance to send "+
 				"htlc of amount: %v, only have local "+
@@ -631,6 +651,9 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 	distance := make(map[route.Vertex]*nodeWithDist, estimatedNodeCount)
 
 	additionalEdgesWithSrc := make(map[route.Vertex][]*edgePolicyWithSource)
+	// TODO(calvin): Evaluate whether these additionalEdges are sufficient
+	// for our use in tricking the ChannelRouter into thinking that the
+	// channels of it's remote backends are its own.
 	for vertex, additionalEdges := range g.additionalEdges {
 		// Edges connected to self are always included in the graph,
 		// therefore can be skipped. This prevents us from trying
@@ -641,6 +664,13 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 
 		// Build reverse lookup to find incoming edges. Needed because
 		// search is taken place from target to source.
+		//
+		// NOTE(calvin): We flip these edges such that when pathfinding
+		// arrives at one of the lnd instances in our backend set, it
+		// will have an additional edge that is incoming to the instance
+		// and whose source node (node on other side of edge) is our
+		// lightning proxy's fake node ID. The only trouble we have is
+		// the explicit prevention of 'vertex' == self above.
 		for _, additionalEdge := range additionalEdges {
 			outgoingEdgePolicy := additionalEdge.EdgePolicy()
 			toVertex := outgoingEdgePolicy.ToNodePubKey()
@@ -780,6 +810,7 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 
 		// Check that we are within our CLTV limit.
 		if uint64(incomingCltv) > absoluteCltvLimit {
+			log.Debug("bad CLTV limit")
 			return
 		}
 
@@ -794,8 +825,10 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 
 		// Check if accumulated fees would exceed fee limit when this
 		// node would be added to the path.
+		log.Debug("[findPath]: fee limit: %d (msat)", r.FeeLimit)
 		totalFee := int64(netAmountToReceive) - int64(amt)
 		if totalFee > 0 && lnwire.MilliSatoshi(totalFee) > r.FeeLimit {
+			log.Debugf("bad fee limit. total_fee=%d", totalFee)
 			return
 		}
 
@@ -808,6 +841,7 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 		// abandon this direction. Adding further nodes can only lower
 		// the probability more.
 		if probability < cfg.MinProbability {
+			log.Debug("below min probability of success")
 			return
 		}
 
@@ -895,6 +929,7 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 		routingInfoSize := toNodeDist.routingInfoSize + payloadSize
 		// Skip paths that would exceed the maximum routing info size.
 		if routingInfoSize > sphinx.MaxPayloadSize {
+			log.Debug("bad payload size")
 			return
 		}
 
@@ -965,12 +1000,26 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 		return fromFeatures, nil
 	}
 
+	// Debug: Print the graph policies before adding them
+	log.Infof("Source Node: %s", source)
+	g.graph.ForEachNodeChannel(source, func(channel *channeldb.DirectedChannel) error {
+		log.Infof("Channel with proxy: %+v", channel)
+		return nil
+	})
+
+	g.graph.ForEachNodeChannel(target, func(channel *channeldb.DirectedChannel) error {
+		log.Infof("Channel with target: %+v", channel)
+		return nil
+	})
+
 	routeToSelf := source == target
 	for {
 		nodesVisited++
 
 		pivot := partialPath.node
 		isExitHop := partialPath.nextHop == nil
+
+		log.Debugf("Visited node=%v", pivot)
 
 		// Create unified policies for all incoming connections. Don't
 		// use inbound fees for the exit hop.
@@ -984,11 +1033,16 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 		}
 
 		// We add hop hints that were supplied externally.
+		//
+		// NOTE(calvin): It seems that maybe these additional edges could
+		// lead from our backend lnd instances to our fake node ID key.
 		for _, reverseEdge := range additionalEdgesWithSrc[pivot] {
 			// Assume zero inbound fees for route hints. If inbound
 			// fees would apply, they couldn't be communicated in
 			// bolt11 invoices currently.
 			inboundFee := models.InboundFee{}
+
+			log.Debugf("Considering edge with src node=%v", reverseEdge.sourceNode)
 
 			// Hop hints don't contain a capacity. We set one here,
 			// since a capacity is needed for probability
@@ -1012,6 +1066,8 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 		// Expand all connections using the optimal policy for each
 		// connection.
 		for fromNode, edgeUnifier := range u.edgeUnifiers {
+			log.Debugf("Considering edge with from node=%v, local=%v", fromNode, edgeUnifier.localChan)
+
 			// The target node is not recorded in the distance map.
 			// Therefore we need to have this check to prevent
 			// creating a cycle. Only when we intend to route to
@@ -1032,6 +1088,8 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 				netAmountReceived, g.bandwidthHints,
 				partialPath.outboundFee,
 			)
+
+			log.Debugf("Considering edge: %+v", edge)
 
 			if edge == nil {
 				continue
@@ -1054,6 +1112,7 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 		}
 
 		if nodeHeap.Len() == 0 {
+			log.Debug("Empty node heap")
 			break
 		}
 
