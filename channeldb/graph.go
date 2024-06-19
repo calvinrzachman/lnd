@@ -467,6 +467,7 @@ func (c *ChannelGraph) ForEachChannel(cb func(*models.ChannelEdgeInfo,
 func (c *ChannelGraph) ForEachNodeDirectedChannel(tx kvdb.RTx,
 	node route.Vertex, cb func(channel *DirectedChannel) error) error {
 
+	// TODO(calvin): Does our test use the graphCache?
 	if c.graphCache != nil {
 		return c.graphCache.ForEachChannel(node, cb)
 	}
@@ -480,10 +481,13 @@ func (c *ChannelGraph) ForEachNodeDirectedChannel(tx kvdb.RTx,
 		return err
 	}
 
+	// NOTE(calvin): We wrap the user provided callback with yet another
+	// callback.
 	dbCallback := func(tx kvdb.RTx, e *models.ChannelEdgeInfo, p1,
 		p2 *models.ChannelEdgePolicy) error {
 
 		var cachedInPolicy *models.CachedEdgePolicy
+		// NOTE(calvin): This is NOT set!
 		if p2 != nil {
 			cachedInPolicy = models.NewCachedPolicy(p2)
 			cachedInPolicy.ToNodePubKey = toNodeCallback
@@ -491,6 +495,7 @@ func (c *ChannelGraph) ForEachNodeDirectedChannel(tx kvdb.RTx,
 		}
 
 		var inboundFee lnwire.Fee
+		// NOTE(calvin): This is set.
 		if p1 != nil {
 			// Extract inbound fee. If there is a decoding error,
 			// skip this edge.
@@ -501,10 +506,13 @@ func (c *ChannelGraph) ForEachNodeDirectedChannel(tx kvdb.RTx,
 		}
 
 		directedChannel := &DirectedChannel{
-			ChannelID:    e.ChannelID,
-			IsNode1:      node == e.NodeKey1Bytes,
-			OtherNode:    e.NodeKey2Bytes,
-			Capacity:     e.Capacity,
+			ChannelID: e.ChannelID,
+			IsNode1:   node == e.NodeKey1Bytes,
+			OtherNode: e.NodeKey2Bytes,
+			Capacity:  e.Capacity,
+			// 2024-06-19 13:08:53.492 [INF] CRTR: Channel with proxy: &{ChannelID:1718816929774744000 IsNode1:true OtherNode:02fee216a069ccfff3742d6b2343633918791986814855e9c0e25f8e1f281cb584 Capacity:0.01000000 BTC OutPolicySet:true InPolicy:<nil> InboundFee:{BaseFee:0 FeeRate:0}}
+			// 2024-06-19 13:08:53.492 [INF] CRTR: Channel with target: &{ChannelID:491481697681408 IsNode1:true OtherNode:02fee216a069ccfff3742d6b2343633918791986814855e9c0e25f8e1f281cb584 Capacity:0.03400000 BTC OutPolicySet:true InPolicy:<nil> InboundFee:{BaseFee:0 FeeRate:0}}
+			// 2024-06-19 13:08:53.492 [INF] CRTR: Channel with target: &{ChannelID:484884627914752 IsNode1:true OtherNode:02fee216a069ccfff3742d6b2343633918791986814855e9c0e25f8e1f281cb584 Capacity:0.03400000 BTC OutPolicySet:true InPolicy:<nil> InboundFee:{BaseFee:0 FeeRate:0}}
 			OutPolicySet: p1 != nil,
 			InPolicy:     cachedInPolicy,
 			InboundFee:   inboundFee,
@@ -3160,6 +3168,7 @@ func nodeTraversal(tx kvdb.RTx, nodePub []byte, db kvdb.Backend,
 				return err
 			}
 
+			// NOTE(calvin): This is not set in our itest.
 			incomingPolicy, err := fetchChanEdgePolicy(
 				edges, chanID, otherNode[:],
 			)
@@ -4386,6 +4395,7 @@ func fetchChanEdgePolicy(edges kvdb.RBucket, chanID []byte,
 
 	// No need to deserialize unknown policy.
 	if bytes.Equal(edgeBytes[:], unknownPolicy) {
+		log.Debug("Encountered unknown policy")
 		return nil, nil
 	}
 
@@ -4395,7 +4405,10 @@ func fetchChanEdgePolicy(edges kvdb.RBucket, chanID []byte,
 	switch {
 	// If the db policy was missing an expected optional field, we return
 	// nil as if the policy was unknown.
+	//
+	// TODO(calvin): Explore this and see if..
 	case err == ErrEdgePolicyOptionalFieldNotFound:
+		log.Debug("Encountered ErrEdgePolicyOptionalFieldNotFound")
 		return nil, nil
 
 	case err != nil:
