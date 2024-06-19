@@ -1619,6 +1619,7 @@ func (r *ChannelRouter) processUpdate(msg interface{},
 		// ChannelAnnouncement from the gossiper.
 		scid := lnwire.NewShortChanIDFromInt(msg.ChannelID)
 		if r.cfg.AssumeChannelValid || r.cfg.IsAlias(scid) {
+			// NOTE(calvin): We hit this at least once.
 			if err := r.cfg.Graph.AddChannelEdge(msg, op...); err != nil {
 				return fmt.Errorf("unable to add edge: %w", err)
 			}
@@ -1759,6 +1760,8 @@ func (r *ChannelRouter) processUpdate(msg interface{},
 		log.Debugf("Received ChannelEdgePolicy for channel %v",
 			msg.ChannelID)
 
+		log.Debugf("ChannelEdgePolicy: %+v", msg)
+
 		// We make sure to hold the mutex for this channel ID,
 		// such that no other goroutine is concurrently doing
 		// database accesses for the same channel ID.
@@ -1772,6 +1775,9 @@ func (r *ChannelRouter) processUpdate(msg interface{},
 				"existence: %v", err)
 
 		}
+
+		log.Debugf("Edge One Timestamp: %+v", edge1Timestamp)
+		log.Debugf("Edge Two Timestamp: %+v", edge2Timestamp)
 
 		// If the channel is marked as a zombie in our database, and
 		// we consider this a stale update, then we should not apply the
@@ -1804,6 +1810,8 @@ func (r *ChannelRouter) processUpdate(msg interface{},
 		// "first" node in the channel.
 		case msg.ChannelFlags&lnwire.ChanUpdateDirection == 0:
 
+			log.Debugf("timestamp=%+v, last_update=%+v", edge1Timestamp, msg.LastUpdate)
+
 			// Ignore outdated message.
 			if !edge1Timestamp.Before(msg.LastUpdate) {
 				return newErrf(ErrOutdated, "Ignoring "+
@@ -1815,6 +1823,8 @@ func (r *ChannelRouter) processUpdate(msg interface{},
 		// Similarly, a flag set of 1 indicates this is an announcement
 		// for the "second" node in the channel.
 		case msg.ChannelFlags&lnwire.ChanUpdateDirection == 1:
+
+			log.Debugf("timestamp=%+v, last_update=%+v", edge2Timestamp, msg.LastUpdate)
 
 			// Ignore outdated message.
 			if !edge2Timestamp.Before(msg.LastUpdate) {

@@ -298,6 +298,9 @@ func (p *paymentSession) RequestRoute(maxAmt, feeLimit lnwire.MilliSatoshi,
 
 		sourceVertex := routingGraph.sourceNode()
 
+		p.log.Debugf("pathfinding graph source node: %v", routingGraph.sourceNode())
+		p.log.Debugf("pathfinding from src=%v to dest=%v", sourceVertex, p.payment.Target)
+
 		// Find a route for the current amount.
 		path, _, err := p.pathFinder(
 			&graphParams{

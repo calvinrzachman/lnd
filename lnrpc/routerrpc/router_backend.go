@@ -840,6 +840,7 @@ func (r *RouterBackend) extractIntentFromSendRequest(
 	}
 
 	// Take fee limit from request.
+	log.Debug("[extractIntent]: fee limit: %d (sat), %d (msat)", rpcPayReq.FeeLimitSat, rpcPayReq.FeeLimitMsat)
 	payIntent.FeeLimit, err = lnrpc.UnmarshallAmt(
 		rpcPayReq.FeeLimitSat, rpcPayReq.FeeLimitMsat,
 	)
@@ -1133,6 +1134,8 @@ func (r *RouterBackend) extractIntentFromSendRequest(
 	if !rpcPayReq.AllowSelfPayment && payIntent.Target == r.SelfNode {
 		return nil, errors.New("self-payments not allowed")
 	}
+
+	log.Debugf("Fee limit from payment request: %d (msat)", payIntent.FeeLimit)
 
 	return payIntent, nil
 }

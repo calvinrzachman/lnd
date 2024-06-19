@@ -214,6 +214,7 @@ lifecycle:
 		ps := payment.GetState()
 		remainingFees := p.calcFeeBudget(ps.FeesPaid)
 
+		// NOTE(calvin): We make it here in our SendPaymentV2 flow.
 		log.Debugf("Payment %v: status=%v, active_shards=%v, "+
 			"rem_value=%v, fee_limit=%v", p.identifier,
 			payment.GetStatus(), ps.NumAttemptsInFlight,
@@ -351,7 +352,10 @@ func (p *paymentLifecycle) checkTimeout() error {
 func (p *paymentLifecycle) requestRoute(
 	ps *channeldb.MPPaymentState) (*route.Route, error) {
 
+	// TODO(calvin): Add debug log here if necessary.
 	remainingFees := p.calcFeeBudget(ps.FeesPaid)
+
+	log.Debugf("Available fee budget to complete payment: %d (msat)", remainingFees)
 
 	// Query our payment session to construct a route.
 	rt, err := p.paySession.RequestRoute(
@@ -365,6 +369,8 @@ func (p *paymentLifecycle) requestRoute(
 	}
 
 	// Otherwise we need to handle the error.
+	// NOTE(calvin): Our itest hits this code path as it's unable to find
+	// a route.
 	log.Warnf("Failed to find route for payment %v: %v", p.identifier, err)
 
 	// If the error belongs to `noRouteError` set, it means a non-critical
