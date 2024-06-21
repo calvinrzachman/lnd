@@ -5,125 +5,52 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/lightningnetwork/lnd/channeldb"
-	"github.com/lightningnetwork/lnd/kvdb"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/routing/route"
 )
 
-// routingGraph is an abstract interface that provides information about nodes
+// GraphSessionFactory can be used to produce a new GraphSession instance which
+// can then be used for a path-finding session. In some instances, a "session"
+type GraphSessionFactory interface {
+	// NewSession will produce a new GraphSession to use for a path-finding
+	// session.
+	NewSession() (GraphSession, error)
+}
+
+// GraphSession describes a new read session with a Graph backend. It must be
+// closed using its Close method after path-finding is complete.
+type GraphSession interface {
+	// Graph returns the Graph that this session gives access to.
+	Graph() Graph
+
+	// Close closes the GraphSession and must be called once path-finding
+	// using this GraphSession is complete.
+	Close() error
+}
+
+// Graph is an abstract interface that provides information about nodes
 // and edges to pathfinding.
-type routingGraph interface {
-	// forEachNodeChannel calls the callback for every channel of the given
-	// node.
-	forEachNodeChannel(nodePub route.Vertex,
-		cb func(channel *channeldb.DirectedChannel) error) error
-
-	// fetchNodeFeatures returns the features of the given node.
-	fetchNodeFeatures(nodePub route.Vertex) (*lnwire.FeatureVector, error)
-}
-
-// ReadOnlyGraph is a Graph extended with a call to create a new read-only
-// transaction that can then be used to make further queries to the Graph.
-type ReadOnlyGraph interface {
-	// NewPathFindTx returns a new read transaction that can be used for a
-	// single path finding session. Will return nil if the graph cache is
-	// enabled.
-	NewPathFindTx() (kvdb.RTx, error)
-
-	Graph
-}
-
-// Graph describes the API necessary for a graph source to have in order to be
-// used by the Router for pathfinding.
 type Graph interface {
-	// ForEachNodeDirectedChannel iterates through all channels of a given
-	// node, executing the passed callback on the directed edge representing
-	// the channel and its incoming policy. If the callback returns an
-	// error, then the iteration is halted with the error propagated back
-	// up to the caller.
-	//
-	// Unknown policies are passed into the callback as nil values.
-	ForEachNodeDirectedChannel(tx kvdb.RTx, node route.Vertex,
+	// ForEachNodeChannel calls the callback for every channel of the given
+	// node.
+	ForEachNodeChannel(nodePub route.Vertex,
 		cb func(channel *channeldb.DirectedChannel) error) error
 
-	// FetchNodeFeatures returns the features of a given node. If no
-	// features are known for the node, an empty feature vector is returned.
-	FetchNodeFeatures(node route.Vertex) (*lnwire.FeatureVector, error)
-}
-
-// CachedGraph is a routingGraph implementation that retrieves from the
-// database.
-type CachedGraph struct {
-	graph  Graph
-	tx     kvdb.RTx
-	source route.Vertex
-}
-
-// A compile time assertion to make sure CachedGraph implements the routingGraph
-// interface.
-var _ routingGraph = (*CachedGraph)(nil)
-
-// NewCachedGraph instantiates a new db-connected routing graph. It implicitly
-// instantiates a new read transaction if withReadLock is true and if the
-// backing Graph supports it.
-func NewCachedGraph(sourceNodePubKey route.Vertex,
-	graph ReadOnlyGraph, withReadLock bool) (*CachedGraph, error) {
-
-	cachedGraph := &CachedGraph{
-		graph:  graph,
-		source: sourceNodePubKey,
-	}
-
-	if withReadLock {
-		var err error
-		cachedGraph.tx, err = graph.NewPathFindTx()
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return cachedGraph, nil
-}
-
-// Close attempts to close the underlying db transaction. This is a no-op in
-// case the underlying graph uses an in-memory cache.
-func (g *CachedGraph) Close() error {
-	if g.tx == nil {
-		return nil
-	}
-
-	return g.tx.Rollback()
-}
-
-// forEachNodeChannel calls the callback for every channel of the given node.
-//
-// NOTE: Part of the routingGraph interface.
-func (g *CachedGraph) forEachNodeChannel(nodePub route.Vertex,
-	cb func(channel *channeldb.DirectedChannel) error) error {
-
-	return g.graph.ForEachNodeDirectedChannel(g.tx, nodePub, cb)
-}
-
-// fetchNodeFeatures returns the features of the given node. If the node is
-// unknown, assume no additional features are supported.
-//
-// NOTE: Part of the routingGraph interface.
-func (g *CachedGraph) fetchNodeFeatures(nodePub route.Vertex) (
-	*lnwire.FeatureVector, error) {
-
-	return g.graph.FetchNodeFeatures(nodePub)
+	// FetchNodeFeatures returns the features of the given node.
+	FetchNodeFeatures(nodePub route.Vertex) (*lnwire.FeatureVector, error)
 }
 
 // FetchAmountPairCapacity determines the maximal public capacity between two
 // nodes depending on the amount we try to send.
-func (g *CachedGraph) FetchAmountPairCapacity(nodeFrom, nodeTo route.Vertex,
-	amount lnwire.MilliSatoshi) (btcutil.Amount, error) {
+func FetchAmountPairCapacity(g Graph, source, nodeFrom,
+	nodeTo route.Vertex, amount lnwire.MilliSatoshi) (btcutil.Amount,
+	error) {
 
 	// Create unified edges for all incoming connections.
 	//
 	// Note: Inbound fees are not used here because this method is only used
 	// by a deprecated router rpc.
-	u := newNodeEdgeUnifier(g.source, nodeTo, false, nil)
+	u := newNodeEdgeUnifier(source, nodeTo, false, nil)
 
 	err := u.addGraphPolicies(g)
 	if err != nil {

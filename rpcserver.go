@@ -41,6 +41,7 @@ import (
 	"github.com/lightningnetwork/lnd/chanbackup"
 	"github.com/lightningnetwork/lnd/chanfitness"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/channeldb/graphsession"
 	"github.com/lightningnetwork/lnd/channeldb/models"
 	"github.com/lightningnetwork/lnd/channelnotifier"
 	"github.com/lightningnetwork/lnd/contractcourt"
@@ -692,15 +693,11 @@ func (r *rpcServer) addDeps(s *server, macService *macaroons.Service,
 		FetchAmountPairCapacity: func(nodeFrom, nodeTo route.Vertex,
 			amount lnwire.MilliSatoshi) (btcutil.Amount, error) {
 
-			routingGraph, err := routing.NewCachedGraph(
-				selfNode.PubKeyBytes, graph, false,
-			)
-			if err != nil {
-				return 0, err
-			}
+			routingGraph := graphsession.NewRoutingGraph(graph)
 
-			return routingGraph.FetchAmountPairCapacity(
-				nodeFrom, nodeTo, amount,
+			return routing.FetchAmountPairCapacity(
+				routingGraph, selfNode.PubKeyBytes, nodeFrom,
+				nodeTo, amount,
 			)
 		},
 		FetchChannelEndpoints: func(chanID uint64) (route.Vertex,

@@ -16,11 +16,7 @@ var _ PaymentSessionSource = (*SessionSource)(nil)
 // SessionSource defines a source for the router to retrieve new payment
 // sessions.
 type SessionSource struct {
-	// RoutingGraph provides a Graph that can be used for path finding for a
-	// specific payment. If the NewPathFindingTx method is called to obtain
-	// a read-only lock on the graph, then the clean-up all-back must be
-	// called once path-finding is complete.
-	RoutingGraph ReadOnlyGraph
+	GraphSessionFactory GraphSessionFactory
 
 	// SourceNode is the graph's source node.
 	SourceNode *channeldb.LightningNode
@@ -46,23 +42,6 @@ type SessionSource struct {
 	PathFindingConfig PathFindingConfig
 }
 
-// getRoutingGraph returns a routing graph and a clean-up function for
-// pathfinding.
-func (m *SessionSource) getRoutingGraph() (routingGraph, func(), error) {
-	routingTx, err := NewCachedGraph(
-		m.SourceNode.PubKeyBytes, m.RoutingGraph, true,
-	)
-	if err != nil {
-		return nil, nil, err
-	}
-	return routingTx, func() {
-		err := routingTx.Close()
-		if err != nil {
-			log.Errorf("Error closing db tx: %v", err)
-		}
-	}, nil
-}
-
 // NewPaymentSession creates a new payment session backed by the latest prune
 // view from Mission Control. An optional set of routing hints can be provided
 // in order to populate additional edges to explore when finding a path to the
@@ -70,7 +49,7 @@ func (m *SessionSource) getRoutingGraph() (routingGraph, func(), error) {
 func (m *SessionSource) NewPaymentSession(p *LightningPayment) (
 	PaymentSession, error) {
 
-	getBandwidthHints := func(graph routingGraph) (bandwidthHints, error) {
+	getBandwidthHints := func(graph Graph) (bandwidthHints, error) {
 		return newBandwidthManager(
 			graph, m.SourceNode.PubKeyBytes, m.GetLink,
 		)
@@ -78,7 +57,7 @@ func (m *SessionSource) NewPaymentSession(p *LightningPayment) (
 
 	session, err := newPaymentSession(
 		p, m.SourceNode.PubKeyBytes, getBandwidthHints,
-		m.getRoutingGraph, m.MissionControl, m.PathFindingConfig,
+		m.GraphSessionFactory, m.MissionControl, m.PathFindingConfig,
 	)
 	if err != nil {
 		return nil, err

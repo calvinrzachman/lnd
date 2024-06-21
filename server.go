@@ -32,6 +32,7 @@ import (
 	"github.com/lightningnetwork/lnd/chanbackup"
 	"github.com/lightningnetwork/lnd/chanfitness"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/channeldb/graphsession"
 	"github.com/lightningnetwork/lnd/channeldb/models"
 	"github.com/lightningnetwork/lnd/channelnotifier"
 	"github.com/lightningnetwork/lnd/clock"
@@ -958,12 +959,15 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 	if err != nil {
 		return nil, fmt.Errorf("error getting source node: %w", err)
 	}
+
+	graphFactory := graphsession.NewFactory(chanGraph)
+
 	paymentSessionSource := &routing.SessionSource{
-		RoutingGraph:      chanGraph,
-		SourceNode:        sourceNode,
-		MissionControl:    s.missionControl,
-		GetLink:           s.htlcSwitch.GetLinkByShortID,
-		PathFindingConfig: pathFindingConfig,
+		GraphSessionFactory: graphFactory,
+		SourceNode:          sourceNode,
+		MissionControl:      s.missionControl,
+		GetLink:             s.htlcSwitch.GetLinkByShortID,
+		PathFindingConfig:   pathFindingConfig,
 	}
 
 	paymentControl := channeldb.NewPaymentControl(dbs.ChanStateDB)
@@ -992,7 +996,7 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 
 	s.chanRouter, err = routing.New(routing.Config{
 		SelfNode:           selfNode.PubKeyBytes,
-		RoutingGraph:       chanGraph,
+		RoutingGraph:       graphsession.NewRoutingGraph(chanGraph),
 		Chain:              cc.ChainIO,
 		Payer:              s.htlcSwitch,
 		Control:            s.controlTower,

@@ -131,8 +131,11 @@ func createTestCtxFromGraphInstanceAssumeValid(t *testing.T,
 
 	sourceNode, err := graphInstance.graph.SourceNode()
 	require.NoError(t, err)
+
 	sessionSource := &SessionSource{
-		RoutingGraph:      graphInstance.graph,
+		GraphSessionFactory: newMockGraphSessionFactoryFromChanDB(
+			graphInstance.graph,
+		),
 		SourceNode:        sourceNode,
 		GetLink:           graphInstance.getLink,
 		PathFindingConfig: pathFindingConfig,
@@ -142,8 +145,10 @@ func createTestCtxFromGraphInstanceAssumeValid(t *testing.T,
 	graphBuilder := newMockGraphBuilder(graphInstance.graph)
 
 	router, err := New(Config{
-		SelfNode:       sourceNode.PubKeyBytes,
-		RoutingGraph:   graphInstance.graph,
+		SelfNode: sourceNode.PubKeyBytes,
+		RoutingGraph: newMockGraphSessionChanDB(
+			graphInstance.graph, sourceNode.PubKeyBytes,
+		),
 		Chain:          chain,
 		Payer:          &mockPaymentAttemptDispatcherOld{},
 		Control:        makeMockControlTower(),
@@ -2491,7 +2496,7 @@ type mockGraphBuilder struct {
 	updateEdge   func(update *models.ChannelEdgePolicy) error
 }
 
-func newMockGraphBuilder(graph graph.DB) *mockGraphBuilder { //nolint:lll
+func newMockGraphBuilder(graph graph.DB) *mockGraphBuilder {
 	return &mockGraphBuilder{
 		updateEdge: func(update *models.ChannelEdgePolicy) error {
 			return graph.UpdateEdgePolicy(update)

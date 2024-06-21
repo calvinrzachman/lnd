@@ -168,7 +168,7 @@ type paymentSession struct {
 
 	additionalEdges map[route.Vertex][]AdditionalEdge
 
-	getBandwidthHints func(routingGraph) (bandwidthHints, error)
+	getBandwidthHints func(Graph) (bandwidthHints, error)
 
 	payment *LightningPayment
 
@@ -176,7 +176,7 @@ type paymentSession struct {
 
 	pathFinder pathFinder
 
-	getRoutingGraph func() (routingGraph, func(), error)
+	graphSessFactory GraphSessionFactory
 
 	// pathFindingConfig defines global parameters that control the
 	// trade-off in path finding between fees and probability.
@@ -196,10 +196,9 @@ type paymentSession struct {
 
 // newPaymentSession instantiates a new payment session.
 func newPaymentSession(p *LightningPayment, selfNode route.Vertex,
-	getBandwidthHints func(routingGraph) (bandwidthHints, error),
-	getRoutingGraph func() (routingGraph, func(), error),
-	missionControl MissionController, pathFindingConfig PathFindingConfig) (
-	*paymentSession, error) {
+	getBandwidthHints func(Graph) (bandwidthHints, error),
+	graphSessFactory GraphSessionFactory, missionControl MissionController,
+	pathFindingConfig PathFindingConfig) (*paymentSession, error) {
 
 	edges, err := RouteHintsToEdges(p.RouteHints, p.Target)
 	if err != nil {
@@ -214,7 +213,7 @@ func newPaymentSession(p *LightningPayment, selfNode route.Vertex,
 		getBandwidthHints: getBandwidthHints,
 		payment:           p,
 		pathFinder:        findPath,
-		getRoutingGraph:   getRoutingGraph,
+		graphSessFactory:  graphSessFactory,
 		pathFindingConfig: pathFindingConfig,
 		missionControl:    missionControl,
 		minShardAmt:       DefaultShardMinAmt,
@@ -281,11 +280,14 @@ func (p *paymentSession) RequestRoute(maxAmt, feeLimit lnwire.MilliSatoshi,
 	}
 
 	for {
-		// Get a routing graph.
-		routingGraph, cleanup, err := p.getRoutingGraph()
+		// Get a routing graph session.
+		graphSession, err := p.graphSessFactory.NewSession()
 		if err != nil {
+			log.Infof("ELLE: Here: %v", err)
 			return nil, err
 		}
+
+		routingGraph := graphSession.Graph()
 
 		// We'll also obtain a set of bandwidthHints from the lower
 		// layer for each of our outbound channels. This will allow the
@@ -312,8 +314,10 @@ func (p *paymentSession) RequestRoute(maxAmt, feeLimit lnwire.MilliSatoshi,
 			maxAmt, p.payment.TimePref, finalHtlcExpiry,
 		)
 
-		// Close routing graph.
-		cleanup()
+		// Close routing graph session.
+		if err := graphSession.Close(); err != nil {
+			log.Errorf("could not close graph session: %v", err)
+		}
 
 		switch {
 		case err == errNoPathFound:
