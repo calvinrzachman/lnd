@@ -110,8 +110,8 @@ func (u *nodeEdgeUnifier) addGraphPolicies(g routingGraph) error {
 		// Note that we are searching backwards so this node would have
 		// come prior to the pivot node in the route.
 		if channel.InPolicy == nil {
-			log.Infof("Skipping policy add for channel between: other_node=%v, in_policy_nodekey=%v",
-				channel.OtherNode, channel.InPolicy.ToNodePubKey)
+			log.Infof("Skipping policy add for channel between: other_node=%v",
+				channel.OtherNode)
 
 			return nil
 		}
