@@ -253,6 +253,10 @@ type ChannelPolicy struct {
 	MinHTLC *lnwire.MilliSatoshi
 }
 
+// RouteTransformFunc defines a function type for transforming a route. The
+// function may return an error if the transformation is not possible.
+type RouteTransformFunc func(route *route.Route) (*route.Route, error)
+
 // Config defines the configuration for the ChannelRouter. ALL elements within
 // the configuration MUST be non-nil for the ChannelRouter to carry out its
 // duties.
@@ -1408,6 +1412,10 @@ func (r *ChannelRouter) BuildRoute(amt fn.Option[lnwire.MilliSatoshi],
 
 	// We'll attempt to obtain a set of bandwidth hints that helps us select
 	// the best outgoing channel to use in case no outgoing channel is set.
+	// NOTE: Bandwidth hints are always derived from our own node's channels
+	// since we only know local channel balances. When sourceNode differs
+	// from SelfNode, the hints will not match the first hop's channels and
+	// the edge selection falls back to assuming maximum capacity.
 	bandwidthHints, err := newBandwidthManager(
 		r.cfg.RoutingGraph, r.cfg.SelfNode, r.cfg.GetLink, firstHopBlob,
 		r.cfg.TrafficShaper,

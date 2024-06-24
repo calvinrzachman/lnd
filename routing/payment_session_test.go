@@ -2,6 +2,7 @@ package routing
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -251,6 +252,124 @@ func TestRequestRoute(t *testing.T) {
 		t.Fatalf("unexpected total time lock of %v",
 			route.TotalTimeLock)
 	}
+}
+
+// TestRouteTransformFunc verifies that a route transformation function
+// applied via functional option correctly transforms routes returned by
+// RequestRoute.
+func TestRouteTransformFunc(t *testing.T) {
+	t.Parallel()
+
+	// Create a mock payment.
+	payment := &LightningPayment{
+		Amount:   1000,
+		FeeLimit: 1000,
+	}
+
+	var paymentHash [32]byte
+	err := payment.SetPaymentHash(paymentHash)
+	require.NoError(t, err, "unable to set payment hash")
+
+	// Create a mock path with multiple hops.
+	mockPath := []*unifiedEdge{
+		{
+			policy: &models.CachedEdgePolicy{
+				ToNodePubKey: func() route.Vertex {
+					return route.Vertex{1}
+				},
+				ToNodeFeatures: lnwire.NewFeatureVector(
+					nil, nil,
+				),
+			},
+		},
+		{
+			policy: &models.CachedEdgePolicy{
+				ToNodePubKey: func() route.Vertex {
+					return route.Vertex{2}
+				},
+				ToNodeFeatures: lnwire.NewFeatureVector(
+					nil, nil,
+				),
+			},
+		},
+		{
+			policy: &models.CachedEdgePolicy{
+				ToNodePubKey: func() route.Vertex {
+					return route.Vertex{3}
+				},
+				ToNodeFeatures: lnwire.NewFeatureVector(
+					nil, nil,
+				),
+			},
+		},
+	}
+
+	// Define a route transform that trims the first hop and
+	// recalculates TotalAmount and TotalTimeLock accordingly.
+	trimFirstHop := func(r *route.Route) (*route.Route, error) {
+		if len(r.Hops) == 0 {
+			return nil, fmt.Errorf("cannot trim: route has " +
+				"no hops")
+		}
+
+		trimmed := r.Copy()
+		trimmed.TotalAmount -= trimmed.HopFee(0)
+		trimmed.TotalTimeLock = r.Hops[0].OutgoingTimeLock + 1
+		trimmed.SourcePubKey = r.Hops[0].PubKeyBytes
+		trimmed.Hops = trimmed.Hops[1:]
+
+		return trimmed, nil
+	}
+
+	// Create a new payment session and apply the route transform.
+	session, err := newPaymentSession(
+		payment, route.Vertex{1},
+		func(Graph) (bandwidthHints, error) {
+			return &mockBandwidthHints{}, nil
+		},
+		&sessionGraph{},
+		&MissionControl{},
+		PathFindingConfig{},
+		withRouteTransform(trimFirstHop),
+	)
+	require.NoError(t, err, "unable to create payment session")
+
+	// Mock the pathfinder to return a sample route.
+	session.pathFinder = func(_ *graphParams, r *RestrictParams,
+		_ *PathFindingConfig, _, _, _ route.Vertex,
+		_ lnwire.MilliSatoshi, _ float64, _ int32) ([]*unifiedEdge,
+		float64, error) {
+
+		return mockPath, 1.0, nil
+	}
+
+	// Call RequestRoute to obtain a route.
+	route, err := session.RequestRoute(
+		payment.Amount, payment.FeeLimit, 0, 10,
+		lnwire.CustomRecords{
+			lnwire.MinCustomRecordsTlvType + 123: []byte{1, 2, 3},
+		},
+	)
+	require.NoError(t, err)
+
+	// The transformed route should have the first hop trimmed.
+	require.Len(t, route.Hops, len(mockPath)-1)
+
+	// The new first hop should be what was previously the second hop.
+	require.Equal(t, mockPath[1].policy.ToNodePubKey(),
+		route.Hops[0].PubKeyBytes,
+	)
+
+	// SourcePubKey should be updated to the old first hop's pubkey.
+	require.Equal(t, mockPath[0].policy.ToNodePubKey(),
+		route.SourcePubKey,
+	)
+
+	// TotalFees should not include the trimmed hop's fee.
+	require.Equal(t,
+		route.TotalAmount-route.Hops[len(route.Hops)-1].AmtToForward,
+		route.TotalFees(),
+	)
 }
 
 type sessionGraph struct {

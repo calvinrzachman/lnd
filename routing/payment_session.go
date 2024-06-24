@@ -6,6 +6,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btclog/v2"
+	"github.com/lightningnetwork/lnd/fn/v2"
 	graphdb "github.com/lightningnetwork/lnd/graph/db"
 	"github.com/lightningnetwork/lnd/graph/db/models"
 	"github.com/lightningnetwork/lnd/lnutils"
@@ -195,6 +196,31 @@ type paymentSession struct {
 
 	// log is a payment session-specific logger.
 	log btclog.Logger
+
+	// opts holds optional configuration for the payment session.
+	opts sessionOptions
+}
+
+// sessionOptions holds optional configuration for a payment session.
+type sessionOptions struct {
+	// routeTransform is an optional transformation applied to every
+	// route created for this payment session.
+	routeTransform fn.Option[RouteTransformFunc]
+}
+
+// defaultSessionOptions returns sessionOptions with default values.
+func defaultSessionOptions() sessionOptions {
+	return sessionOptions{}
+}
+
+// sessionOption is a functional option for configuring a payment session.
+type sessionOption func(*sessionOptions)
+
+// withRouteTransform sets a route transformation function.
+func withRouteTransform(rt RouteTransformFunc) sessionOption {
+	return func(o *sessionOptions) {
+		o.routeTransform = fn.Some(rt)
+	}
 }
 
 // newPaymentSession instantiates a new payment session.
@@ -202,7 +228,8 @@ func newPaymentSession(p *LightningPayment, selfNode route.Vertex,
 	getBandwidthHints func(Graph) (bandwidthHints, error),
 	graphSessFactory GraphSessionFactory,
 	missionControl MissionControlQuerier,
-	pathFindingConfig PathFindingConfig) (*paymentSession, error) {
+	pathFindingConfig PathFindingConfig,
+	options ...sessionOption) (*paymentSession, error) {
 
 	edges, err := RouteHintsToEdges(p.RouteHints, p.Target)
 	if err != nil {
@@ -223,7 +250,12 @@ func newPaymentSession(p *LightningPayment, selfNode route.Vertex,
 
 	logPrefix := fmt.Sprintf("PaymentSession(%x):", p.Identifier())
 
-	return &paymentSession{
+	opts := defaultSessionOptions()
+	for _, o := range options {
+		o(&opts)
+	}
+
+	ps := &paymentSession{
 		selfNode:          selfNode,
 		additionalEdges:   edges,
 		getBandwidthHints: getBandwidthHints,
@@ -234,7 +266,10 @@ func newPaymentSession(p *LightningPayment, selfNode route.Vertex,
 		missionControl:    missionControl,
 		minShardAmt:       DefaultShardMinAmt,
 		log:               log.WithPrefix(logPrefix),
-	}, nil
+		opts:              opts,
+	}
+
+	return ps, nil
 }
 
 // pathFindingError is a wrapper error type that is used to distinguish path
@@ -454,7 +489,22 @@ func (p *paymentSession) RequestRoute(maxAmt, feeLimit lnwire.MilliSatoshi,
 			return nil, err
 		}
 
-		return route, err
+		// Apply the route transformation, if provided.
+		var transformErr error
+		p.opts.routeTransform.WhenSome(
+			func(transform RouteTransformFunc) {
+				route, transformErr = transform(route)
+			},
+		)
+		if transformErr != nil {
+			return nil, transformErr
+		}
+		if route == nil {
+			return nil, fmt.Errorf("route transform " +
+				"returned nil route")
+		}
+
+		return route, nil
 	}
 }
 
