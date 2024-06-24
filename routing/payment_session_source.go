@@ -42,6 +42,12 @@ type SessionSource struct {
 	// PathFindingConfig defines global parameters that control the
 	// trade-off in path finding between fees and probability.
 	PathFindingConfig PathFindingConfig
+
+	// PathTransform is an optional function that transforms the path before building the route.
+	PathTransform PathTransformFunc
+
+	// RouteTransform is an optional function that transforms the route after it is built.
+	RouteTransform RouteTransformFunc
 }
 
 // getRoutingGraph returns a routing graph and a clean-up function for
@@ -72,9 +78,20 @@ func (m *SessionSource) NewPaymentSession(p *LightningPayment) (
 		)
 	}
 
+	options := []Option{}
+
+	if m.PathTransform != nil {
+		options = append(options, WithPathTransform(m.PathTransform))
+	}
+
+	if m.RouteTransform != nil {
+		options = append(options, WithRouteTransform(m.RouteTransform))
+	}
+
 	session, err := newPaymentSession(
 		p, getBandwidthHints, m.getRoutingGraph,
 		m.MissionControl, m.PathFindingConfig,
+		options...,
 	)
 	if err != nil {
 		return nil, err

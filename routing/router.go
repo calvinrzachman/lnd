@@ -313,6 +313,12 @@ type ChannelPolicy struct {
 	MinHTLC *lnwire.MilliSatoshi
 }
 
+// PathTransformFunc defines a function type for transforming a path.
+type PathTransformFunc func(path []*unifiedEdge) []*unifiedEdge
+
+// RouteTransformFunc defines a function type for transforming a route.
+type RouteTransformFunc func(route *route.Route) *route.Route
+
 // Config defines the configuration for the ChannelRouter. ALL elements within
 // the configuration MUST be non-nil for the ChannelRouter to carry out its
 // duties.
@@ -321,6 +327,12 @@ type Config struct {
 	// metrics from and also to carry out path finding queries.
 	// TODO(roasbeef): make into an interface
 	Graph *channeldb.ChannelGraph
+
+	// PathTransform is an optional function that transforms the path before building the route.
+	PathTransform PathTransformFunc
+
+	// RouteTransform is an optional function that transforms the route after it is built.
+	RouteTransform RouteTransformFunc
 
 	// Chain is the router's source to the most up-to-date blockchain data.
 	// All incoming advertised channels will be checked against the chain
@@ -1813,6 +1825,10 @@ func (r *ChannelRouter) processUpdate(msg interface{},
 			log.Debugf("timestamp=%+v, last_update=%+v", edge1Timestamp, msg.LastUpdate)
 
 			// Ignore outdated message.
+			// We get 'edge1Timestamp' from disk. We get msg.LastUpdate
+			// from a message. Wouldn't we expect that the message
+			// have a time stamp that is more recent than what we
+			// have on disk?
 			if !edge1Timestamp.Before(msg.LastUpdate) {
 				return newErrf(ErrOutdated, "Ignoring "+
 					"outdated update (flags=%v|%v) for "+
