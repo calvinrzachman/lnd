@@ -192,13 +192,34 @@ type paymentSession struct {
 
 	// log is a payment session-specific logger.
 	log btclog.Logger
+
+	pathTransform  PathTransformFunc
+	routeTransform RouteTransformFunc
+}
+
+// Option is a functional option for configuring the payment session.
+type Option func(*paymentSession)
+
+// WithPathTransform sets a path transformation function.
+func WithPathTransform(pathTransform PathTransformFunc) Option {
+	return func(ps *paymentSession) {
+		ps.pathTransform = pathTransform
+	}
+}
+
+// WithRouteTransform sets a route transformation function.
+func WithRouteTransform(routeTransform RouteTransformFunc) Option {
+	return func(ps *paymentSession) {
+		ps.routeTransform = routeTransform
+	}
 }
 
 // newPaymentSession instantiates a new payment session.
 func newPaymentSession(p *LightningPayment, selfNode route.Vertex,
 	getBandwidthHints func(Graph) (bandwidthHints, error),
 	graphSessFactory GraphSessionFactory, missionControl MissionController,
-	pathFindingConfig PathFindingConfig) (*paymentSession, error) {
+	pathFindingConfig PathFindingConfig,
+	options ...Option) (*paymentSession, error) {
 
 	edges, err := RouteHintsToEdges(p.RouteHints, p.Target)
 	if err != nil {
@@ -207,7 +228,7 @@ func newPaymentSession(p *LightningPayment, selfNode route.Vertex,
 
 	logPrefix := fmt.Sprintf("PaymentSession(%x):", p.Identifier())
 
-	return &paymentSession{
+	ps := &paymentSession{
 		selfNode:          selfNode,
 		additionalEdges:   edges,
 		getBandwidthHints: getBandwidthHints,
@@ -218,7 +239,13 @@ func newPaymentSession(p *LightningPayment, selfNode route.Vertex,
 		missionControl:    missionControl,
 		minShardAmt:       DefaultShardMinAmt,
 		log:               build.NewPrefixLog(logPrefix, log),
-	}, nil
+	}
+
+	for _, option := range options {
+		option(ps)
+	}
+
+	return ps, nil
 }
 
 // RequestRoute returns a route which is likely to be capable for successfully
@@ -389,6 +416,16 @@ func (p *paymentSession) RequestRoute(maxAmt, feeLimit lnwire.MilliSatoshi,
 			return nil, err
 		}
 
+		// NOTE(calvin): Process the path to remove any edges emanating
+		// from source which correspond to virtual channels prior to
+		// building the route below.
+		// route = p.removeVirtualChannel(path)
+		// Apply the path transformation, if provided.
+		if p.pathTransform != nil {
+			log.Debug("Running path transformation!")
+			path = p.pathTransform(path)
+		}
+
 		// With the next candidate path found, we'll attempt to turn
 		// this into a route by applying the time-lock and fee
 		// requirements.
@@ -405,6 +442,16 @@ func (p *paymentSession) RequestRoute(maxAmt, feeLimit lnwire.MilliSatoshi,
 		)
 		if err != nil {
 			return nil, err
+		}
+
+		// NOTE(calvin): Process the route to remove the first hop which
+		// corresponds to virtual channel. Normal routes will created
+		// by lnd without a proxy deployment setup will NEVER have these.
+		// route = p.removeVirtualChannel(route)
+		// Apply the route transformation, if provided.
+		if p.routeTransform != nil {
+			log.Debug("Running route transformation!")
+			route = p.routeTransform(route)
 		}
 
 		return route, err
