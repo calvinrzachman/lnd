@@ -243,6 +243,10 @@ type ChannelPolicy struct {
 	MinHTLC *lnwire.MilliSatoshi
 }
 
+// RouteTransformFunc defines a function type for transforming a route. The
+// function may return an error if the transformation is not possible.
+type RouteTransformFunc func(route *route.Route) (*route.Route, error)
+
 // Config defines the configuration for the ChannelRouter. ALL elements within
 // the configuration MUST be non-nil for the ChannelRouter to carry out its
 // duties.

@@ -194,6 +194,31 @@ type paymentSession struct {
 
 	// log is a payment session-specific logger.
 	log btclog.Logger
+
+	// opts holds optional configuration for the payment session.
+	opts sessionOptions
+}
+
+// sessionOptions holds optional configuration for a payment session.
+type sessionOptions struct {
+	// routeTransform is an optional transformation applied to every
+	// route created for this payment session.
+	routeTransform RouteTransformFunc
+}
+
+// defaultSessionOptions returns sessionOptions with default values.
+func defaultSessionOptions() sessionOptions {
+	return sessionOptions{}
+}
+
+// sessionOption is a functional option for configuring a payment session.
+type sessionOption func(*sessionOptions)
+
+// withRouteTransform sets a route transformation function.
+func withRouteTransform(rt RouteTransformFunc) sessionOption {
+	return func(o *sessionOptions) {
+		o.routeTransform = rt
+	}
 }
 
 // newPaymentSession instantiates a new payment session.
@@ -201,7 +226,8 @@ func newPaymentSession(p *LightningPayment, selfNode route.Vertex,
 	getBandwidthHints func(Graph) (bandwidthHints, error),
 	graphSessFactory GraphSessionFactory,
 	missionControl MissionControlQuerier,
-	pathFindingConfig PathFindingConfig) (*paymentSession, error) {
+	pathFindingConfig PathFindingConfig,
+	options ...sessionOption) (*paymentSession, error) {
 
 	edges, err := RouteHintsToEdges(p.RouteHints, p.Target)
 	if err != nil {
@@ -222,7 +248,12 @@ func newPaymentSession(p *LightningPayment, selfNode route.Vertex,
 
 	logPrefix := fmt.Sprintf("PaymentSession(%x):", p.Identifier())
 
-	return &paymentSession{
+	opts := defaultSessionOptions()
+	for _, o := range options {
+		o(&opts)
+	}
+
+	ps := &paymentSession{
 		selfNode:          selfNode,
 		additionalEdges:   edges,
 		getBandwidthHints: getBandwidthHints,
@@ -233,7 +264,10 @@ func newPaymentSession(p *LightningPayment, selfNode route.Vertex,
 		missionControl:    missionControl,
 		minShardAmt:       DefaultShardMinAmt,
 		log:               log.WithPrefix(logPrefix),
-	}, nil
+		opts:              opts,
+	}
+
+	return ps, nil
 }
 
 // pathFindingError is a wrapper error type that is used to distinguish path
@@ -452,7 +486,15 @@ func (p *paymentSession) RequestRoute(maxAmt, feeLimit lnwire.MilliSatoshi,
 			return nil, err
 		}
 
-		return route, err
+		// Apply the route transformation, if provided.
+		if p.opts.routeTransform != nil {
+			route, err = p.opts.routeTransform(route)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		return route, nil
 	}
 }
 
