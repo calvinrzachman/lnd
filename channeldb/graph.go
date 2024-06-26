@@ -2739,6 +2739,8 @@ func (c *ChannelGraph) updateEdgeCache(e *models.ChannelEdgePolicy,
 func updateEdgePolicy(tx kvdb.RwTx, edge *models.ChannelEdgePolicy,
 	graphCache *GraphCache) (bool, error) {
 
+	log.Debugf("updating policy for edge: %+v", edge)
+
 	edges := tx.ReadWriteBucket(edgeBucket)
 	if edges == nil {
 		return false, ErrEdgeNotFound
@@ -2774,6 +2776,8 @@ func updateEdgePolicy(tx kvdb.RwTx, edge *models.ChannelEdgePolicy,
 		isUpdate1 = false
 	}
 
+	log.Debugf("about to update policy for edge: %+v", edge)
+
 	// Finally, with the direction of the edge being updated
 	// identified, we update the on-disk edge representation.
 	err := putChanEdgePolicy(edges, edge, fromNode, toNode)
@@ -2789,6 +2793,7 @@ func updateEdgePolicy(tx kvdb.RwTx, edge *models.ChannelEdgePolicy,
 	copy(toNodePubKey[:], toNode)
 
 	if graphCache != nil {
+		log.Debug("updating graph cache")
 		graphCache.UpdatePolicy(
 			edge, fromNodePubKey, toNodePubKey, isUpdate1,
 		)
@@ -4285,6 +4290,8 @@ func putChanEdgePolicy(edges kvdb.RwBucket, edge *models.ChannelEdgePolicy,
 		return err
 	}
 
+	log.Debug("Writing channel edge policy to disk: %+v", edge)
+
 	// If there was already an entry for this edge, then we'll need to
 	// delete the old one to ensure we don't leave around any after-images.
 	// An unknown policy value does not have a update time recorded, so
@@ -4329,6 +4336,7 @@ func putChanEdgePolicy(edges kvdb.RwBucket, edge *models.ChannelEdgePolicy,
 		edge.IsDisabled(),
 	)
 
+	log.Debug("About to write channel edge policy to disk")
 	return edges.Put(edgeKey[:], b.Bytes()[:])
 }
 

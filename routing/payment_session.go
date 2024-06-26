@@ -197,6 +197,13 @@ type paymentSession struct {
 // Option is a functional option for configuring the payment session.
 type Option func(*paymentSession)
 
+// var noOpTransformPath PathTransformFunc = func(path []*unifiedEdge) []*unifiedEdge {
+// 	return path
+// }
+// var noOpTransformRoute RouteTransformFunc = func(route *route.Route) *route.Route {
+// 	return route
+// }
+
 // WithPathTransform sets a path transformation function.
 func WithPathTransform(pathTransform PathTransformFunc) Option {
 	return func(ps *paymentSession) {
@@ -240,6 +247,15 @@ func newPaymentSession(p *LightningPayment,
 	for _, option := range options {
 		option(ps)
 	}
+
+	// // Ensure that we default to NO-OP route/path transformers.
+	// if ps.pathTransform == nil {
+	// 	ps.pathTransform = noOpTransformPath
+	// }
+
+	// if ps.routeTransform == nil {
+	// 	ps.routeTransform = noOpTransformRoute
+	// }
 
 	return ps, nil
 }
@@ -327,6 +343,17 @@ func (p *paymentSession) RequestRoute(maxAmt, feeLimit lnwire.MilliSatoshi,
 		p.log.Debugf("pathfinding graph source node: %v", routingGraph.sourceNode())
 		p.log.Debugf("pathfinding from src=%v to dest=%v", sourceVertex, p.payment.Target)
 
+		// Debug: Print the graph policies before adding them
+		routingGraph.forEachNodeChannel(routingGraph.sourceNode(), func(channel *channeldb.DirectedChannel) error {
+			log.Infof("Channel with proxy: %+v", channel)
+			return nil
+		})
+
+		routingGraph.forEachNodeChannel(p.payment.Target, func(channel *channeldb.DirectedChannel) error {
+			log.Infof("Channel with target: %+v", channel)
+			return nil
+		})
+
 		// Find a route for the current amount.
 		path, _, err := p.pathFinder(
 			&graphParams{
@@ -413,7 +440,6 @@ func (p *paymentSession) RequestRoute(maxAmt, feeLimit lnwire.MilliSatoshi,
 		// from source which correspond to virtual channels prior to
 		// building the route below.
 		// route = p.removeVirtualChannel(path)
-		// Apply the path transformation, if provided.
 		if p.pathTransform != nil {
 			log.Debug("Running path transformation!")
 			path = p.pathTransform(path)
@@ -441,7 +467,6 @@ func (p *paymentSession) RequestRoute(maxAmt, feeLimit lnwire.MilliSatoshi,
 		// corresponds to virtual channel. Normal routes will created
 		// by lnd without a proxy deployment setup will NEVER have these.
 		// route = p.removeVirtualChannel(route)
-		// Apply the route transformation, if provided.
 		if p.routeTransform != nil {
 			log.Debug("Running route transformation!")
 			route = p.routeTransform(route)

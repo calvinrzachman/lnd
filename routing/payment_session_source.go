@@ -57,6 +57,7 @@ func (m *SessionSource) getRoutingGraph() (routingGraph, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	log.Debugf("[SessionSource.getRoutingGraph]: Obtained cached graph view")
 	return routingTx, func() {
 		err := routingTx.Close()
 		if err != nil {
@@ -88,6 +89,7 @@ func (m *SessionSource) NewPaymentSession(p *LightningPayment) (
 		options = append(options, WithRouteTransform(m.RouteTransform))
 	}
 
+	log.Debugf("[SessionSource.NewPaymentSession]: Creating new payment session")
 	session, err := newPaymentSession(
 		p, getBandwidthHints, m.getRoutingGraph,
 		m.MissionControl, m.PathFindingConfig,

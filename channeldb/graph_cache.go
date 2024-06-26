@@ -250,18 +250,21 @@ func (c *GraphCache) UpdatePolicy(policy *models.ChannelEdgePolicy, fromNode,
 		// This is node 1, and it is edge 1, so this is the outgoing
 		// policy for node 1.
 		case channel.IsNode1 && edge1:
+			log.Debugf("[GraphCache.UpdatePolicy]: Setting Outgoing Policy (Node 1): %+v, InPolicy:%v", channel, channel.InPolicy)
 			channel.OutPolicySet = true
 			channel.InboundFee = inboundFee
 
 		// This is node 2, and it is edge 2, so this is the outgoing
 		// policy for node 2.
 		case !channel.IsNode1 && !edge1:
+			log.Debugf("[GraphCache.UpdatePolicy]: Setting Outgoing Policy (Node 2): %+v, InPolicy:%v", channel, channel.InPolicy)
 			channel.OutPolicySet = true
 			channel.InboundFee = inboundFee
 
 		// The other two cases left mean it's the inbound policy for the
 		// node.
 		default:
+			log.Debugf("[GraphCache.UpdatePolicy]: Setting Inbound Policy: %+v, InPolicy:%v", channel, channel.InPolicy)
 			channel.InPolicy = models.NewCachedPolicy(policy)
 		}
 	}
