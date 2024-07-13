@@ -102,6 +102,7 @@ func (u *nodeEdgeUnifier) addGraphPolicies(g Graph) error {
 		// Note that we are searching backwards so this node would have
 		// come prior to the pivot node in the route.
 		if channel.InPolicy == nil {
+			log.Debugf("No InPolicy set for channel: %+v", channel)
 			return nil
 		}
 

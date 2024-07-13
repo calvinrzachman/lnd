@@ -47,6 +47,8 @@ func newBandwidthManager(graph Graph, sourceNode route.Vertex,
 		localChans: make(map[lnwire.ShortChannelID]struct{}),
 	}
 
+	log.Debugf("Creating new BandwidthManager with source: %v", sourceNode)
+
 	// First, we'll collect the set of outbound edges from the target
 	// source node and add them to our bandwidth manager's map of channels.
 	err := graph.ForEachNodeChannel(sourceNode,

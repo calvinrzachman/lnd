@@ -141,6 +141,8 @@ func (c *GraphCache) AddNodeFeatures(node GraphCacheNode) {
 func (c *GraphCache) AddNode(tx kvdb.RTx, node GraphCacheNode) error {
 	c.AddNodeFeatures(node)
 
+	log.Debugf("Adding node: %+v", node)
+
 	return node.ForEachChannel(
 		tx, func(tx kvdb.RTx, info *models.ChannelEdgeInfo,
 			outPolicy *models.ChannelEdgePolicy,
@@ -163,6 +165,10 @@ func (c *GraphCache) AddChannel(info *models.ChannelEdgeInfo,
 	if info == nil {
 		return
 	}
+
+	log.Debugf("Adding channel: %+v", info)
+	log.Debugf("Policy1: %+v", policy1)
+	log.Debugf("Policy2: %+v", policy2)
 
 	if policy1 != nil && policy1.IsDisabled() &&
 		policy2 != nil && policy2.IsDisabled() {
@@ -244,6 +250,8 @@ func (c *GraphCache) UpdatePolicy(policy *models.ChannelEdgePolicy, fromNode,
 			return
 		}
 
+		log.Debugf("[GraphCache]: Update policy for channel: %+v", channel)
+
 		// Edge 1 is defined as the policy for the direction of node1 to
 		// node2.
 		switch {
@@ -262,6 +270,7 @@ func (c *GraphCache) UpdatePolicy(policy *models.ChannelEdgePolicy, fromNode,
 		// The other two cases left mean it's the inbound policy for the
 		// node.
 		default:
+			log.Debugf("[GraphCache]: Setting InPolicy")
 			channel.InPolicy = models.NewCachedPolicy(policy)
 		}
 	}
@@ -384,6 +393,11 @@ func (c *GraphCache) getChannels(node route.Vertex) []*DirectedChannel {
 func (c *GraphCache) ForEachChannel(node route.Vertex,
 	cb func(channel *DirectedChannel) error) error {
 
+	// NOTE(calvin): These methods don't match the interface methods of
+	// routing.Graph. Also, can this GraphCache be used independently of
+	// the channelDB?
+	log.Debugf("[GraphCache]: ForEachChannel of node: %v", node)
+
 	// Obtain a copy of the node's channels. We need do this in order to
 	// avoid deadlocks caused by interaction with the graph cache, channel
 	// state and the graph database from multiple goroutines. This snapshot
@@ -393,6 +407,8 @@ func (c *GraphCache) ForEachChannel(node route.Vertex,
 	// is stored separately.
 	channels := c.getChannels(node)
 	for _, channel := range channels {
+		log.Debugf("[GraphCache]: ForEachChannel executing callback on %v's channel: %+v", node, channel)
+
 		if err := cb(channel); err != nil {
 			return err
 		}

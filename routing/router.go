@@ -1289,6 +1289,8 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 	log.Tracef("BuildRoute called: hopsCount=%v, amt=%v",
 		len(hops), amt)
 
+	log.Tracef("BuildRoute called: hops=%+v", hops)
+
 	var outgoingChans map[uint64]struct{}
 	if outgoingChan != nil {
 		outgoingChans = map[uint64]struct{}{
@@ -1367,6 +1369,8 @@ func getRouteUnifiers(source route.Vertex, hops []route.Vertex,
 
 	// Allocate a list that will contain the edge unifiers for this route.
 	unifiers := make([]*edgeUnifier, len(hops))
+
+	log.Debugf("BuildRoute --> getRouteUnifiers: hops: %+v", hops)
 
 	// Traverse hops backwards to accumulate fees in the running amounts.
 	for i := len(hops) - 1; i >= 0; i-- {
