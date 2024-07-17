@@ -469,6 +469,8 @@ func getOutgoingBalance(node route.Vertex, outgoingChans map[uint64]struct{},
 	var max, total lnwire.MilliSatoshi
 	cb := func(channel *channeldb.DirectedChannel) error {
 		if !channel.OutPolicySet {
+			log.Debugf("[Channel(%s)]: No outgoing policy set",
+				channel.ChannelID)
 			return nil
 		}
 
@@ -485,11 +487,16 @@ func getOutgoingBalance(node route.Vertex, outgoingChans map[uint64]struct{},
 			chanID, 0,
 		)
 
+		log.Debugf("[Channel(%s)]: Available bandwidth: %v",
+			channel.ChannelID, bandwidth)
+
 		// If the bandwidth is not available, use the channel capacity.
 		// This can happen when a channel is added to the graph after
 		// we've already queried the bandwidth hints.
 		if !ok {
 			bandwidth = lnwire.NewMSatFromSatoshis(channel.Capacity)
+			log.Debugf("[Channel(%s)]: Fell back to channel capacity: %v",
+				channel.ChannelID, bandwidth)
 		}
 
 		if bandwidth > max {
