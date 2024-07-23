@@ -1125,11 +1125,8 @@ func (s *Server) TrackOnion(ctx context.Context,
 		req.AttemptId, lntypes.Hash(req.PaymentHash), errorDecryptor,
 	)
 	if err != nil {
-		return &TrackOnionResponse{
-				Success:      false,
-				ErrorMessage: err.Error(),
-			}, status.Errorf(codes.Internal,
-				"failed locate payment attempt: %v", err)
+		return nil, status.Errorf(codes.Internal,
+			"failed locate payment attempt: %v", err)
 	}
 
 	// The switch knows about this payment, we'll wait for a result to be
@@ -1147,7 +1144,6 @@ func (s *Server) TrackOnion(ctx context.Context,
 			return nil, status.Errorf(codes.Internal,
 				"failed locate payment attempt: %v",
 				htlcswitch.ErrSwitchExiting)
-			// return nil, htlcswitch.ErrSwitchExiting
 		}
 
 	case <-ctx.Done():
@@ -1160,11 +1156,14 @@ func (s *Server) TrackOnion(ctx context.Context,
 		log.Errorf("Payment via onion failed for hash %x",
 			req.PaymentHash)
 
+		// TODO(calvin): Check error handling to see if we need to
+		// include a code.
+		message, _ := s.translateErrorForRPC(result.Error)
+
 		return &TrackOnionResponse{
-				Success:      false,
-				ErrorMessage: result.Error.Error(),
-			}, status.Errorf(codes.Internal,
-				"payment failed: %v", result.Error)
+			Success:      false,
+			ErrorMessage: message,
+		}, nil
 	}
 
 	// In case we don't process the error, we'll return the encrypted
