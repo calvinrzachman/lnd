@@ -1,7 +1,12 @@
 package itest
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
+	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
@@ -286,12 +291,11 @@ func testTrackOnion(ht *lntest.HarnessTest) {
 		SessionKey:  onionResp.SessionKey,
 		HopPubkeys:  onionResp.HopPubkeys,
 	}
-	trackResp, clearErr := alice.RPC.Router.TrackOnion(ctxt, trackReq)
-	if clearErr != nil {
-		ht.Logf("Encountered error while tracking onion: %v", clearErr)
-	}
+	trackResp, err := alice.RPC.Router.TrackOnion(ctxt, trackReq)
+	require.Nil(ht, err, "unexpected onion tracking error")
+	require.NotEmpty(ht, trackResp.ErrorMessage, "expected onion tracking error")
+	serverErrorStr = trackResp.ErrorMessage
 	ht.Logf("Tracked payment via onion: %+v", trackResp)
-	serverErrorStr = clearErr.Error()
 
 	// Now we'll track the same payment attempt, but we'll specify that
 	// we want to handle the error decryption ourselves client side.
@@ -299,10 +303,9 @@ func testTrackOnion(ht *lntest.HarnessTest) {
 		AttemptId:   1,
 		PaymentHash: paymentHash,
 	}
-	trackResp, err := alice.RPC.Router.TrackOnion(ctxt, trackReq)
-	if err != nil {
-		ht.Logf("Encountered error while tracking onion: %v", err)
-	}
+	trackResp, err = alice.RPC.Router.TrackOnion(ctxt, trackReq)
+	require.Nil(ht, err, "unexpected onion tracking error")
+	require.NotNil(ht, trackResp.EncryptedError, "expected encrypted error")
 	ht.Logf("Tracked payment via onion: %+v", trackResp)
 
 	// Decrypt and inspect the error from the TrackOnion RPC response.
@@ -330,8 +333,42 @@ func testTrackOnion(ht *lntest.HarnessTest) {
 	ht.Logf("Decrypted error: %+v", forwardingError)
 	clientErrorStr = forwardingError.Error()
 
+	serverFwdErr, err := parseForwardingError(serverErrorStr)
+	require.Nil(ht, err, "expected to parse forwarding error from server")
 	ht.Logf("Server-side decrypted error: %s", serverErrorStr)
+	ht.Logf("Server-side decrypted error (parsed): %s", serverFwdErr.Error())
 	ht.Logf("Client-side decrypted error: %s", clientErrorStr)
+	require.Equal(ht, serverFwdErr.Error(), clientErrorStr, "expect error "+
+		"message to match whether handled by client or server")
+}
+
+func parseForwardingError(errStr string) (*htlcswitch.ForwardingError, error) {
+	parts := strings.SplitN(errStr, "@", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid forwarding error format: %s",
+			errStr)
+	}
+
+	idx, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return nil, fmt.Errorf("invalid forwarding error index: %s",
+			errStr)
+	}
+
+	wireMsgBytes, err := hex.DecodeString(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("invalid forwarding error wire message: %s",
+			errStr)
+	}
+
+	r := bytes.NewReader(wireMsgBytes)
+	wireMsg, err := lnwire.DecodeFailure(r, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode wire message: %v",
+			err)
+	}
+
+	return htlcswitch.NewForwardingError(wireMsg, idx), nil
 }
 
 func reconstructCircuit(sessionKey *btcec.PrivateKey,
