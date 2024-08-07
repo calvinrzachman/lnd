@@ -1016,6 +1016,7 @@ func (s *Server) SendOnion(_ context.Context,
 		firstHop, lnwire.MilliSatoshi(req.Amount),
 	)
 	if err != nil {
+		// NOTE(calvin): Should this error be communicated via RPC proto?
 		return nil, status.Errorf(codes.Internal,
 			"unable to find eligible channel ID: %v", err)
 	}
@@ -1251,7 +1252,11 @@ func (s *Server) findEligibleChannelID(pubKey *btcec.PublicKey,
 			fmt.Errorf("failed to retrieve channels: %w", err)
 	}
 
+	// NOTE(calvin): This is NOT duplicating the checks that the Switch
+	// itself will perform as those are only performed in ForwardPackets().
 	for _, link := range links {
+		log.Debugf("Considering channel link scid=%v", link.ShortChanID())
+
 		// Ensure the link is eligible to forward payments.
 		if !link.EligibleToForward() {
 			continue
