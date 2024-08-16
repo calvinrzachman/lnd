@@ -545,6 +545,10 @@ func (m *MissionControl) GetProbability(fromNode, toNode route.Vertex,
 	results, _ := m.state.getLastPairResult(fromNode)
 
 	// Use a distinct probability estimation function for local channels.
+	//
+	// NOTE(calvin): We may need to introduce a layer of abstraction here
+	// to allow room for concept of "remote local" channels for which we
+	// know detailed balance information.
 	if fromNode == m.cfg.selfNode {
 		return m.estimator.LocalPairProbability(now, results, toNode)
 	}
@@ -623,6 +627,8 @@ func (m *MissionControl) ReportPaymentFail(paymentID uint64, rt *route.Route,
 		paymentID, extractMCRoute(rt), timestamp, timestamp,
 		newPaymentFailure(failureSourceIdx, failure),
 	)
+
+	fmt.Println("Reporting payment fail: id=%d, route=%+v", paymentID, rt)
 
 	return m.processPaymentResult(result)
 }

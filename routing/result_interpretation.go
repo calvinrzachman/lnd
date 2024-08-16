@@ -112,6 +112,12 @@ func (i *interpretedResult) processFail(rt *mcRoute, failure paymentFailure) {
 		return
 	}
 
+	// if errSourceIdx == nil {
+	// 	fmt.Printf("payment outcome unknown: %v\n", rt)
+	// 	i.processPaymentOutcomeUnknown(rt)
+	// 	return
+	// }
+
 	var (
 		idx     int
 		failMsg lnwire.FailureMessage
@@ -137,15 +143,23 @@ func (i *interpretedResult) processFail(rt *mcRoute, failure paymentFailure) {
 	switch idx {
 	// We are the source of the failure.
 	case 0:
+		fmt.Printf("payment outcome self: %v\n", rt)
 		i.processPaymentOutcomeSelf(rt, failMsg)
 
 	// A failure from the final hop was received.
 	case len(rt.hops.Val):
-		i.processPaymentOutcomeFinal(rt, failMsg)
+		fmt.Printf("payment outcome final hop: %v\n", rt)
+		i.processPaymentOutcomeFinal(
+			rt, failMsg,
+		)
 
 	// An intermediate hop failed. Interpret the outcome, update reputation
 	// and try again.
 	default:
+		fmt.Printf("payment outcome middle hop: %v\n", rt)
+		// i.processPaymentOutcomeIntermediate(
+		// 	rt, *errSourceIdx, failMsg,
+		// )
 		i.processPaymentOutcomeIntermediate(rt, idx, failMsg)
 	}
 }
