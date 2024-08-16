@@ -515,6 +515,8 @@ func (p *paymentLifecycle) collectResult(attempt *channeldb.HTLCAttempt) (
 	if err != nil {
 		log.Errorf("Failed getting result for attemptID %d "+
 			"from switch: %v", attempt.AttemptID, err)
+		fmt.Printf("Failed getting result for attemptID %d "+
+			"from switch: %v\n", attempt.AttemptID, err)
 
 		return p.handleSwitchErr(attempt, err)
 	}
@@ -542,6 +544,8 @@ func (p *paymentLifecycle) collectResult(attempt *channeldb.HTLCAttempt) (
 	// In case of a payment failure, fail the attempt with the control
 	// tower and return.
 	if result.Error != nil {
+		fmt.Printf("Got error result for attemptID %d "+
+			"from switch: %v\n", attempt.AttemptID, err)
 		return p.handleSwitchErr(attempt, result.Error)
 	}
 
@@ -706,6 +710,8 @@ func (p *paymentLifecycle) sendAttempt(
 	if err != nil {
 		log.Errorf("Failed sending attempt %d for payment %v to "+
 			"switch: %v", attempt.AttemptID, p.identifier, err)
+		fmt.Printf("Failed sending attempt %d for payment %v to "+
+			"switch: %v\n", attempt.AttemptID, p.identifier, err)
 
 		return p.handleSwitchErr(attempt, err)
 	}
@@ -726,6 +732,8 @@ func (p *paymentLifecycle) failPaymentAndAttempt(
 
 	log.Errorf("Payment %v failed: final_outcome=%v, raw_err=%v",
 		p.identifier, *reason, sendErr)
+	fmt.Printf("Payment %v failed: final_outcome=%v, raw_err=%v\n",
+		p.identifier, *reason, sendErr)
 
 	// Fail the payment via control tower.
 	//
@@ -735,6 +743,7 @@ func (p *paymentLifecycle) failPaymentAndAttempt(
 	err := p.router.cfg.Control.FailPayment(p.identifier, *reason)
 	if err != nil {
 		log.Errorf("Unable to fail payment: %v", err)
+		fmt.Printf("Unable to fail payment: %v\n", err)
 		return nil, err
 	}
 
@@ -769,6 +778,8 @@ func (p *paymentLifecycle) handleSwitchErr(attempt *channeldb.HTLCAttempt,
 		)
 		if err != nil {
 			log.Errorf("Error reporting payment result to mc: %v",
+				err)
+			fmt.Printf("Error reporting payment result to mc: %v\n",
 				err)
 
 			reason = &internalErrorReason
@@ -813,6 +824,7 @@ func (p *paymentLifecycle) handleSwitchErr(attempt *channeldb.HTLCAttempt,
 	var rtErr htlcswitch.ClearTextError
 	ok := errors.As(sendErr, &rtErr)
 	if !ok {
+		fmt.Println("error not related to payment prop")
 		return p.failPaymentAndAttempt(
 			attemptID, &internalErrorReason, sendErr,
 		)
@@ -839,6 +851,8 @@ func (p *paymentLifecycle) handleSwitchErr(attempt *channeldb.HTLCAttempt,
 		&attempt.Route, failureSourceIdx, failureMessage,
 	)
 	if err != nil {
+		fmt.Printf("Error extracting wire failure: %v\n",
+			err)
 		return p.failPaymentAndAttempt(
 			attemptID, &internalErrorReason, sendErr,
 		)
@@ -862,6 +876,7 @@ func (p *paymentLifecycle) handleFailureMessage(rt *route.Route,
 	// It makes no sense to apply our own channel updates.
 	if errorSourceIdx == 0 {
 		log.Errorf("Channel update of ourselves received")
+		fmt.Println("Channel update of ourselves received")
 
 		return nil
 	}
@@ -928,6 +943,8 @@ func (p *paymentLifecycle) failAttempt(attemptID uint64,
 	sendError error) (*attemptResult, error) {
 
 	log.Warnf("Attempt %v for payment %v failed: %v", attemptID,
+		p.identifier, sendError)
+	fmt.Printf("Attempt %v for payment %v failed: %v\n", attemptID,
 		p.identifier, sendError)
 
 	failInfo := marshallError(

@@ -120,6 +120,7 @@ func (e noRouteError) FailureReason() channeldb.FailureReason {
 		return channeldb.FailureReasonInsufficientBalance
 
 	default:
+		fmt.Println("Uninformative internal error")
 		return channeldb.FailureReasonError
 	}
 }
