@@ -52,7 +52,7 @@ type mockers struct {
 	// has been called.
 	collectResultsCount int
 
-	// payment is the mocked `dbMPPayment` used in the test.
+	// payment is the mocked `DBMPPayment` used in the test.
 	payment *mockMPPayment
 }
 
