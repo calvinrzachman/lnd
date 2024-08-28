@@ -1406,6 +1406,7 @@ func (r *ChannelRouter) resumePayments() error {
 	if err != nil {
 		return err
 	}
+	log.Debugf("We have %d in flight payment: %+v", len(payments))
 
 	// Before we restart existing payments and start accepting more
 	// payments to be made, we clean the network result store of the
@@ -1414,7 +1415,10 @@ func (r *ChannelRouter) resumePayments() error {
 	// until the cleaning has finished.
 	toKeep := make(map[uint64]struct{})
 	for _, p := range payments {
+		log.Debugf("We have an in flight payment: %+v", p)
 		for _, a := range p.HTLCs {
+			log.Debugf("We're going to keep our results for attempt"+
+				" ID: %s", a.AttemptID)
 			toKeep[a.AttemptID] = struct{}{}
 
 			// Try to fail the attempt if the route contains a dead

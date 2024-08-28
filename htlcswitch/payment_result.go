@@ -277,9 +277,17 @@ func (store *networkResultStore) cleanStore(keep map[uint64]struct{}) error {
 		var toClean [][]byte
 		if err := networkResults.ForEach(func(k, _ []byte) error {
 			pid := binary.BigEndian.Uint64(k)
+			log.Infof("Considering removal of result for attempt "+
+				"ID: %d from network result store", pid)
+
 			if _, ok := keep[pid]; ok {
+				log.Infof("Keeping result for attempt "+
+					"ID: %d", pid)
 				return nil
 			}
+
+			log.Infof("Removing result for attempt "+
+				"ID: %d from network result store", pid)
 
 			toClean = append(toClean, k)
 			return nil
