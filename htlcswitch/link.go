@@ -3932,13 +3932,17 @@ func (l *channelLink) forwardBatch(replay bool, packets ...*htlcPacket) {
 	// mailbox, and the incoming link flaps.
 	var filteredPkts = make([]*htlcPacket, 0, len(packets))
 	for _, pkt := range packets {
+		l.log.Debugf("checking on packet(%d): %+v", pkt.incomingHTLCID, pkt)
+
 		if l.mailBox.HasPacket(pkt.inKey()) {
+			l.log.Debugf("skipping forward for packet: %+v", pkt)
 			continue
 		}
 
 		filteredPkts = append(filteredPkts, pkt)
 	}
 
+	l.log.Debugf("[link.forwardBatch]: forwarding %d packets", len(filteredPkts))
 	err := l.cfg.ForwardPackets(l.Quit, replay, filteredPkts...)
 	if err != nil {
 		log.Errorf("Unhandled error while reforwarding htlc "+
