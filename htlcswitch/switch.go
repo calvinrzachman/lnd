@@ -488,6 +488,8 @@ func (s *Switch) GetAttemptResult(attemptID uint64, paymentHash lntypes.Hash,
 		// result.
 		nChan, err = s.networkResults.subscribeResult(attemptID)
 		if err != nil {
+			// NOTE(calvin): HTLC has entry in CircuitMap. HTLC is in-flight!
+			// Consider adding a distinguishable error type here!
 			return nil, err
 		}
 	}
@@ -522,6 +524,8 @@ func (s *Switch) GetAttemptResult(attemptID uint64, paymentHash lntypes.Hash,
 		if err != nil {
 			e := fmt.Errorf("unable to extract result: %w", err)
 			log.Error(e)
+			// NOTE(calvin): The HTLC is not in-flight?
+			// Consider adding a distinguishable error type here!
 			resultChan <- &PaymentResult{
 				Error: e,
 			}
@@ -559,6 +563,8 @@ func (s *Switch) SendHTLC(firstHop lnwire.ShortChannelID, attemptID uint64,
 		amount:         htlc.Amount,
 	}
 
+	log.Debugf("[switch.SendHTLC]: sending HTLC: %+v", packet)
+
 	// Attempt to fetch the target link before creating a circuit so that
 	// we don't leave dangling circuits. The getLocalLink method does not
 	// require the circuit variable to be set on the *htlcPacket.
@@ -578,6 +584,7 @@ func (s *Switch) SendHTLC(firstHop lnwire.ShortChannelID, attemptID uint64,
 			false,
 		)
 
+		// NOTE(calvin): We return a LinkError. HTLC is not in-flight.
 		return linkErr
 	}
 
@@ -601,6 +608,7 @@ func (s *Switch) SendHTLC(firstHop lnwire.ShortChannelID, attemptID uint64,
 			false,
 		)
 
+		// NOTE(calvin): HTLC is not in-flight.
 		return errFeeExposureExceeded
 	}
 
@@ -608,15 +616,18 @@ func (s *Switch) SendHTLC(firstHop lnwire.ShortChannelID, attemptID uint64,
 	actions, err := s.circuits.CommitCircuits(circuit)
 	if err != nil {
 		log.Errorf("unable to commit circuit in switch: %v", err)
+		// NOTE(calvin): HTLC is not in-flight.
 		return err
 	}
 
 	// Drop duplicate packet if it has already been seen.
 	switch {
 	case len(actions.Drops) == 1:
+		// NOTE(calvin): HTLC is not in-flight.
 		return ErrDuplicateAdd
 
 	case len(actions.Fails) == 1:
+		// NOTE(calvin): HTLC is not in-flight.
 		return ErrLocalAddFailed
 	}
 
@@ -624,6 +635,7 @@ func (s *Switch) SendHTLC(firstHop lnwire.ShortChannelID, attemptID uint64,
 	// canceled back if the mailbox timeout elapses.
 	packet.circuit = circuit
 
+	// NOTE(calvin): HTLC is not in-flight if this errors.
 	return link.handleSwitchPacket(packet)
 }
 
@@ -631,15 +643,19 @@ func (s *Switch) SendHTLC(firstHop lnwire.ShortChannelID, attemptID uint64,
 // a form that we can package for delivery to SendOnion rpc clients.
 func TranslateErrorForRPC(err error) (string, string) {
 	switch {
+	// Not likely to be ecnountered on SendHTLC.
 	case errors.Is(err, ErrPaymentIDNotFound):
 		return err.Error(), errorcodes.ErrCodePaymentIDNotFound
 
+	// No retry.
 	case errors.Is(err, ErrUnreadableFailureMessage):
 		return err.Error(), errorcodes.ErrCodeUnreadableFailureMessage
 
+	// Retry safe.
 	case errors.Is(err, ErrSwitchExiting):
 		return err.Error(), errorcodes.ErrCodeSwitchExiting
 
+	// Not sure if retry is safe. Will we even get this on switch.SendHTLC?
 	default:
 		// Handling ClearTextError and ForwardingError
 		var clearTextErr ClearTextError
@@ -749,6 +765,8 @@ func (s *Switch) IsForwardedHTLC(chanID lnwire.ShortChannelID,
 func (s *Switch) ForwardPackets(linkQuit <-chan struct{},
 	packets ...*htlcPacket) error {
 
+	log.Debugf("[ForwardPackets]: routing %d packets", len(packets))
+
 	var (
 		// fwdChan is a buffered channel used to receive err msgs from
 		// the htlcPlex when forwarding this batch.
@@ -762,6 +780,7 @@ func (s *Switch) ForwardPackets(linkQuit <-chan struct{},
 
 	// No packets, nothing to do.
 	if len(packets) == 0 {
+		log.Debug("[ForwardPackets]: no packets to forward")
 		return nil
 	}
 
@@ -845,6 +864,7 @@ func (s *Switch) ForwardPackets(linkQuit <-chan struct{},
 	// Now, forward any packets for circuits that were successfully added to
 	// the switch's circuit map.
 	for _, packet := range addedPackets {
+		log.Debugf("[ForwardPackets]: routing HTLC_ADD packet: %+v", packet)
 		err := s.routeAsync(packet, fwdChan, linkQuit)
 		if err != nil {
 			return fmt.Errorf("failed to forward packet %w", err)
@@ -886,6 +906,7 @@ func (s *Switch) ForwardPackets(linkQuit <-chan struct{},
 		for _, packet := range failedPackets {
 			// We don't handle the error here since this method
 			// always returns an error.
+			log.Debugf("[ForwardPackets]: failing HTLC_ADD packet: %+v", packet)
 			_ = s.failAddPacket(packet, linkError)
 		}
 	}
@@ -933,6 +954,7 @@ func (s *Switch) routeAsync(packet *htlcPacket, errChan chan error,
 
 	select {
 	case s.htlcPlex <- command:
+		log.Debugf("[ForwardPackets]: sent HTLC_ADD packet to control loop")
 		return nil
 	case <-linkQuit:
 		return ErrLinkShuttingDown
@@ -1296,6 +1318,8 @@ func (s *Switch) checkCircularForward(incoming, outgoing lnwire.ShortChannelID,
 // The ciphertext will be derived from the failure message proivded by context.
 // This method returns the failErr if all other steps complete successfully.
 func (s *Switch) failAddPacket(packet *htlcPacket, failure *LinkError) error {
+	log.Debugf("failing HTLC_ADD packet: %+v", packet)
+
 	// Encrypt the failure so that the sender will be able to read the error
 	// message. Since we failed this packet, we use EncryptFirstHop to
 	// obfuscate the failure for their eyes only.
@@ -2923,6 +2947,8 @@ func (s *Switch) AddAliasForLink(chanID lnwire.ChannelID,
 func (s *Switch) handlePacketAdd(packet *htlcPacket,
 	htlc *lnwire.UpdateAddHTLC) error {
 
+	log.Debugf("[handlePacketAdd]: processing HTLC_ADD packet: %+v", packet)
+
 	// Check if the node is set to reject all onward HTLCs and also make
 	// sure that HTLC is not from the source node.
 	if s.cfg.RejectHTLC {
@@ -3168,6 +3194,8 @@ func (s *Switch) handlePacketSettle(packet *htlcPacket) error {
 func (s *Switch) handlePacketFail(packet *htlcPacket,
 	htlc *lnwire.UpdateFailHTLC) error {
 
+	log.Debugf("[handlePacketFail]: processing HTLC_FAIL packet: %+v, htlc=%+v", packet, htlc)
+
 	// If the source of this packet has not been set, use the circuit map
 	// to lookup the origin.
 	circuit, err := s.closeCircuit(packet)
@@ -3183,6 +3211,7 @@ func (s *Switch) handlePacketFail(packet *htlcPacket,
 	//
 	// NOTE: `closeCircuit` modifies the state of `packet`.
 	if packet.incomingChanID == hop.Source {
+		log.Debug("[handlePacketFail]: locally initiated HTLC")
 		// TODO(yy): remove the goroutine and send back the error here.
 		s.wg.Add(1)
 		go s.handleLocalResponse(packet)
@@ -3200,6 +3229,7 @@ func (s *Switch) handlePacketFail(packet *htlcPacket,
 	// In either case, the `Reason` field is populated. Thus there's no
 	// need to proceed and extract the failure reason below.
 	if packet.hasSource {
+		log.Debug("[handlePacketFail]: packet has source: incoming_chan_id=%v", packet.incomingChanID)
 		// Deliver this packet.
 		return s.mailOrchestrator.Deliver(packet.incomingChanID, packet)
 	}
