@@ -1067,6 +1067,12 @@ func (s *Server) SendOnion(_ context.Context,
 	// Send the HTLC to the first hop directly by way of the HTLCSwitch.
 	err = s.cfg.HtlcDispatcher.SendHTLC(chanID, req.AttemptId, htlcAdd)
 	if err != nil {
+		// NOTE(calvin): Certain types of errors may be safe for the
+		// ChannelRouter to retry a payment - namely those where an
+		// HTLC is guaranteed to NOT be in-flight.
+		//
+		// UPDATE: If switch.SendHTLC errors, then there is no HTLC
+		// in-flight!
 		// message, code := s.translateErrorForRPC(err)
 		message, code := htlcswitch.TranslateErrorForRPC(err)
 		return &SendOnionResponse{
@@ -1103,6 +1109,7 @@ func (s *Server) TrackOnion(ctx context.Context,
 		req.SessionKey, req.HopPubkeys,
 	)
 	if err != nil {
+		// NOTE(calvin): HTLC could be in-flight!
 		return nil, status.Errorf(codes.InvalidArgument,
 			"error building decryptor: %v", err)
 	}
@@ -1117,6 +1124,9 @@ func (s *Server) TrackOnion(ctx context.Context,
 		req.AttemptId, lntypes.Hash(req.PaymentHash), errorDecryptor,
 	)
 	if err != nil {
+		// NOTE(calvin): Is an HTLC in-flight? It depends what kind of
+		// error we get. We should consider making the Switch's error
+		// types more capable of helping us make this distinction.
 		return nil, status.Errorf(codes.Internal,
 			"failed locate payment attempt: %v", err)
 	}
@@ -1133,6 +1143,8 @@ func (s *Server) TrackOnion(ctx context.Context,
 		if !ok {
 			// NOTE(calvin): Can RPC clients see this error type or
 			// will they need to string match?
+			//
+			// NOTE(calvin): Switch shutting down. HTLC is in-flight!
 			return nil, status.Errorf(codes.Internal,
 				"failed locate payment attempt: %v",
 				htlcswitch.ErrSwitchExiting)
@@ -1152,6 +1164,8 @@ func (s *Server) TrackOnion(ctx context.Context,
 		// include a code.
 		message, _ := htlcswitch.TranslateErrorForRPC(result.Error)
 
+		// NOTE: If we have an error result, then the HTLC is not
+		// in-flight?
 		return &TrackOnionResponse{
 			Success:      false,
 			ErrorMessage: message,
@@ -1167,6 +1181,9 @@ func (s *Server) TrackOnion(ctx context.Context,
 		// NOTE(calvin): gRPC will not return a response object if the
 		// error is non-nil. So if we want to return the encrypted
 		// error blob to the caller, then we need to return a nil error.
+		//
+		// UPDATE: If we have an encrypted error result, then the HTLC
+		// is not in-flight?
 		return &TrackOnionResponse{
 			Success:        false,
 			EncryptedError: result.EncryptedError,
