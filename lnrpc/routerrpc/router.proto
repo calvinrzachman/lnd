@@ -596,9 +596,13 @@ message TrackOnionResponse {
     // error.
     string error_message = 3;
 
+    // A code representing the type of error that occurred. This can be used
+    // to programmatically distinguish between different kinds of errors.
+    string error_code = 4;
+
     // If the caller provides no means to decrypt the error then we'll defer
     // error decryption on the server and return the encrypted error blob.
-    bytes encrypted_error = 4;
+    bytes encrypted_error = 5;
 }
 
 message ResetMissionControlRequest {
