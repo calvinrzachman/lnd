@@ -2124,6 +2124,10 @@
           "type": "string",
           "description": "In case of failure, this field will provide more information about the\nerror."
         },
+        "error_code": {
+          "type": "string",
+          "description": "A code representing the type of error that occurred. This can be used\nto programmatically distinguish between different kinds of errors."
+        },
         "encrypted_error": {
           "type": "string",
           "format": "byte",
