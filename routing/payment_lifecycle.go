@@ -287,6 +287,9 @@ lifecycle:
 
 		// Now that the shard was successfully sent, launch a go
 		// routine that will handle its result when its back.
+		//
+		// NOTE(calvin): If SendHTLC does not error then we'll launch
+		// the routine that will wait on the result.
 		if result.err == nil {
 			p.resultCollector(attempt)
 		}
@@ -547,7 +550,7 @@ func (p *paymentLifecycle) collectResult(attempt *channeldb.HTLCAttempt) (
 	// tower and return.
 	if result.Error != nil {
 		fmt.Printf("Got error result for attemptID %d "+
-			"from switch: %v\n", attempt.AttemptID, err)
+			"from switch: %v\n", attempt.AttemptID, result.Error)
 		return p.handleSwitchErr(attempt, result.Error)
 	}
 
@@ -604,6 +607,9 @@ func (p *paymentLifecycle) registerAttempt(rt *route.Route,
 	if err != nil {
 		return nil, err
 	}
+
+	log.Debugf("Registering HTLC attempt with id=%d, source_pubkey=%v",
+		attempt.AttemptID, rt.SourcePubKey)
 
 	// Before sending this HTLC to the switch, we checkpoint the fresh
 	// paymentID and route to the DB. This lets us know on startup the ID

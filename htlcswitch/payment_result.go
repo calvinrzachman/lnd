@@ -269,6 +269,7 @@ func (store *networkResultStore) cleanStore(keep map[uint64]struct{}) error {
 			networkResultStoreBucketKey,
 		)
 		if err != nil {
+			log.Info("Unable to create top level results store bucket")
 			return err
 		}
 

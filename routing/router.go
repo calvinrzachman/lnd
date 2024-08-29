@@ -1406,7 +1406,7 @@ func (r *ChannelRouter) resumePayments() error {
 	if err != nil {
 		return err
 	}
-	log.Debugf("We have %d in flight payment: %+v", len(payments))
+	log.Debugf("We have %d in flight paymens", len(payments))
 
 	// Before we restart existing payments and start accepting more
 	// payments to be made, we clean the network result store of the
