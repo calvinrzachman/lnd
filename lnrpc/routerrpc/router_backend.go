@@ -584,6 +584,7 @@ func (r *RouterBackend) MarshallRoute(route *route.Route) (*lnrpc.Route, error) 
 		TotalAmt:      int64(route.TotalAmount.ToSatoshis()),
 		TotalAmtMsat:  int64(route.TotalAmount),
 		Hops:          make([]*lnrpc.Hop, len(route.Hops)),
+		SourcePubKey:  route.SourcePubKey.String(),
 	}
 	incomingAmt := route.TotalAmount
 	for i, hop := range route.Hops {
@@ -746,6 +747,20 @@ func (r *RouterBackend) UnmarshallHop(rpcHop *lnrpc.Hop,
 func (r *RouterBackend) UnmarshallRoute(rpcroute *lnrpc.Route) (
 	*route.Route, error) {
 
+	var sourcePubKey route.Vertex
+	var err error
+
+	// If SourcePubKey is provided, use it, otherwise default to SelfNode.
+	if rpcroute.SourcePubKey != "" {
+		sourcePubKey, err = route.NewVertexFromStr(rpcroute.SourcePubKey)
+		if err != nil {
+			return nil, fmt.Errorf("invalid source pubkey: %v", err)
+		}
+	} else {
+		sourcePubKey = r.SelfNode
+	}
+
+	// prevNodePubKey := sourcePubKey
 	prevNodePubKey := r.SelfNode
 
 	hops := make([]*route.Hop, len(rpcroute.Hops))
@@ -756,14 +771,13 @@ func (r *RouterBackend) UnmarshallRoute(rpcroute *lnrpc.Route) (
 		}
 
 		hops[i] = routeHop
-
 		prevNodePubKey = routeHop.PubKeyBytes
 	}
 
 	route, err := route.NewRouteFromHops(
 		lnwire.MilliSatoshi(rpcroute.TotalAmtMsat),
 		rpcroute.TotalTimeLock,
-		r.SelfNode,
+		sourcePubKey,
 		hops,
 	)
 	if err != nil {

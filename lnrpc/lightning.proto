@@ -3293,6 +3293,12 @@ message Route {
     The total amount in millisatoshis.
     */
     int64 total_amt_msat = 6;
+
+    /*
+    The source node from whose perspective the route was built. If empty,
+    self is assumed.
+    */
+    string source_pub_key = 7;
 }
 
 message NodeInfoRequest {
