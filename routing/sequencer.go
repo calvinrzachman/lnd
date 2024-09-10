@@ -1,4 +1,4 @@
-package htlcswitch
+package routing
 
 import (
 	"sync"
@@ -6,6 +6,7 @@ import (
 	"github.com/go-errors/errors"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/kvdb"
+	"github.com/lightningnetwork/lnd/routing/route"
 )
 
 // defaultSequenceBatchSize specifies the window of sequence numbers that are
@@ -17,7 +18,7 @@ const defaultSequenceBatchSize = 1000
 // unique in order to avoid circuit key collision in the circuit map.
 type Sequencer interface {
 	// NextID returns a unique sequence number for each invocation.
-	NextID() (uint64, error)
+	NextID(route route.Route) (uint64, error)
 }
 
 var (
@@ -59,7 +60,7 @@ func NewPersistentSequencer(db *channeldb.DB) (Sequencer, error) {
 
 // NextID returns a unique sequence number for every invocation, persisting the
 // assignment to avoid reuse.
-func (s *persistentSequencer) NextID() (uint64, error) {
+func (s *persistentSequencer) NextID(_ route.Route) (uint64, error) {
 
 	// nextID will be the unique sequence number returned if no errors are
 	// encountered.

@@ -156,7 +156,7 @@ func createTestCtxFromGraphInstanceAssumeValid(t *testing.T,
 		MissionControl: mc,
 		SessionSource:  sessionSource,
 		GetLink:        graphInstance.getLink,
-		NextPaymentID: func() (uint64, error) {
+		NextPaymentID: func(route.Route) (uint64, error) {
 			next := atomic.AddUint64(&uniquePaymentID, 1)
 			return next, nil
 		},
@@ -2170,7 +2170,7 @@ func TestSendToRouteSkipTempErrSuccess(t *testing.T) {
 		Payer:          payer,
 		MissionControl: missionControl,
 		Clock:          clock.NewTestClock(time.Unix(1, 0)),
-		NextPaymentID: func() (uint64, error) {
+		NextPaymentID: func(route.Route) (uint64, error) {
 			return 0, nil
 		},
 		ClosedSCIDs: mockClosedSCIDs,
@@ -2254,7 +2254,7 @@ func TestSendToRouteSkipTempErrNonMPP(t *testing.T) {
 		Payer:          payer,
 		MissionControl: missionControl,
 		Clock:          clock.NewTestClock(time.Unix(1, 0)),
-		NextPaymentID: func() (uint64, error) {
+		NextPaymentID: func(route.Route) (uint64, error) {
 			return 0, nil
 		},
 		ClosedSCIDs: mockClosedSCIDs,
@@ -2309,7 +2309,7 @@ func TestSendToRouteSkipTempErrTempFailure(t *testing.T) {
 		Payer:          payer,
 		MissionControl: missionControl,
 		Clock:          clock.NewTestClock(time.Unix(1, 0)),
-		NextPaymentID: func() (uint64, error) {
+		NextPaymentID: func(route.Route) (uint64, error) {
 			return 0, nil
 		},
 		ClosedSCIDs: mockClosedSCIDs,
@@ -2392,7 +2392,7 @@ func TestSendToRouteSkipTempErrPermanentFailure(t *testing.T) {
 		Payer:          payer,
 		MissionControl: missionControl,
 		Clock:          clock.NewTestClock(time.Unix(1, 0)),
-		NextPaymentID: func() (uint64, error) {
+		NextPaymentID: func(route.Route) (uint64, error) {
 			return 0, nil
 		},
 		ClosedSCIDs: mockClosedSCIDs,
@@ -2479,7 +2479,7 @@ func TestSendToRouteTempFailure(t *testing.T) {
 		Payer:          payer,
 		MissionControl: missionControl,
 		Clock:          clock.NewTestClock(time.Unix(1, 0)),
-		NextPaymentID: func() (uint64, error) {
+		NextPaymentID: func(route.Route) (uint64, error) {
 			return 0, nil
 		},
 		ClosedSCIDs: mockClosedSCIDs,

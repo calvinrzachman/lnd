@@ -919,7 +919,7 @@ func TestResumePaymentFailOnRegisterAttemptErr(t *testing.T) {
 	//
 	// Mock NextPaymentID to always return the attemptID.
 	attemptID := uint64(1)
-	p.router.cfg.NextPaymentID = func() (uint64, error) {
+	p.router.cfg.NextPaymentID = func(route.Route) (uint64, error) {
 		return attemptID, nil
 	}
 
@@ -978,7 +978,7 @@ func TestResumePaymentFailOnSendAttemptErr(t *testing.T) {
 	//
 	// Mock NextPaymentID to always return the attemptID.
 	attemptID := uint64(1)
-	p.router.cfg.NextPaymentID = func() (uint64, error) {
+	p.router.cfg.NextPaymentID = func(route.Route) (uint64, error) {
 		return attemptID, nil
 	}
 
@@ -1070,7 +1070,7 @@ func TestResumePaymentSuccess(t *testing.T) {
 	//
 	// Mock NextPaymentID to always return the attemptID.
 	attemptID := uint64(1)
-	p.router.cfg.NextPaymentID = func() (uint64, error) {
+	p.router.cfg.NextPaymentID = func(route.Route) (uint64, error) {
 		return attemptID, nil
 	}
 
@@ -1176,7 +1176,7 @@ func TestResumePaymentSuccessWithTwoAttempts(t *testing.T) {
 	// Mock NextPaymentID to return the first attemptID on the first call
 	// and the second attemptID on the second call.
 	var numAttempts atomic.Uint64
-	p.router.cfg.NextPaymentID = func() (uint64, error) {
+	p.router.cfg.NextPaymentID = func(route.Route) (uint64, error) {
 		numAttempts.Add(1)
 		if numAttempts.Load() == 1 {
 			return attemptID1, nil
