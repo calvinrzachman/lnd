@@ -800,7 +800,7 @@ func (cm *circuitMap) CommitCircuits(circuits ...*PaymentCircuit) (
 		inKeys = append(inKeys, circuit.Incoming)
 	}
 
-	log.Tracef("Committing fresh circuits: %v", lnutils.SpewLogClosure(
+	log.Debugf("Committing fresh circuits: %v", lnutils.SpewLogClosure(
 		inKeys))
 
 	actions := &CircuitFwdActions{}
@@ -830,6 +830,10 @@ func (cm *circuitMap) CommitCircuits(circuits ...*PaymentCircuit) (
 			// response from the remote peer on the outgoing link.
 			// Drop it like it's hot, ensure duplicates get caught.
 			case foundCircuit.HasKeystone():
+				log.Debugf("We're already waiting for response "+
+					"from remote peer for in_key=%v",
+					lnutils.SpewLogClosure(inKey))
+
 				drops = append(drops, circuit)
 
 			// If no keystone is set and the switch has not been
@@ -854,6 +858,9 @@ func (cm *circuitMap) CommitCircuits(circuits ...*PaymentCircuit) (
 
 			continue
 		}
+
+		log.Debugf("Adding in-key: %v to pending map",
+			lnutils.SpewLogClosure(inKey))
 
 		cm.pending[inKey] = circuit
 		adds = append(adds, circuit)
