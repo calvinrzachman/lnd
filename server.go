@@ -906,7 +906,7 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 
 	// The router will get access to the payment ID sequencer, such that it
 	// can generate unique payment IDs.
-	sequencer, err := htlcswitch.NewPersistentSequencer(dbs.ChanStateDB)
+	sequencer, err := routing.NewPersistentSequencer(dbs.ChanStateDB)
 	if err != nil {
 		return nil, err
 	}

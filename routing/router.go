@@ -290,7 +290,7 @@ type Config struct {
 	// each time it is called. This is used by the router to generate a
 	// unique payment ID for each payment it attempts to send, such that
 	// the switch can properly handle the HTLC.
-	NextPaymentID func() (uint64, error)
+	NextPaymentID func(route.Route) (uint64, error)
 
 	// PathFindingConfig defines global path finding parameters.
 	PathFindingConfig PathFindingConfig
