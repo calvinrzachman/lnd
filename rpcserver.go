@@ -757,6 +757,7 @@ func (r *rpcServer) addDeps(s *server, macService *macaroons.Service,
 	err = subServerCgs.PopulateDependencies(
 		r.cfg, s.cc, r.cfg.networkDir, macService, atpl, invoiceRegistry,
 		s.htlcSwitch, r.cfg.ActiveNetParams.Params, s.chanRouter,
+		s.controlTower,
 		routerBackend, s.nodeSigner, s.graphDB, s.chanStateDB,
 		s.sweeper, tower, s.towerClientMgr, r.cfg.net.ResolveTCPAddr,
 		genInvoiceFeatures, genAmpInvoiceFeatures,
@@ -6246,6 +6247,7 @@ func extractInboundFeeSafe(data lnwire.ExtraOpaqueData) lnwire.Fee {
 	return inboundFee
 }
 
+// TODO(calvin): Export this for use in DescribeGraph RPC in payment service.
 func marshalDBEdge(edgeInfo *models.ChannelEdgeInfo,
 	c1, c2 *models.ChannelEdgePolicy) *lnrpc.ChannelEdge {
 
@@ -6487,6 +6489,7 @@ func (r *rpcServer) GetNodeInfo(ctx context.Context,
 	}, nil
 }
 
+// TODO(calvin): Export?
 func marshalNode(node *channeldb.LightningNode) *lnrpc.LightningNode {
 	nodeAddrs := make([]*lnrpc.NodeAddress, len(node.Addresses))
 	for i, addr := range node.Addresses {

@@ -805,3 +805,36 @@ func (p *PaymentControl) FetchInFlightPayments() ([]*MPPayment, error) {
 
 	return inFlights, nil
 }
+
+// FetchPayments returns all payments. DANGER?
+func (p *PaymentControl) FetchPayments() ([]*MPPayment, error) {
+	var pmts []*MPPayment
+	err := kvdb.View(p.db, func(tx kvdb.RTx) error {
+		payments := tx.ReadBucket(paymentsRootBucket)
+		if payments == nil {
+			return nil
+		}
+
+		return payments.ForEach(func(k, _ []byte) error {
+			bucket := payments.NestedReadBucket(k)
+			if bucket == nil {
+				return fmt.Errorf("non bucket element")
+			}
+
+			p, err := fetchPayment(bucket)
+			if err != nil {
+				return err
+			}
+
+			pmts = append(pmts, p)
+			return nil
+		})
+	}, func() {
+		pmts = nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return pmts, nil
+}

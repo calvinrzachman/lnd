@@ -1033,6 +1033,47 @@ func (s *Server) SendOnion(_ context.Context,
 	log.Debugf("Dispatching SendOnion for HTLC hash %x via %s",
 		htlcAdd.PaymentHash, chanID)
 
+	// Record this payment hash with the ControlTower, ensuring it is not
+	// already in-flight.
+	info := &channeldb.PaymentCreationInfo{
+		PaymentIdentifier: hash,
+		Value:             lnwire.MilliSatoshi(req.Amount),
+		CreationTime:      time.Now(),
+	}
+	err = s.cfg.ControlTower.InitPayment(hash, info)
+	if err != nil {
+		return nil, status.Errorf(codes.AlreadyExists,
+			"unable to init payment for hash=%x: %v", hash, err)
+	}
+
+	// Before sending this HTLC to the switch, we checkpoint the fresh
+	// paymentID and route to the DB. This lets us know on startup the ID
+	// of the payment that we attempted to send, such that we can query the
+	// Switch for its whereabouts. The route is needed to handle the result
+	// when it eventually comes back.
+	attemptInfo := &channeldb.HTLCAttemptInfo{
+		Hash:        &hash,
+		AttemptID:   req.AttemptId,
+		AttemptTime: time.Now(),
+		Route: route.Route{
+			SourcePubKey:  route.NewVertex(firstHop),
+			TotalAmount:   lnwire.MilliSatoshi(req.Amount),
+			TotalTimeLock: req.Timelock,
+			Hops: []*route.Hop{
+				{
+					AmtToForward: lnwire.MilliSatoshi(
+						req.Amount,
+					),
+				},
+			},
+		},
+	}
+	err = s.cfg.ControlTower.RegisterAttempt(hash, attemptInfo)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal,
+			"unable to register attempt for hash=%x: %v", hash, err)
+	}
+
 	// Send the HTLC to the first hop directly by way of the HTLCSwitch.
 	err = s.cfg.HtlcDispatcher.SendHTLC(chanID, req.AttemptId, htlcAdd)
 	if err != nil {

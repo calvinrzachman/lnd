@@ -1403,6 +1403,7 @@ func (r *ChannelRouter) BuildRoute(amt fn.Option[lnwire.MilliSatoshi],
 func (r *ChannelRouter) resumePayments() error {
 	// Get all payments that are inflight.
 	payments, err := r.cfg.Control.FetchInFlightPayments()
+	// payments, err := r.cfg.Control.FetchPayments()
 	if err != nil {
 		return err
 	}

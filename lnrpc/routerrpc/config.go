@@ -51,6 +51,7 @@ type Config struct {
 	// main rpc server.
 	// HtlcSwitch     *htlcswitch.Switch
 	HtlcDispatcher routing.PaymentAttemptDispatcher
+	ControlTower   routing.ControlTower
 
 	ChannelInfoAccessor ChannelInfoAccessor
 }

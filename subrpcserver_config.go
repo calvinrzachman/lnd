@@ -107,6 +107,7 @@ func (s *subRPCServerConfigs) PopulateDependencies(cfg *Config,
 	htlcSwitch *htlcswitch.Switch,
 	activeNetParams *chaincfg.Params,
 	chanRouter *routing.ChannelRouter,
+	controlTower routing.ControlTower,
 	routerBackend *routerrpc.RouterBackend,
 	nodeSigner *netann.NodeSigner,
 	graphDB *channeldb.ChannelGraph,
@@ -344,6 +345,7 @@ func (s *subRPCServerConfigs) PopulateDependencies(cfg *Config,
 	s.RouterRPC.Router = chanRouter
 	s.RouterRPC.RouterBackend = routerBackend
 	s.RouterRPC.HtlcDispatcher = htlcSwitch
+	s.RouterRPC.ControlTower = controlTower
 	s.RouterRPC.ChannelInfoAccessor = htlcSwitch
 
 	return nil

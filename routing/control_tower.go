@@ -89,6 +89,8 @@ type ControlTower interface {
 	// FetchInFlightPayments returns all payments with status InFlight.
 	FetchInFlightPayments() ([]*channeldb.MPPayment, error)
 
+	// FetchPayments() ([]*channeldb.MPPayment, error)
+
 	// SubscribePayment subscribes to updates for the payment with the given
 	// hash. A first update with the current state of the payment is always
 	// sent out immediately.
