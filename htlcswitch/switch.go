@@ -536,6 +536,14 @@ func (s *Switch) CleanStore(keepPids map[uint64]struct{}) error {
 	return s.networkResults.cleanStore(keepPids)
 }
 
+// MarkResultTracked marks the given payment attempt result as tracked so that
+// it can be cleaned from the result store. This allows for synchronization of
+// state deletion between the creator of the attempt (router) and HTLC forwarder
+// to prevent state from being cleaned up prematurely.
+func (s *Switch) MarkResultTracked(attemptID uint64) error {
+	return s.networkResults.markResultTracked(attemptID)
+}
+
 // SendHTLC is used by other subsystems which aren't belong to htlc switch
 // package in order to send the htlc update. The attemptID used MUST be unique
 // for this HTLC, and MUST be used only once, otherwise the switch might reject
@@ -949,6 +957,9 @@ func (s *Switch) handleLocalResponse(pkt *htlcPacket) {
 		msg:          pkt.htlc,
 		unencrypted:  unencrypted,
 		isResolution: pkt.isResolution,
+		// NOTE(calvin): The network results for all local payments
+		// will be persisted until explicitly marked for safe deletion.
+		remoteTracked: true,
 	}
 
 	// Store the result to the db. This will also notify subscribers about
