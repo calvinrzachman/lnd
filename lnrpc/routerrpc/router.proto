@@ -91,6 +91,11 @@ service Router {
     */
     rpc TrackOnion (TrackOnionRequest) returns (TrackOnionResponse);
 
+    // MarkPaymentTracked marks a payment attempt as tracked so that internal
+    // state may be cleaned.
+    rpc MarkPaymentTracked (MarkPaymentTrackedRequest)
+        returns (MarkPaymentTrackedResponse);
+
     /*
     BuildOnion attempts to build an onion packet for the specified route.
     */
@@ -566,6 +571,23 @@ message TrackOnionResponse {
     // If the caller provides no means to decrypt the error then we'll defer
     // error decryption on the server and return the encrypted error blob.
     bytes encrypted_error = 5;
+}
+
+// MarkPaymentTrackedRequest is the request message for marking a payment
+// attempt as tracked on a specific lnd backend.
+message MarkPaymentTrackedRequest {
+    // payment_hash is the hash of the payment to be marked as tracked.
+    bytes payment_hash = 1;
+
+    // attempt_id is the unique ID of the HTLC attempt to mark as tracked.
+    uint64 attempt_id = 2;
+}
+
+// MarkPaymentTrackedResponse is the response message for marking a payment
+// attempt as tracked.
+message MarkPaymentTrackedResponse {
+    // success indicates whether marking the payment as tracked succeeded.
+    bool success = 1;
 }
 
 message ResetMissionControlRequest {

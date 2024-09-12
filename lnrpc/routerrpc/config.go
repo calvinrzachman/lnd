@@ -50,7 +50,8 @@ type Config struct {
 	// HTLCSwitch contains shared logic between this sub server and the
 	// main rpc server.
 	// HtlcSwitch     *htlcswitch.Switch
-	HtlcDispatcher routing.PaymentAttemptDispatcher
+	// HtlcDispatcher routing.PaymentAttemptDispatcher
+	HtlcDispatcher routing.RemotePaymentDispatcher
 
 	ChannelInfoAccessor ChannelInfoAccessor
 }

@@ -1496,6 +1496,16 @@
         }
       }
     },
+    "routerrpcMarkPaymentTrackedResponse": {
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean",
+          "description": "success indicates whether marking the payment as tracked succeeded."
+        }
+      },
+      "description": "MarkPaymentTrackedResponse is the response message for marking a payment\nattempt as tracked."
+    },
     "routerrpcMissionControlConfig": {
       "type": "object",
       "properties": {

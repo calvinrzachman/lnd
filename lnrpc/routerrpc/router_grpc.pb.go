@@ -60,6 +60,9 @@ type RouterClient interface {
 	// TrackOnion allows callers to query whether or not a payment dispatched via
 	// SendOnion succeeded or failed.
 	TrackOnion(ctx context.Context, in *TrackOnionRequest, opts ...grpc.CallOption) (*TrackOnionResponse, error)
+	// MarkPaymentTracked marks a payment attempt as tracked so that internal
+	// state may be cleaned.
+	MarkPaymentTracked(ctx context.Context, in *MarkPaymentTrackedRequest, opts ...grpc.CallOption) (*MarkPaymentTrackedResponse, error)
 	// BuildOnion attempts to build an onion packet for the specified route.
 	BuildOnion(ctx context.Context, in *BuildOnionRequest, opts ...grpc.CallOption) (*BuildOnionResponse, error)
 	// lncli: `resetmc`
@@ -271,6 +274,15 @@ func (c *routerClient) SendOnion(ctx context.Context, in *SendOnionRequest, opts
 func (c *routerClient) TrackOnion(ctx context.Context, in *TrackOnionRequest, opts ...grpc.CallOption) (*TrackOnionResponse, error) {
 	out := new(TrackOnionResponse)
 	err := c.cc.Invoke(ctx, "/routerrpc.Router/TrackOnion", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *routerClient) MarkPaymentTracked(ctx context.Context, in *MarkPaymentTrackedRequest, opts ...grpc.CallOption) (*MarkPaymentTrackedResponse, error) {
+	out := new(MarkPaymentTrackedResponse)
+	err := c.cc.Invoke(ctx, "/routerrpc.Router/MarkPaymentTracked", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -532,6 +544,9 @@ type RouterServer interface {
 	// TrackOnion allows callers to query whether or not a payment dispatched via
 	// SendOnion succeeded or failed.
 	TrackOnion(context.Context, *TrackOnionRequest) (*TrackOnionResponse, error)
+	// MarkPaymentTracked marks a payment attempt as tracked so that internal
+	// state may be cleaned.
+	MarkPaymentTracked(context.Context, *MarkPaymentTrackedRequest) (*MarkPaymentTrackedResponse, error)
 	// BuildOnion attempts to build an onion packet for the specified route.
 	BuildOnion(context.Context, *BuildOnionRequest) (*BuildOnionResponse, error)
 	// lncli: `resetmc`
@@ -627,6 +642,9 @@ func (UnimplementedRouterServer) SendOnion(context.Context, *SendOnionRequest) (
 }
 func (UnimplementedRouterServer) TrackOnion(context.Context, *TrackOnionRequest) (*TrackOnionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method TrackOnion not implemented")
+}
+func (UnimplementedRouterServer) MarkPaymentTracked(context.Context, *MarkPaymentTrackedRequest) (*MarkPaymentTrackedResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method MarkPaymentTracked not implemented")
 }
 func (UnimplementedRouterServer) BuildOnion(context.Context, *BuildOnionRequest) (*BuildOnionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method BuildOnion not implemented")
@@ -829,6 +847,24 @@ func _Router_TrackOnion_Handler(srv interface{}, ctx context.Context, dec func(i
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RouterServer).TrackOnion(ctx, req.(*TrackOnionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Router_MarkPaymentTracked_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MarkPaymentTrackedRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RouterServer).MarkPaymentTracked(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/routerrpc.Router/MarkPaymentTracked",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RouterServer).MarkPaymentTracked(ctx, req.(*MarkPaymentTrackedRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1110,6 +1146,10 @@ var Router_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "TrackOnion",
 			Handler:    _Router_TrackOnion_Handler,
+		},
+		{
+			MethodName: "MarkPaymentTracked",
+			Handler:    _Router_MarkPaymentTracked_Handler,
 		},
 		{
 			MethodName: "BuildOnion",
