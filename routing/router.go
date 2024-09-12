@@ -147,6 +147,19 @@ type PaymentAttemptDispatcher interface {
 	HasAttemptResult(attemptID uint64) (bool, error)
 }
 
+// RemotePaymentDispatcher extends the PaymentAttemptDispatcher by adding
+// the ability to mark payments as tracked with the remote entity doing
+// the HTLC dispatching.
+type RemotePaymentDispatcher interface {
+	PaymentAttemptDispatcher
+
+	// MarkResultTracked marks the given payment attempt as tracked
+	// so that it can be cleaned from the store. This synchronizes state
+	// deletion between router and HTLC forwarder to prevent state from
+	// being cleaned up prematurely.
+	MarkResultTracked(attemptID uint64) error
+}
+
 // PaymentSessionSource is an interface that defines a source for the router to
 // retrieve new payment sessions.
 type PaymentSessionSource interface {

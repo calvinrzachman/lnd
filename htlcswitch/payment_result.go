@@ -62,6 +62,10 @@ type networkResult struct {
 	// isResolution indicates whether this is a resolution message, in
 	// which the failure reason might not be included.
 	isResolution bool
+
+	// proxyTracked indicates that this result should *not* be cleaned
+	// until marked appropriate to do so.
+	proxyTracked bool
 }
 
 // serializeNetworkResult serializes the networkResult.
@@ -281,6 +285,17 @@ func (store *networkResultStore) cleanStore(keep map[uint64]struct{}) error {
 			log.Infof("Considering removal of result for attempt "+
 				"ID: %d from network result store", pid)
 
+			result, err := fetchResult(tx, pid)
+			if err != nil {
+				return err
+			}
+
+			// If the result is proxy-tracked, we skip cleaning it.
+			if result.proxyTracked {
+				log.Infof("Skipping proxy-tracked result for attempt ID: %d", pid)
+				return nil
+			}
+
 			if _, ok := keep[pid]; ok {
 				log.Infof("Keeping result for attempt "+
 					"ID: %d", pid)
@@ -309,5 +324,27 @@ func (store *networkResultStore) cleanStore(keep map[uint64]struct{}) error {
 		}
 
 		return nil
+	}, func() {})
+}
+
+// markResultAsTracked would clear the proxy tracking flag on a network result.
+func (store *networkResultStore) markResultTracked(attemptID uint64) error {
+	return kvdb.Update(store.backend, func(tx kvdb.RwTx) error {
+		result, err := fetchResult(tx, attemptID)
+		if err != nil {
+			return err
+		}
+
+		result.proxyTracked = false // Clear proxy tracking
+		var b bytes.Buffer
+		if err := serializeNetworkResult(&b, result); err != nil {
+			return err
+		}
+
+		var attemptIDBytes [8]byte
+		binary.BigEndian.PutUint64(attemptIDBytes[:], attemptID)
+
+		networkResults := tx.ReadWriteBucket(networkResultStoreBucketKey)
+		return networkResults.Put(attemptIDBytes[:], b.Bytes())
 	}, func() {})
 }
