@@ -1239,6 +1239,34 @@ func reconstructCircuit(sessionKey *btcec.PrivateKey,
 	}
 }
 
+// MarkPaymentTracked marks a payment attempt as tracked to avoid premature
+// deletion by the CleanStore process.
+func (s *Server) MarkPaymentTracked(ctx context.Context,
+	req *MarkPaymentTrackedRequest) (*MarkPaymentTrackedResponse, error) {
+
+	log.Infof("Marking payment attempt with payment_hash=%x and attempt_id=%d as tracked",
+		req.PaymentHash, req.AttemptId)
+
+	// Convert the payment hash from the request.
+	var hash lntypes.Hash
+	copy(hash[:], req.PaymentHash)
+
+	// Call the ChannelRouter or HTLCSwitch logic to mark the attempt as tracked.
+	err := s.cfg.HtlcDispatcher.MarkResultTracked(req.AttemptId)
+	if err != nil {
+		log.Errorf("Failed to mark payment as tracked: %v", err)
+		return nil, status.Errorf(
+			codes.Internal,
+			"failed to mark payment as tracked: %v", err,
+		)
+	}
+
+	// Return a success response.
+	return &MarkPaymentTrackedResponse{
+		Success: true,
+	}, nil
+}
+
 // ChannelInfoAccessor defines an interface for accessing channel information
 // necessary for routing payments, specifically methods for fetching links by
 // public key.
