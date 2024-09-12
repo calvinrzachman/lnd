@@ -805,3 +805,42 @@ func (p *PaymentControl) FetchInFlightPayments() ([]*MPPayment, error) {
 
 	return inFlights, nil
 }
+
+// FetchCompletedPayments returns all payments that are in a terminal state
+// (succeeded or failed).
+func (p *PaymentControl) FetchCompletedPayments() ([]*MPPayment, error) {
+	var completed []*MPPayment
+	err := kvdb.View(p.db, func(tx kvdb.RTx) error {
+		payments := tx.ReadBucket(paymentsRootBucket)
+		if payments == nil {
+			return nil
+		}
+
+		return payments.ForEach(func(k, _ []byte) error {
+			bucket := payments.NestedReadBucket(k)
+			if bucket == nil {
+				return fmt.Errorf("non bucket element")
+			}
+
+			p, err := fetchPayment(bucket)
+			if err != nil {
+				return err
+			}
+
+			// Only include payments that are in a terminal state.
+			if !p.Terminated() {
+				return nil
+			}
+
+			completed = append(completed, p)
+			return nil
+		})
+	}, func() {
+		completed = nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return completed, nil
+}
