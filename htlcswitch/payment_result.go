@@ -70,7 +70,9 @@ type networkResult struct {
 
 // serializeNetworkResult serializes the networkResult.
 func serializeNetworkResult(w io.Writer, n *networkResult) error {
-	return channeldb.WriteElements(w, n.msg, n.unencrypted, n.isResolution)
+	return channeldb.WriteElements(w,
+		n.msg, n.unencrypted, n.isResolution, n.proxyTracked,
+	)
 }
 
 // deserializeNetworkResult deserializes the networkResult.
@@ -78,7 +80,7 @@ func deserializeNetworkResult(r io.Reader) (*networkResult, error) {
 	n := &networkResult{}
 
 	if err := channeldb.ReadElements(r,
-		&n.msg, &n.unencrypted, &n.isResolution,
+		&n.msg, &n.unencrypted, &n.isResolution, &n.proxyTracked,
 	); err != nil {
 		return nil, err
 	}

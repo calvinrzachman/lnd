@@ -1049,6 +1049,9 @@ func (s *Switch) handleLocalResponse(pkt *htlcPacket) {
 		msg:          pkt.htlc,
 		unencrypted:  unencrypted,
 		isResolution: pkt.isResolution,
+		// NOTE(calvin): All network results will be persisted until
+		// explicitly marked for safe deletion.
+		proxyTracked: true,
 	}
 
 	// Store the result to the db. This will also notify subscribers about
