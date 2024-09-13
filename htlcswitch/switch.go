@@ -548,6 +548,10 @@ func (s *Switch) MarkResultTracked(attemptID uint64) error {
 	return s.networkResults.markResultTracked(attemptID)
 }
 
+func (s *Switch) FetchAttemptResults() (map[uint64]*networkResult, error) {
+	return s.networkResults.fetchAttemptResults()
+}
+
 // SendHTLC is used by other subsystems which aren't belong to htlc switch
 // package in order to send the htlc update. The attemptID used MUST be unique
 // for this HTLC, and MUST be used only once, otherwise the switch might reject
