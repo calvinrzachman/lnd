@@ -341,3 +341,43 @@ func (store *networkResultStore) markResultTracked(attemptID uint64) error {
 		return networkResults.Put(attemptIDBytes[:], b.Bytes())
 	}, func() {})
 }
+
+// fetchAttemptResults returns the list of all attempt IDs currently
+// stored in the networkResultStore along with their basic details.
+func (store *networkResultStore) fetchAttemptResults() (map[uint64]*networkResult, error) {
+	results := make(map[uint64]*networkResult)
+
+	// Perform a read-only transaction on the database.
+	err := kvdb.View(store.backend, func(tx kvdb.RTx) error {
+		networkResults := tx.ReadBucket(networkResultStoreBucketKey)
+		if networkResults == nil {
+			// No results found, return an empty map.
+			return nil
+		}
+
+		// Iterate over all results stored in the network result store.
+		return networkResults.ForEach(func(k, v []byte) error {
+			// Decode the attempt ID from the key.
+			attemptID := binary.BigEndian.Uint64(k)
+
+			// Deserialize the network result.
+			r := bytes.NewReader(v)
+			result, err := deserializeNetworkResult(r)
+			if err != nil {
+				return err
+			}
+
+			// Store the result in the results map.
+			results[attemptID] = result
+			return nil
+		})
+	}, func() {
+		results = nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return results, nil
+}
