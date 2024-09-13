@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package switchrpc;
+
+// import "lightning.proto";
+
+option go_package = "github.com/lightningnetwork/lnd/lnrpc/switchrpc";
+
+message MarkResultTrackedRequest {
+    uint64 attempt_id = 1;  // The attempt ID to be marked as tracked.
+}
+
+message MarkResultTrackedResponse {
+    bool success = 1;  // Whether the operation succeeded.
+}
+
+message FetchAttemptResultsRequest {
+}
+
+message FetchAttemptResultsResponse {
+    message AttemptResult {
+        uint64 attempt_id = 1;
+        string result_details = 2;  // Simplified result details.
+    }
+
+    repeated AttemptResult attempt_results = 1;
+}
+
+service Switch {
+    // Marks the result for the given attempt ID as tracked.
+    rpc MarkResultTracked (MarkResultTrackedRequest)
+        returns (MarkResultTrackedResponse);
+
+    // Fetches all attempt results stored in the Switch.
+    rpc FetchAttemptResults (FetchAttemptResultsRequest)
+        returns (FetchAttemptResultsResponse);
+}
