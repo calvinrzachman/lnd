@@ -109,9 +109,15 @@ func newNetworkResultStore(db kvdb.Backend) *networkResultStore {
 	}
 }
 
+// InitPayment stores the networkResult for the given attemptID, and notifies
+// any subscribers.
+func (store *networkResultStore) InitAttempt(attemptID uint64) error {
+	return store.StoreResult(attemptID, nil)
+}
+
 // storeResult stores the networkResult for the given attemptID, and notifies
 // any subscribers.
-func (store *networkResultStore) storeResult(attemptID uint64,
+func (store *networkResultStore) StoreResult(attemptID uint64,
 	result *networkResult) error {
 
 	// We get a mutex for this attempt ID. This is needed to ensure
@@ -122,7 +128,37 @@ func (store *networkResultStore) storeResult(attemptID uint64,
 
 	log.Debugf("Storing result for attemptID=%v", attemptID)
 
-	// Serialize the payment result.
+	// If the result is "in-progress", we store it but do not notify subscribers
+	// (i.e., do not add to store.results).
+	if result == nil {
+		// This is an in-progress result, no need to notify subscribers yet.
+		var b bytes.Buffer
+		if err := serializeNetworkResult(&b, result); err != nil {
+			return err
+		}
+
+		var attemptIDBytes [8]byte
+		binary.BigEndian.PutUint64(attemptIDBytes[:], attemptID)
+
+		err := kvdb.Batch(store.backend, func(tx kvdb.RwTx) error {
+			networkResults, err := tx.CreateTopLevelBucket(
+				networkResultStoreBucketKey,
+			)
+			if err != nil {
+				return err
+			}
+
+			// Store the in-progress result but don't notify.
+			return networkResults.Put(attemptIDBytes[:], b.Bytes())
+		})
+		if err != nil {
+			return err
+		}
+
+		return nil
+	}
+
+	// Handle finalized result (success or failure)
 	var b bytes.Buffer
 	if err := serializeNetworkResult(&b, result); err != nil {
 		return err
@@ -145,8 +181,7 @@ func (store *networkResultStore) storeResult(attemptID uint64,
 		return err
 	}
 
-	// Now that the result is stored in the database, we can notify any
-	// active subscribers.
+	// Now that the result is stored in the database, we can notify any active subscribers.
 	store.resultsMtx.Lock()
 	for _, res := range store.results[attemptID] {
 		res <- result
@@ -159,7 +194,7 @@ func (store *networkResultStore) storeResult(attemptID uint64,
 
 // subscribeResult is used to get the HTLC attempt result for the given attempt
 // ID.  It returns a channel on which the result will be delivered when ready.
-func (store *networkResultStore) subscribeResult(attemptID uint64) (
+func (store *networkResultStore) SubscribeResult(attemptID uint64) (
 	<-chan *networkResult, error) {
 
 	// We get a mutex for this payment ID. This is needed to ensure
@@ -219,7 +254,7 @@ func (store *networkResultStore) subscribeResult(attemptID uint64) (
 
 // getResult attempts to immediately fetch the result for the given pid from
 // the store. If no result is available, ErrPaymentIDNotFound is returned.
-func (store *networkResultStore) getResult(pid uint64) (
+func (store *networkResultStore) GetResult(pid uint64) (
 	*networkResult, error) {
 
 	var result *networkResult
@@ -263,7 +298,7 @@ func fetchResult(tx kvdb.RTx, pid uint64) (*networkResult, error) {
 // should be taken to ensure no new payment attempts are being made
 // concurrently while this process is ongoing, as its result might end up being
 // deleted.
-func (store *networkResultStore) cleanStore(keep map[uint64]struct{}) error {
+func (store *networkResultStore) CleanStore(keep map[uint64]struct{}) error {
 	return kvdb.Update(store.backend, func(tx kvdb.RwTx) error {
 		networkResults, err := tx.CreateTopLevelBucket(
 			networkResultStoreBucketKey,
@@ -314,8 +349,7 @@ func (store *networkResultStore) cleanStore(keep map[uint64]struct{}) error {
 
 // fetchAttemptResults retrieves all results stored in the network result store,
 // returning each result along with its associated attempt ID.
-func (store *networkResultStore) fetchAttemptResults() (
-	map[uint64]*networkResult, error) {
+func (store *networkResultStore) FetchAttemptResults() (map[uint64]*networkResult, error) {
 
 	results := make(map[uint64]*networkResult)
 
@@ -350,7 +384,7 @@ func (store *networkResultStore) fetchAttemptResults() (
 }
 
 // deleteAttemptResult deletes the result given by the specified attempt ID.
-func (store *networkResultStore) deleteAttemptResult(attemptID uint64) error {
+func (store *networkResultStore) DeleteResult(attemptID uint64) error {
 	// Acquire the mutex for this attempt ID.
 	store.attemptIDMtx.Lock(attemptID)
 	defer store.attemptIDMtx.Unlock(attemptID)
