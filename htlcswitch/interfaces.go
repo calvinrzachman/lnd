@@ -448,3 +448,43 @@ type htlcNotifier interface {
 	NotifyFinalHtlcEvent(key models.CircuitKey,
 		info channeldb.FinalHtlcInfo)
 }
+
+// SwitchStore defines the interface for storing and managing the results
+// of HTLC payment attempts. It is designed to support both local and remote
+// lifecycle controllers, allowing full control over result storage and cleanup.
+type SwitchStore interface {
+
+	// StoreResult stores the result of a given payment attempt (identified by attemptID).
+	// This will be called when a result is received from the network.
+	StoreResult(attemptID uint64, result *networkResult) error
+
+	// GetResult returns the network result for the specified attempt ID if
+	// it's available.
+	GetResult(attemptID uint64) (*networkResult, error)
+
+	// SubscribeResult subscribes to be notified when a result for a specific attempt
+	// ID becomes available. It returns a channel that will receive the result.
+	SubscribeResult(attemptID uint64) (<-chan *networkResult, error)
+
+	// FetchAttemptResults returns all currently stored attempt results in the store.
+	// This allows the remote controller to compare the current state of the switch's
+	// store with its own view of in-flight payments.
+	FetchAttemptResults() (map[uint64]*networkResult, error)
+
+	// // DeleteResult removes the result of a specific payment attempt from the store.
+	// // This will be used for explicit deletions.
+	// DeleteResult(attemptID uint64) error
+
+	// // DeleteResults removes multiple attempt results from the store at once.
+	// // This can be used for batch deletions or when performing a cleanup of multiple results.
+	// DeleteResults(attemptIDs []uint64) error
+
+	// CleanStore removes all attempt results from the store except for the ones
+	// listed in the keepPids map. This allows for a "delete all except" approach
+	// to cleanup.
+	CleanStore(keepPids map[uint64]struct{}) error
+
+	// MarkResultTracked marks a result as safe to delete by the remote entity.
+	// This allows for synchronization between the router and switch.
+	MarkResultTracked(attemptID uint64) error
+}
