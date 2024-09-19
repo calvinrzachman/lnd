@@ -122,18 +122,24 @@ func (i *interpretedResult) processFail(rt *mcRoute, errSourceIdx *int,
 
 	// We are the source of the failure.
 	case 0:
-		fmt.Printf("payment outcome self: %v\n", rt)
+		log.Debugf("payment outcome self: %+v\n", rt)
 		i.processPaymentOutcomeSelf(rt, failure)
 
 	// A failure from the final hop was received.
 	case len(rt.hops):
-		fmt.Printf("payment outcome final hop: %v\n", rt)
-		i.processPaymentOutcomeFinal(rt, failure)
+		log.Debugf("payment outcome final hop: %+v", rt)
+
+		log.Debugf("Failure at final hop(%d), route length: %d",
+			*errSourceIdx, len(rt.hops))
+
+		i.processPaymentOutcomeFinal(
+			rt, failure,
+		)
 
 	// An intermediate hop failed. Interpret the outcome, update reputation
 	// and try again.
 	default:
-		fmt.Printf("payment outcome middle hop: %v\n", rt)
+		log.Debugf("payment outcome middle hop: %+v\n", rt)
 		i.processPaymentOutcomeIntermediate(
 			rt, *errSourceIdx, failure,
 		)
@@ -297,6 +303,9 @@ func (i *interpretedResult) processPaymentOutcomeFinal(route *mcRoute,
 //nolint:funlen
 func (i *interpretedResult) processPaymentOutcomeIntermediate(route *mcRoute,
 	errorSourceIdx int, failure lnwire.FailureMessage) {
+
+	log.Debugf("Failure at intermediate hop(%d), route length: %d",
+		errorSourceIdx, len(route.hops))
 
 	reportOutgoing := func() {
 		i.failPair(
