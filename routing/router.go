@@ -395,6 +395,10 @@ func (r *ChannelRouter) Stop() error {
 	return nil
 }
 
+func (r *ChannelRouter) GetSelfNode() route.Vertex {
+	return r.cfg.SelfNode
+}
+
 // RouteRequest contains the parameters for a pathfinding request. It may
 // describe a request to make a regular payment or one to a blinded path
 // (incdicated by a non-nil BlindedPayment field).
@@ -1420,6 +1424,95 @@ func (r *ChannelRouter) BuildRoute(amt fn.Option[lnwire.MilliSatoshi],
 	)
 
 	// We determine the edges compatible with the requested amount, as well
+	// as the amount to send, which can be used to determine the final
+	// receiver amount, if a minimal amount was requested.
+	pathEdges, senderAmt, err = senderAmtBackwardPass(
+		unifiers, amt, bandwidthHints,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// For the minimal amount search, we need to do a forward pass to find a
+	// larger receiver amount due to possible min HTLC bumps, otherwise we
+	// just use the requested amount.
+	receiverAmt, err = fn.ElimOption(
+		amt,
+		func() fn.Result[lnwire.MilliSatoshi] {
+			return fn.NewResult(
+				receiverAmtForwardPass(senderAmt, pathEdges),
+			)
+		},
+		fn.Ok[lnwire.MilliSatoshi],
+	).Unpack()
+	if err != nil {
+		return nil, err
+	}
+
+	// Fetch the current block height outside the routing transaction, to
+	// prevent the rpc call blocking the database.
+	_, height, err := r.cfg.Chain.GetBestBlock()
+	if err != nil {
+		return nil, err
+	}
+
+	// Build and return the final route.
+	return newRoute(
+		sourceNode, pathEdges, uint32(height),
+		finalHopParams{
+			amt:         receiverAmt,
+			totalAmt:    receiverAmt,
+			cltvDelta:   uint16(finalCltvDelta),
+			records:     nil,
+			paymentAddr: payAddr,
+		}, nil,
+	)
+}
+
+// BuildRouteFromSource builds a fully specified route based on a list of
+// pubkeys from the perspective of the provided source node.
+func (r *ChannelRouter) BuildRouteFromSource(sourceNode route.Vertex,
+	amt fn.Option[lnwire.MilliSatoshi], hops []route.Vertex,
+	outgoingChan *uint64, finalCltvDelta int32,
+	payAddr *[32]byte, firstHopBlob fn.Option[[]byte]) (*route.Route,
+	error) {
+
+	log.Tracef("BuildRoute called: sourceNode=%v, hopsCount=%v, amt=%v",
+		sourceNode, len(hops), amt)
+
+	var outgoingChans map[uint64]struct{}
+	if outgoingChan != nil {
+		outgoingChans = map[uint64]struct{}{
+			*outgoingChan: {},
+		}
+	}
+
+	// We'll attempt to obtain a set of bandwidth hints that helps us select
+	// the best outgoing channel to use in case no outgoing channel is set.
+	bandwidthHints, err := newBandwidthManager(
+		r.cfg.RoutingGraph, r.cfg.SelfNode, r.cfg.GetLink, firstHopBlob,
+		r.cfg.TrafficShaper,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// We check that each node in the route has a connection to others that
+	// can forward in principle.
+	unifiers, err := getEdgeUnifiers(
+		sourceNode, hops, outgoingChans, r.cfg.RoutingGraph,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		receiverAmt lnwire.MilliSatoshi
+		senderAmt   lnwire.MilliSatoshi
+		pathEdges   []*unifiedEdge
+	)
+
+	// Determine the edges compatible with the requested amount, as well
 	// as the amount to send, which can be used to determine the final
 	// receiver amount, if a minimal amount was requested.
 	pathEdges, senderAmt, err = senderAmtBackwardPass(
