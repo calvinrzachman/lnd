@@ -1474,7 +1474,7 @@ func (r *ChannelRouter) BuildRoute(amt fn.Option[lnwire.MilliSatoshi],
 func (r *ChannelRouter) BuildRouteFromSource(sourceNode route.Vertex,
 	amt fn.Option[lnwire.MilliSatoshi], hops []route.Vertex,
 	outgoingChan *uint64, finalCltvDelta int32,
-	payAddr *[32]byte, firstHopBlob fn.Option[[]byte]) (*route.Route,
+	payAddr fn.Option[[32]byte], firstHopBlob fn.Option[[]byte]) (*route.Route,
 	error) {
 
 	log.Tracef("BuildRoute called: sourceNode=%v, hopsCount=%v, amt=%v",
