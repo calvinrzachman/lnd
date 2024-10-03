@@ -1701,10 +1701,20 @@ func (s *Server) BuildRoute(_ context.Context,
 		firstHopBlob = fn.Some(firstHopData)
 	}
 
+	// Default to the router's own identity as the route source.
+	sourceNode := s.cfg.RouterBackend.SelfNode
+	if len(req.SourcePubkey) != 0 {
+		src, err := route.NewVertexFromBytes(req.SourcePubkey)
+		if err != nil {
+			return nil, err
+		}
+		sourceNode = src
+	}
+
 	// Build the route and return it to the caller.
 	route, err := s.cfg.Router.BuildRoute(
-		amt, hops, outgoingChan, req.FinalCltvDelta, payAddr,
-		firstHopBlob,
+		sourceNode, amt, hops, outgoingChan, req.FinalCltvDelta,
+		payAddr, firstHopBlob,
 	)
 	if err != nil {
 		return nil, err
