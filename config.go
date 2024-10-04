@@ -730,6 +730,7 @@ func DefaultConfig() Config {
 		Sweeper: lncfg.DefaultSweeperConfig(),
 		Htlcswitch: &lncfg.Htlcswitch{
 			MailboxDeliveryTimeout: htlcswitch.DefaultMailboxDeliveryTimeout,
+			RemoteTracking:         false,
 		},
 		GRPC: &GRPCConfig{
 			ServerPingTime:    defaultGrpcServerPingTime,
