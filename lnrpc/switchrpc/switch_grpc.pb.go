@@ -25,6 +25,8 @@ type SwitchClient interface {
 	// TrackOnion allows callers to query whether or not a payment dispatched via
 	// SendOnion succeeded or failed.
 	TrackOnion(ctx context.Context, in *TrackOnionRequest, opts ...grpc.CallOption) (*TrackOnionResponse, error)
+	// PeelOnion attempts to peel a layer of the provided onion.
+	PeelOnion(ctx context.Context, in *PeelOnionRequest, opts ...grpc.CallOption) (*PeelOnionResponse, error)
 	// Marks the result for the given attempt ID as tracked.
 	MarkResultTracked(ctx context.Context, in *MarkResultTrackedRequest, opts ...grpc.CallOption) (*MarkResultTrackedResponse, error)
 	// Fetches all attempt results stored in the Switch.
@@ -51,6 +53,15 @@ func (c *switchClient) SendOnion(ctx context.Context, in *SendOnionRequest, opts
 func (c *switchClient) TrackOnion(ctx context.Context, in *TrackOnionRequest, opts ...grpc.CallOption) (*TrackOnionResponse, error) {
 	out := new(TrackOnionResponse)
 	err := c.cc.Invoke(ctx, "/switchrpc.Switch/TrackOnion", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *switchClient) PeelOnion(ctx context.Context, in *PeelOnionRequest, opts ...grpc.CallOption) (*PeelOnionResponse, error) {
+	out := new(PeelOnionResponse)
+	err := c.cc.Invoke(ctx, "/switchrpc.Switch/PeelOnion", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -86,6 +97,8 @@ type SwitchServer interface {
 	// TrackOnion allows callers to query whether or not a payment dispatched via
 	// SendOnion succeeded or failed.
 	TrackOnion(context.Context, *TrackOnionRequest) (*TrackOnionResponse, error)
+	// PeelOnion attempts to peel a layer of the provided onion.
+	PeelOnion(context.Context, *PeelOnionRequest) (*PeelOnionResponse, error)
 	// Marks the result for the given attempt ID as tracked.
 	MarkResultTracked(context.Context, *MarkResultTrackedRequest) (*MarkResultTrackedResponse, error)
 	// Fetches all attempt results stored in the Switch.
@@ -102,6 +115,9 @@ func (UnimplementedSwitchServer) SendOnion(context.Context, *SendOnionRequest) (
 }
 func (UnimplementedSwitchServer) TrackOnion(context.Context, *TrackOnionRequest) (*TrackOnionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method TrackOnion not implemented")
+}
+func (UnimplementedSwitchServer) PeelOnion(context.Context, *PeelOnionRequest) (*PeelOnionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method PeelOnion not implemented")
 }
 func (UnimplementedSwitchServer) MarkResultTracked(context.Context, *MarkResultTrackedRequest) (*MarkResultTrackedResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method MarkResultTracked not implemented")
@@ -158,6 +174,24 @@ func _Switch_TrackOnion_Handler(srv interface{}, ctx context.Context, dec func(i
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Switch_PeelOnion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PeelOnionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SwitchServer).PeelOnion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/switchrpc.Switch/PeelOnion",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SwitchServer).PeelOnion(ctx, req.(*PeelOnionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Switch_MarkResultTracked_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(MarkResultTrackedRequest)
 	if err := dec(in); err != nil {
@@ -208,6 +242,10 @@ var Switch_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "TrackOnion",
 			Handler:    _Switch_TrackOnion_Handler,
+		},
+		{
+			MethodName: "PeelOnion",
+			Handler:    _Switch_PeelOnion_Handler,
 		},
 		{
 			MethodName: "MarkResultTracked",

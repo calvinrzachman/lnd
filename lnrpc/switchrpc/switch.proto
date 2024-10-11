@@ -40,6 +40,11 @@ service Switch {
     */
     rpc TrackOnion (TrackOnionRequest) returns (TrackOnionResponse);
 
+    /*
+    PeelOnion attempts to peel a layer of the provided onion.
+    */
+    rpc PeelOnion (PeelOnionRequest) returns (PeelOnionResponse);
+
     // Marks the result for the given attempt ID as tracked.
     rpc MarkResultTracked (MarkResultTrackedRequest)
         returns (MarkResultTrackedResponse);
@@ -124,4 +129,33 @@ message TrackOnionResponse {
     // If the caller provides no means to decrypt the error then we'll defer
     // error decryption on the server and return the encrypted error blob.
     bytes encrypted_error = 4;
+}
+
+message PeelOnionRequest {
+    // The raw onion packet to be sent across the network.
+    bytes onion_blob = 1;
+
+    // The payment hash associated with the HTLC. This is part of the associated
+    // data provided to the underlying sphinx library.
+    bytes payment_hash = 2;
+
+    // The absolute timelock or CLTV value that should be extended to the first
+    // hop in the route. This is needed for the replay log of the underlying
+    // sphinx implementation.
+    uint32 timelock = 3;
+}
+
+message PeelOnionResponse {
+    // The raw onion packet after peeling.
+    bytes onion_blob = 1;
+
+    // The next hop's channel ID where the onion is to be sent.
+    uint64 next_hop = 2;
+
+    // The total amount in millisatoshis to be forwarded to the next hop.
+    int64 forward_amount = 3;
+
+    // The absolute timelock or CLTV value that should be extended to the next
+    // hop in the route.
+    uint32 outgoing_cltv = 4;
 }
