@@ -737,6 +737,57 @@ func (r *DecodeHopIteratorResponse) Result() (Iterator, lnwire.FailCode) {
 	return r.HopIterator, r.FailCode
 }
 
+// DecodeHopIterator attempts to decode a valid sphinx packet from the passed io.Reader
+// instance using the rHash as the associated data when checking the relevant
+// MACs during the decoding process.
+func (p *OnionProcessor) DecodeHopIterator(r io.Reader, rHash []byte,
+	incomingCltv uint32) (Iterator, lnwire.FailCode) {
+
+	onionPkt := &sphinx.OnionPacket{}
+	if err := onionPkt.Decode(r); err != nil {
+		switch err {
+		case sphinx.ErrInvalidOnionVersion:
+			return nil, lnwire.CodeInvalidOnionVersion
+		case sphinx.ErrInvalidOnionKey:
+			return nil, lnwire.CodeInvalidOnionKey
+		default:
+			log.Errorf("unable to decode onion packet: %v", err)
+			return nil, lnwire.CodeInvalidOnionKey
+		}
+	}
+
+	// Attempt to process the Sphinx packet. We include the payment hash of
+	// the HTLC as it's authenticated within the Sphinx packet itself as
+	// associated data in order to thwart attempts a replay attacks. In the
+	// case of a replay, an attacker is *forced* to use the same payment
+	// hash twice, thereby losing their money entirely.
+	sphinxPacket, err := p.router.ProcessOnionPacket(
+		onionPkt, rHash, incomingCltv,
+	)
+	if err != nil {
+		switch err {
+		case sphinx.ErrInvalidOnionVersion:
+			return nil, lnwire.CodeInvalidOnionVersion
+		case sphinx.ErrInvalidOnionHMAC:
+			return nil, lnwire.CodeInvalidOnionHmac
+		case sphinx.ErrInvalidOnionKey:
+			return nil, lnwire.CodeInvalidOnionKey
+		default:
+			log.Errorf("unable to process onion packet: %v", err)
+			return nil, lnwire.CodeInvalidOnionKey
+		}
+	}
+
+	return makeSphinxHopIterator(p.router, onionPkt, sphinxPacket,
+		BlindingKit{
+			Processor: p.router,
+			// UpdateAddBlinding: blindingInfo.BlindingKey,
+			// IncomingAmount:    blindingInfo.IncomingAmt,
+			// IncomingCltv:      blindingInfo.IncomingExpiry,
+		}, rHash,
+	), lnwire.CodeNone
+}
+
 // DecodeHopIterators performs batched decoding and validation of incoming
 // sphinx packets. For the same `id`, this method will return the same iterators
 // and failcodes upon subsequent invocations.
