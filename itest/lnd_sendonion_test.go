@@ -320,3 +320,112 @@ func reconstructCircuit(sessionKey *btcec.PrivateKey,
 		PaymentPath: pubKeys,
 	}
 }
+
+func testPeelOnion(ht *lntest.HarnessTest) {
+	// Create a four-node context consisting of Alice, Bob and two new
+	// nodes: Carol and Dave. This provides a 4 node, 3 channel topology.
+	// Alice will make a channel with Bob, and Bob with Carol, and Carol
+	// with Dave such that we arrive at the network topology:
+	//     Alice -> Bob -> Carol -> Dave
+	alice, bob := ht.Alice, ht.Bob
+	carol := ht.NewNode("carol", nil)
+	dave := ht.NewNode("dave", nil)
+
+	// Connect nodes to ensure propagation of channels.
+	ht.EnsureConnected(alice, bob)
+	ht.EnsureConnected(bob, carol)
+	ht.EnsureConnected(carol, dave)
+
+	const chanAmt = btcutil.Amount(100000)
+
+	// We'll open a channel between Alice and Bob with Alice's liquidity
+	// drained (eg: all funds on Bob's side of the channel) to exercise the
+	// RPC logic which selects the appropriate channel link.
+	chanPointBobAlice := ht.OpenChannel(
+		bob, alice, lntest.OpenChannelParams{Amt: chanAmt},
+	)
+	defer ht.CloseChannel(alice, chanPointBobAlice)
+
+	// Now, open a channel with 100k satoshis between Alice and Bob with
+	// Alice being the sole funder of the channel. This will provide Alice
+	// with outbound liquidity she can use to complete payments.
+	chanPointAliceBob := ht.OpenChannel(
+		alice, bob, lntest.OpenChannelParams{Amt: chanAmt},
+	)
+	defer ht.CloseChannel(alice, chanPointAliceBob)
+
+	// We'll create Dave and establish a channel between Bob and Carol.
+	ht.FundCoins(btcutil.SatoshiPerBitcoin, dave)
+	chanPointBob := ht.OpenChannel(
+		bob, carol, lntest.OpenChannelParams{Amt: chanAmt},
+	)
+	defer ht.CloseChannel(bob, chanPointBob)
+
+	// Next, we'll create Carol and establish a channel between her and Dave.
+	ht.FundCoins(btcutil.SatoshiPerBitcoin, carol)
+	chanPointCarol := ht.OpenChannel(
+		carol, dave, lntest.OpenChannelParams{Amt: chanAmt},
+	)
+	defer ht.CloseChannel(carol, chanPointCarol)
+
+	// Make sure Alice knows the channel between Bob and Carol.
+	ht.AssertTopologyChannelOpen(alice, chanPointBob)
+	ht.AssertTopologyChannelOpen(alice, chanPointCarol)
+
+	const (
+		numPayments = 1
+		paymentAmt  = 10000
+	)
+
+	// Request an invoice from Dave so he is expecting payment.
+	_, rHashes, invoices := ht.CreatePayReqs(dave, paymentAmt, numPayments)
+	var preimage lntypes.Preimage
+	copy(preimage[:], invoices[0].RPreimage)
+
+	// Query for routes to pay from Alice to Dave.
+	routesReq := &lnrpc.QueryRoutesRequest{
+		PubKey: dave.PubKeyStr,
+		Amt:    paymentAmt,
+	}
+	routes := alice.RPC.QueryRoutes(routesReq)
+	route := routes.Routes[0]
+	finalHop := route.Hops[len(route.Hops)-1]
+	finalHop.MppRecord = &lnrpc.MPPRecord{
+		PaymentAddr:  invoices[0].PaymentAddr,
+		TotalAmtMsat: int64(lnwire.NewMSatFromSatoshis(paymentAmt)),
+	}
+
+	// Construct an onion for the route from Alice to Dave.
+	paymentHash := rHashes[0]
+	onionReq := &routerrpc.BuildOnionRequest{
+		Route:       route,
+		PaymentHash: paymentHash,
+	}
+	onionResp := alice.RPC.BuildOnion(onionReq)
+
+	// See if we can have Bob peel a layer from the onion.
+	resp := bob.RPC.PeelOnion(&switchrpc.PeelOnionRequest{
+		OnionBlob:   onionResp.OnionBlob,
+		PaymentHash: paymentHash,
+		Timelock:    route.TotalTimeLock,
+	})
+	require.NotNil(ht, resp.OnionBlob, "expected non-nil onion")
+	// ht.Logf("Bob's Peel Onion Response: %+v", resp)
+
+	// Now continue to peel the onion along the route.
+	resp = carol.RPC.PeelOnion(&switchrpc.PeelOnionRequest{
+		OnionBlob:   resp.OnionBlob,
+		PaymentHash: paymentHash,
+		Timelock:    resp.OutgoingCltv,
+	})
+	require.NotNil(ht, resp.OnionBlob, "expected non-nil onion")
+	// ht.Logf("Carol's Peel Onion Response: %+v", resp)
+
+	resp = dave.RPC.PeelOnion(&switchrpc.PeelOnionRequest{
+		OnionBlob:   resp.OnionBlob,
+		PaymentHash: paymentHash,
+		Timelock:    resp.OutgoingCltv,
+	})
+	require.NotNil(ht, resp.OnionBlob, "expected non-nil onion")
+	// ht.Logf("Dave's Peel Onion Response: %+v", resp)
+}

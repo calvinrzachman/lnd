@@ -710,4 +710,8 @@ var allTestCases = []*lntest.TestCase{
 		Name:     "track onion",
 		TestFunc: testTrackOnion,
 	},
+	{
+		Name:     "peel onion",
+		TestFunc: testPeelOnion,
+	},
 }
