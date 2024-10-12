@@ -13,6 +13,7 @@ import (
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/fn"
 	"github.com/lightningnetwork/lnd/htlcswitch"
+	"github.com/lightningnetwork/lnd/htlcswitch/hop"
 	"github.com/lightningnetwork/lnd/invoices"
 	"github.com/lightningnetwork/lnd/lncfg"
 	"github.com/lightningnetwork/lnd/lnrpc/autopilotrpc"
@@ -113,6 +114,7 @@ func (s *subRPCServerConfigs) PopulateDependencies(cfg *Config,
 	atpl *autopilot.Manager,
 	invoiceRegistry *invoices.InvoiceRegistry,
 	htlcSwitch *htlcswitch.Switch,
+	sphinx *hop.OnionProcessor,
 	activeNetParams *chaincfg.Params,
 	chanRouter *routing.ChannelRouter,
 	routerBackend *routerrpc.RouterBackend,
@@ -319,6 +321,10 @@ func (s *subRPCServerConfigs) PopulateDependencies(cfg *Config,
 				reflect.ValueOf(htlcSwitch),
 			)
 
+			subCfgValue.FieldByName("OnionPeeler").Set(
+				reflect.ValueOf(sphinx),
+			)
+
 			subCfgValue.FieldByName("HtlcDispatcher").Set(
 				reflect.ValueOf(htlcSwitch),
 			)
@@ -331,6 +337,7 @@ func (s *subRPCServerConfigs) PopulateDependencies(cfg *Config,
 			// s.SwitchRPC.Switch = htlcSwitch
 			// s.SwitchRPC.HtlcDispatcher = htlcSwitch
 			// s.SwitchRPC.ChannelInfoAccessor = htlcSwitch
+			// s.SwitchRPC.OnionPeeler = sphinx
 
 		case *watchtowerrpc.Config:
 			subCfgValue := extractReflectValue(subCfg)

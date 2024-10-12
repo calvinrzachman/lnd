@@ -5,6 +5,7 @@ package switchrpc
 
 import (
 	"github.com/lightningnetwork/lnd/htlcswitch"
+	"github.com/lightningnetwork/lnd/htlcswitch/hop"
 	"github.com/lightningnetwork/lnd/macaroons"
 	"github.com/lightningnetwork/lnd/routing"
 )
@@ -17,6 +18,9 @@ import (
 type Config struct {
 	// Switch...
 	Switch *htlcswitch.Switch
+
+	// OnionPeeler provides the means to process an onion packet.
+	OnionPeeler *hop.OnionProcessor
 
 	// SwitchMacPath is the path for the router macaroon. If unspecified
 	// then we assume that the macaroon will be found under the network

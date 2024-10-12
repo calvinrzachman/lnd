@@ -179,6 +179,19 @@ func (h *HarnessRPC) BuildOnion(
 	return resp
 }
 
+// PeelOnion makes a RPC call to PeelOnion and asserts.
+func (h *HarnessRPC) PeelOnion(
+	req *switchrpc.PeelOnionRequest) *switchrpc.PeelOnionResponse {
+
+	ctxt, cancel := context.WithTimeout(h.runCtx, DefaultTimeout)
+	defer cancel()
+
+	resp, err := h.Switch.PeelOnion(ctxt, req)
+	h.NoError(err, "PeelOnion")
+
+	return resp
+}
+
 // QueryProbability makes a RPC call to the node's QueryProbability and
 // asserts.
 //

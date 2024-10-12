@@ -4,6 +4,7 @@
 package switchrpc
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -53,6 +54,10 @@ var (
 		"/switchrpc.Switch/TrackOnion": {{
 			Entity: "offchain",
 			Action: "read",
+		}},
+		"/switchrpc.Switch/PeelOnion": {{
+			Entity: "offchain",
+			Action: "write",
 		}},
 		"/switchrpc.Switch/FetchAttemptResults": {{
 			Entity: "offchain",
@@ -489,6 +494,47 @@ func reconstructCircuit(sessionKey *btcec.PrivateKey,
 		SessionKey:  sessionKey,
 		PaymentPath: pubKeys,
 	}
+}
+
+// PeelOnion attempts to peel a layer from the provided onion.
+//
+// NOTE(calvin): This will only work if the onion...
+func (s *Server) PeelOnion(_ context.Context,
+	req *PeelOnionRequest) (*PeelOnionResponse, error) {
+
+	// Decrypt and peel a layer of the onion.
+	onionReader := bytes.NewReader(req.OnionBlob[:])
+	hopIterator, code := s.cfg.OnionPeeler.DecodeHopIterator(
+		onionReader, req.PaymentHash, req.Timelock,
+	)
+
+	if code != lnwire.CodeNone {
+		err := fmt.Errorf("unable to peel onion for payment hash=%v",
+			req.PaymentHash)
+
+		return nil, err
+	}
+
+	// Parse the forwarding information contained within the onion hop.
+	hopPayload, _, err := hopIterator.HopPayload()
+	fwdInfo := hopPayload.FwdInfo
+
+	log.Debugf("Successfully peeled onion for hash=%x", req.PaymentHash)
+
+	// Prepare the onion for return to the caller.
+	buf := bytes.NewBuffer(req.OnionBlob[0:0])
+	err = hopIterator.EncodeNextHop(buf)
+	if err != nil {
+		log.Errorf("unable to encode the remaining route %v", err)
+
+	}
+
+	return &PeelOnionResponse{
+		OnionBlob:     buf.Bytes(),
+		NextHop:       fwdInfo.NextHop.ToUint64(),
+		ForwardAmount: int64(fwdInfo.AmountToForward),
+		OutgoingCltv:  fwdInfo.OutgoingCTLV,
+	}, err
 }
 
 // FetchAttemptResults fetches all results stored by the Switch and returns them.
