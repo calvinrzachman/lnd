@@ -67,6 +67,10 @@ var (
 			Entity: "offchain",
 			Action: "read",
 		}},
+		"/switchrpc.Switch/DeleteAttemptResult": {{
+			Entity: "offchain",
+			Action: "write",
+		}},
 	}
 
 	// DefaultSwitchMacFilename is the default name of the switch macaroon
@@ -741,4 +745,18 @@ func ParseForwardingError(errStr string) (*htlcswitch.ForwardingError, error) {
 	}
 
 	return htlcswitch.NewForwardingError(wireMsg, idx), nil
+}
+
+// DeleteAttemptResult deletes the result for the specified attempt ID.
+func (s *Server) DeleteAttemptResult(ctx context.Context,
+	req *DeleteAttemptResultRequest) (*DeleteAttemptResultResponse, error) {
+
+	// Attempt to delete the result from the Switch's network result store.
+	err := s.cfg.Switch.DeleteAttemptResult(req.AttemptId)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal,
+			"unable to delete attempt result: %v", err)
+	}
+
+	return &DeleteAttemptResultResponse{Success: true}, nil
 }
