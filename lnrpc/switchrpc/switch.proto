@@ -26,6 +26,10 @@ service Switch {
     BuildOnion attempts to build an onion packet for the specified route.
     */
     rpc BuildOnion (BuildOnionRequest) returns (BuildOnionResponse);
+
+    // Fetches all attempt results stored in the Switch.
+    rpc FetchAttemptResults (FetchAttemptResultsRequest)
+        returns (FetchAttemptResultsResponse);
 }
 
 message SendOnionRequest {
@@ -147,4 +151,16 @@ message BuildOnionResponse {
     // The serialized public keys of all nodes along the route for the
     // constructed onion.
     repeated bytes hop_pubkeys = 3;
+}
+
+message FetchAttemptResultsRequest {
+}
+
+message FetchAttemptResultsResponse {
+    message AttemptResult {
+        uint64 attempt_id = 1;
+        string result_details = 2;
+    }
+
+    repeated AttemptResult attempt_results = 1;
 }
