@@ -67,6 +67,10 @@ var (
 			Entity: "offchain",
 			Action: "read",
 		}},
+		"/switchrpc.Switch/FetchAttemptResults": {{
+			Entity: "offchain",
+			Action: "read",
+		}},
 		"/switchrpc.Switch/DeleteAttemptResult": {{
 			Entity: "offchain",
 			Action: "write",
@@ -745,6 +749,30 @@ func ParseForwardingError(errStr string) (*htlcswitch.ForwardingError, error) {
 	}
 
 	return htlcswitch.NewForwardingError(wireMsg, idx), nil
+}
+
+// FetchAttemptResults retrieves all results in the network result store.
+func (s *Server) FetchAttemptResults(ctx context.Context,
+	req *FetchAttemptResultsRequest) (*FetchAttemptResultsResponse, error) {
+
+	results, err := s.cfg.Switch.FetchAttemptResults()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal,
+			"unable to fetch attempt results: %v", err)
+	}
+
+	response := &FetchAttemptResultsResponse{}
+	for attemptID := range results {
+		attemptResult := &FetchAttemptResultsResponse_AttemptResult{
+			AttemptId: attemptID,
+		}
+		response.AttemptResults = append(
+			response.AttemptResults,
+			attemptResult,
+		)
+	}
+
+	return response, nil
 }
 
 // DeleteAttemptResult deletes the result for the specified attempt ID.
