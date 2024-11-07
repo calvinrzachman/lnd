@@ -722,4 +722,8 @@ var allTestCases = []*lntest.TestCase{
 		Name:     "track onion",
 		TestFunc: testTrackOnion,
 	},
+	{
+		Name:     "switch store rpc",
+		TestFunc: testFetchAttemptResults,
+	},
 }
