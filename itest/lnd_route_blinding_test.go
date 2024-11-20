@@ -63,7 +63,7 @@ func testQueryBlindedRoutes(ht *lntest.HarnessTest) {
 
 	// Wait for Alice to see Bob/Carol's channel because she'll need it for
 	// pathfinding.
-	ht.AssertTopologyChannelOpen(alice, chanPointBobCarol)
+	ht.AssertChannelInGraph(alice, chanPointBobCarol)
 
 	// Lookup full channel info so that we have channel ids for our route.
 	aliceBobChan := ht.GetChannelByChanPoint(alice, chanPointAliceBob)
@@ -593,7 +593,7 @@ func setupFourHopNetwork(ht *lntest.HarnessTest,
 	nodes := []*node.HarnessNode{ht.Alice, ht.Bob, carol, dave}
 	for _, chanPoint := range networkChans {
 		for _, node := range nodes {
-			ht.AssertTopologyChannelOpen(node, chanPoint)
+			ht.AssertChannelInGraph(node, chanPoint)
 		}
 	}
 
@@ -981,11 +981,11 @@ func testMPPToSingleBlindedPath(ht *lntest.HarnessTest) {
 			}
 
 			numPublic++
-			ht.AssertTopologyChannelOpen(hn, cp)
+			ht.AssertChannelInGraph(hn, cp)
 		}
 
 		// Each node should have exactly numPublic edges.
-		ht.AssertNumEdges(hn, numPublic, false)
+		ht.AssertNumActiveEdges(hn, numPublic, false)
 	}
 
 	// Make Dave create an invoice with a blinded path for Alice to pay.
@@ -1152,11 +1152,11 @@ func testBlindedRouteDummyHops(ht *lntest.HarnessTest) {
 	// Make sure every node has heard about every channel.
 	for _, hn := range nodes {
 		for _, cp := range channelPoints {
-			ht.AssertTopologyChannelOpen(hn, cp)
+			ht.AssertChannelInGraph(hn, cp)
 		}
 
 		// Each node should have exactly 5 edges.
-		ht.AssertNumEdges(hn, len(channelPoints), false)
+		ht.AssertNumActiveEdges(hn, len(channelPoints), false)
 	}
 
 	// Make Dave create an invoice with a blinded path for Alice to pay.
@@ -1321,11 +1321,11 @@ func testMPPToMultipleBlindedPaths(ht *lntest.HarnessTest) {
 	// Make sure every node has heard every channel.
 	for _, hn := range nodes {
 		for _, cp := range channelPoints {
-			ht.AssertTopologyChannelOpen(hn, cp)
+			ht.AssertChannelInGraph(hn, cp)
 		}
 
 		// Each node should have exactly 5 edges.
-		ht.AssertNumEdges(hn, len(channelPoints), false)
+		ht.AssertNumActiveEdges(hn, len(channelPoints), false)
 	}
 
 	// Ok now make a payment that must be split to succeed.

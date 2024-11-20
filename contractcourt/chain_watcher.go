@@ -93,9 +93,9 @@ type BreachCloseInfo struct {
 // HTLCs to determine if any additional actions need to be made based on the
 // remote party's commitments.
 type CommitSet struct {
-	// ConfCommitKey if non-nil, identifies the commitment that was
+	// When the ConfCommitKey is set, it signals that the commitment tx was
 	// confirmed in the chain.
-	ConfCommitKey *HtlcSetKey
+	ConfCommitKey fn.Option[HtlcSetKey]
 
 	// HtlcSets stores the set of all known active HTLC for each active
 	// commitment at the time of channel closure.
@@ -436,6 +436,7 @@ func (c *chainWatcher) handleUnknownLocalState(
 			return s.FetchLeavesFromCommit(
 				lnwallet.NewAuxChanState(c.cfg.chanState),
 				c.cfg.chanState.LocalCommitment, *commitKeyRing,
+				lntypes.Local,
 			)
 		},
 	).Unpack()
@@ -509,7 +510,7 @@ func (c *chainWatcher) handleUnknownLocalState(
 
 	// If this is our commitment transaction, then we try to act even
 	// though we won't be able to sweep HTLCs.
-	chainSet.commitSet.ConfCommitKey = &LocalHtlcSet
+	chainSet.commitSet.ConfCommitKey = fn.Some(LocalHtlcSet)
 	if err := c.dispatchLocalForceClose(
 		commitSpend, broadcastStateNum, chainSet.commitSet,
 	); err != nil {
@@ -806,7 +807,7 @@ func (c *chainWatcher) handleKnownLocalState(
 		return false, nil
 	}
 
-	chainSet.commitSet.ConfCommitKey = &LocalHtlcSet
+	chainSet.commitSet.ConfCommitKey = fn.Some(LocalHtlcSet)
 	if err := c.dispatchLocalForceClose(
 		commitSpend, broadcastStateNum, chainSet.commitSet,
 	); err != nil {
@@ -844,7 +845,7 @@ func (c *chainWatcher) handleKnownRemoteState(
 		log.Infof("Remote party broadcast base set, "+
 			"commit_num=%v", chainSet.remoteStateNum)
 
-		chainSet.commitSet.ConfCommitKey = &RemoteHtlcSet
+		chainSet.commitSet.ConfCommitKey = fn.Some(RemoteHtlcSet)
 		err := c.dispatchRemoteForceClose(
 			commitSpend, chainSet.remoteCommit,
 			chainSet.commitSet,
@@ -869,7 +870,7 @@ func (c *chainWatcher) handleKnownRemoteState(
 		log.Infof("Remote party broadcast pending set, "+
 			"commit_num=%v", chainSet.remoteStateNum+1)
 
-		chainSet.commitSet.ConfCommitKey = &RemotePendingHtlcSet
+		chainSet.commitSet.ConfCommitKey = fn.Some(RemotePendingHtlcSet)
 		err := c.dispatchRemoteForceClose(
 			commitSpend, *chainSet.remotePendingCommit,
 			chainSet.commitSet,
@@ -936,7 +937,7 @@ func (c *chainWatcher) handlePossibleBreach(commitSpend *chainntnfs.SpendDetail,
 	// only used to ensure a nil-pointer-dereference doesn't occur and is
 	// not used otherwise. The HTLC's may not exist for the
 	// RemotePendingHtlcSet.
-	chainSet.commitSet.ConfCommitKey = &RemoteHtlcSet
+	chainSet.commitSet.ConfCommitKey = fn.Some(RemoteHtlcSet)
 
 	// THEY'RE ATTEMPTING TO VIOLATE THE CONTRACT LAID OUT WITHIN THE
 	// PAYMENT CHANNEL. Therefore we close the signal indicating a revoked
@@ -997,7 +998,7 @@ func (c *chainWatcher) handleUnknownRemoteState(
 	// means we won't be able to recover any HTLC funds.
 	//
 	// TODO(halseth): can we try to recover some HTLCs?
-	chainSet.commitSet.ConfCommitKey = &RemoteHtlcSet
+	chainSet.commitSet.ConfCommitKey = fn.Some(RemoteHtlcSet)
 	err := c.dispatchRemoteForceClose(
 		commitSpend, channeldb.ChannelCommitment{},
 		chainSet.commitSet, commitPoint,
@@ -1174,16 +1175,29 @@ func (c *chainWatcher) dispatchLocalForceClose(
 		LocalChanConfig:         c.cfg.chanState.LocalChanCfg,
 	}
 
+	resolutions, err := forceClose.ContractResolutions.UnwrapOrErr(
+		fmt.Errorf("resolutions not found"),
+	)
+	if err != nil {
+		return err
+	}
+
 	// If our commitment output isn't dust or we have active HTLC's on the
 	// commitment transaction, then we'll populate the balances on the
 	// close channel summary.
-	if forceClose.CommitResolution != nil {
-		closeSummary.SettledBalance = chanSnapshot.LocalBalance.ToSatoshis()
-		closeSummary.TimeLockedBalance = chanSnapshot.LocalBalance.ToSatoshis()
+	if resolutions.CommitResolution != nil {
+		localBalance := chanSnapshot.LocalBalance.ToSatoshis()
+		closeSummary.SettledBalance = localBalance
+		closeSummary.TimeLockedBalance = localBalance
 	}
-	for _, htlc := range forceClose.HtlcResolutions.OutgoingHTLCs {
-		htlcValue := btcutil.Amount(htlc.SweepSignDesc.Output.Value)
-		closeSummary.TimeLockedBalance += htlcValue
+
+	if resolutions.HtlcResolutions != nil {
+		for _, htlc := range resolutions.HtlcResolutions.OutgoingHTLCs {
+			htlcValue := btcutil.Amount(
+				htlc.SweepSignDesc.Output.Value,
+			)
+			closeSummary.TimeLockedBalance += htlcValue
+		}
 	}
 
 	// Attempt to add a channel sync message to the close summary.

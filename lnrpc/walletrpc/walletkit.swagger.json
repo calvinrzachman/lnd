@@ -1589,6 +1589,11 @@
         "coin_selection_strategy": {
           "$ref": "#/definitions/lnrpcCoinSelectionStrategy",
           "description": "The strategy to use for selecting coins during funding the PSBT."
+        },
+        "max_fee_ratio": {
+          "type": "number",
+          "format": "double",
+          "description": "The max fee to total output amount ratio that this psbt should adhere to."
         }
       }
     },
@@ -1687,7 +1692,13 @@
       }
     },
     "walletrpcImportPublicKeyResponse": {
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "description": "The status of the import operation."
+        }
+      }
     },
     "walletrpcImportTapscriptRequest": {
       "type": "object",
@@ -1759,7 +1770,13 @@
       }
     },
     "walletrpcLabelTransactionResponse": {
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "description": "The status of the label operation."
+        }
+      }
     },
     "walletrpcLeaseOutputRequest": {
       "type": "object",
@@ -1997,7 +2014,13 @@
       }
     },
     "walletrpcReleaseOutputResponse": {
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "description": "The status of the release operation."
+        }
+      }
     },
     "walletrpcRemoveTransactionResponse": {
       "type": "object",

@@ -41,9 +41,10 @@ func testPaymentSucceededHTLCRemoteSwept(ht *lntest.HarnessTest) {
 	openChannelParams := lntest.OpenChannelParams{
 		Amt: chanAmt,
 	}
+	cfgs := [][]string{nil, nil}
 
 	// Create a two hop network: Alice -> Bob.
-	chanPoints, nodes := createSimpleNetwork(ht, nil, 2, openChannelParams)
+	chanPoints, nodes := ht.CreateSimpleNetwork(cfgs, openChannelParams)
 	chanPoint := chanPoints[0]
 	alice, bob := nodes[0], nodes[1]
 
@@ -197,9 +198,10 @@ func runTestPaymentHTLCTimeout(ht *lntest.HarnessTest, restartAlice bool) {
 	openChannelParams := lntest.OpenChannelParams{
 		Amt: chanAmt,
 	}
+	cfgs := [][]string{nil, nil}
 
 	// Create a two hop network: Alice -> Bob.
-	chanPoints, nodes := createSimpleNetwork(ht, nil, 2, openChannelParams)
+	chanPoints, nodes := ht.CreateSimpleNetwork(cfgs, openChannelParams)
 	chanPoint := chanPoints[0]
 	alice, bob := nodes[0], nodes[1]
 
@@ -820,7 +822,7 @@ func testBidirectionalAsyncPayments(ht *lntest.HarnessTest) {
 	args := []string{
 		// Increase the dust threshold to avoid the payments fail due
 		// to threshold limit reached.
-		"--dust-threshold=10000000",
+		"--channel-max-fee-exposure=10000000",
 
 		// Increase the pending commit interval since there are lots of
 		// commitment dances.
@@ -1111,7 +1113,7 @@ func testPaymentFailureReasonCanceled(ht *lntest.HarnessTest) {
 	cpAB, cpBC := resp[0], resp[1]
 
 	// Make sure Alice is aware of channel Bob=>Carol.
-	ht.AssertTopologyChannelOpen(alice, cpBC)
+	ht.AssertChannelInGraph(alice, cpBC)
 
 	// Connect the interceptor.
 	interceptor, cancelInterceptor := bob.RPC.HtlcInterceptor()
@@ -1247,9 +1249,10 @@ func runSendToRouteFailHTLCTimeout(ht *lntest.HarnessTest, restartAlice bool) {
 	openChannelParams := lntest.OpenChannelParams{
 		Amt: chanAmt,
 	}
+	cfgs := [][]string{nil, nil}
 
 	// Create a two hop network: Alice -> Bob.
-	chanPoints, nodes := createSimpleNetwork(ht, nil, 2, openChannelParams)
+	chanPoints, nodes := ht.CreateSimpleNetwork(cfgs, openChannelParams)
 	chanPoint := chanPoints[0]
 	alice, bob := nodes[0], nodes[1]
 

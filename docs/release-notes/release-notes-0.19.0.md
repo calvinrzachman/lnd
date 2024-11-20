@@ -22,15 +22,15 @@
 * [Fixed a bug](https://github.com/lightningnetwork/lnd/pull/8857) to correctly 
   propagate mission control and debug level config values to the main LND config
   struct so that the GetDebugInfo response is accurate.
-
-* [Fix a bug](https://github.com/lightningnetwork/lnd/pull/9134) that would 
-  cause a nil pointer dereference during the probing of a payment request that 
-  does not contain a payment address.
   
 * [Fixed a bug](https://github.com/lightningnetwork/lnd/pull/9033) where we
-  would not signal an error when trying to bump an non-anchor channel but
+  would not signal an error when trying to bump a non-anchor channel but
   instead report a successful cpfp registration although no fee bumping is
   possible for non-anchor channels anyways.
+
+* [Fixed a bug](https://github.com/lightningnetwork/lnd/pull/9269) where a
+  negative fee limit for `SendPaymentV2` would lead to omitting the fee limit
+  check.
 
 * [Use the required route blinding 
   feature-bit](https://github.com/lightningnetwork/lnd/pull/9143) for invoices 
@@ -39,6 +39,26 @@
 * [Fix a bug](https://github.com/lightningnetwork/lnd/pull/9137) that prevented
   a graceful shutdown of LND during the main chain backend sync check in certain
   cases.
+  
+* [Fixed a bug](https://github.com/lightningnetwork/lnd/pull/9068) where dust
+  htlcs although not being able to be resolved onchain were not canceled
+  back before the commitment tx was confirmed causing potentially force closes
+  of the incoming channel.
+
+* [Fixed a bug](https://github.com/lightningnetwork/lnd/pull/9249) found in the
+  mission control store that can block the shutdown process of LND.
+
+* Make sure the RPC clients used to access the chain backend are [properly
+  shutdown](https://github.com/lightningnetwork/lnd/pull/9261).
+
+* [Fixed a bug](https://github.com/lightningnetwork/lnd/pull/9275) where the
+  peer may block the shutdown process of lnd.
+
+* [Fixed a case](https://github.com/lightningnetwork/lnd/pull/9258) where the
+  confirmation notification may be missed.
+  
+* [Make the contract resolutions for the channel arbitrator optional](
+  https://github.com/lightningnetwork/lnd/pull/9253)
 
 # New Features
 ## Functional Enhancements
@@ -52,6 +72,9 @@
   `sat_per_kw` which allows for more precise
   fees](https://github.com/lightningnetwork/lnd/pull/9013).
 
+* [The `walletrpc.FundPsbt` method now has a new option to specify the maximum
+  fee to output amounts ratio.](https://github.com/lightningnetwork/lnd/pull/8600)
+
 ## lncli Additions
 
 * [A pre-generated macaroon root key can now be specified in `lncli create` and
@@ -61,6 +84,9 @@
 * [The `lncli wallet fundpsbt` sub command now has a `--sat_per_kw` flag to
   specify more precise fee
   rates](https://github.com/lightningnetwork/lnd/pull/9013).
+
+* The `lncli wallet fundpsbt` command now has a [`--max_fee_ratio` argument to
+  specify the max fees to output amounts ratio.](https://github.com/lightningnetwork/lnd/pull/8600)
 
 # Improvements
 ## Functional Updates
@@ -76,6 +102,28 @@
 * LND updates channel.backup file at shutdown time.
 
 ## RPC Updates
+
+* Some RPCs that previously just returned an empty response message now at least
+  return [a short status
+  message](https://github.com/lightningnetwork/lnd/pull/7762) to help command
+  line users to better understand that the command was executed successfully and
+  something was executed or initiated to run in the background. The following
+  CLI commands now don't just return an empty response (`{}`) anymore:
+    * `lncli wallet releaseoutput` (`WalletKit.ReleaseOutput` RPC)
+    * `lncli wallet accounts import-pubkey` (`WalletKit.ImportPublicKey` RPC)
+    * `lncli wallet labeltx` (`WalletKit.LabelTransaction` RPC)
+    * `lncli sendcustom` (`Lightning.SendCustomMessage` RPC)
+    * `lncli connect` (`Lightning.ConnectPeer` RPC)
+    * `lncli disconnect` (`Lightning.DisconnectPeer` RPC)
+    * `lncli stop` (`Lightning.Stop` RPC)
+    * `lncli deletepayments` (`Lightning.DeleteAllPaymentsResponse` RPC)
+    * `lncli abandonchannel` (`Lightning.AbandonChannel` RPC)
+    * `lncli restorechanbackup` (`Lightning.RestoreChannelBackups` RPC)
+    * `lncli verifychanbackup` (`Lightning.VerifyChanBackup` RPC)
+* The `ForwardInterceptor`'s `MODIFY` option will
+  [merge](https://github.com/lightningnetwork/lnd/pull/9240) any custom
+  range TLVs provided with the existing set of records on the HTLC,
+  overwriting any conflicting values with those supplied by the API.
 
 ## lncli Updates
 
@@ -110,14 +158,15 @@
   these options have also been increased from max 3 log files to 10 and from 
   max 10 MB to 20 MB. 
  
+* [Deprecate `dust-threshold`
+config option](https://github.com/lightningnetwork/lnd/pull/9182) and introduce
+a new option `channel-max-fee-exposure` which is unambiguous in its description.
+The underlying functionality between those two options remain the same.
+
 ## Breaking Changes
 ## Performance Improvements
 
-* Log rotation can now use ZSTD 
-
-* [A new method](https://github.com/lightningnetwork/lnd/pull/9195)
-  `AssertTxnsNotInMempool` has been added to `lntest` package to allow batch
-  exclusion check in itest.
+* Log rotation can now use ZSTD
 
 # Technical and Architectural Updates
 ## BOLT Spec Updates
@@ -151,6 +200,10 @@
 * Boris Nagaev
 * CharlieZKSmith
 * Elle Mouton
+* George Tsagkarelis
+* hieblmi
+* Oliver Gugger
 * Pins
 * Viktor Tigerström
+* Yong Yu
 * Ziggie

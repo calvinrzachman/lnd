@@ -193,6 +193,9 @@ func (h *HarnessTest) Start(chain node.BackendConfig,
 
 	// Assemble the miner.
 	h.miner = miner
+
+	// Update block height.
+	h.updateCurrentHeight()
 }
 
 // ChainBackendName returns the chain backend name used in the test.
@@ -316,7 +319,7 @@ func (h *HarnessTest) SetupStandbyNodes() {
 
 	lndArgs := []string{
 		"--default-remote-max-htlcs=483",
-		"--dust-threshold=5000000",
+		"--channel-max-fee-exposure=5000000",
 	}
 
 	// Start the initial seeder nodes within the test network.
@@ -841,9 +844,10 @@ func (h *HarnessTest) NewNodeRemoteSigner(name string, extraArgs []string,
 	return hn
 }
 
-// KillNode kills the node (but won't wait for the node process to stop).
+// KillNode kills the node and waits for the node process to stop.
 func (h *HarnessTest) KillNode(hn *node.HarnessNode) {
-	require.NoErrorf(h, hn.Kill(), "%s: kill got error", hn.Name())
+	h.Logf("Manually killing the node %s", hn.Name())
+	require.NoErrorf(h, hn.KillAndWait(), "%s: kill got error", hn.Name())
 	delete(h.manager.activeNodes, hn.Cfg.NodeID)
 }
 
@@ -907,6 +911,18 @@ func (h *HarnessTest) validateNodeState(hn *node.HarnessNode) error {
 	if hn.State.Payment.Total != 0 {
 		return fmt.Errorf("%s: found uncleaned payments, please "+
 			"delete all of them properly", hn.Name())
+	}
+
+	// The number of public edges should be zero.
+	if hn.State.Edge.Public != 0 {
+		return fmt.Errorf("%s: found active public egdes, please "+
+			"clean them properly", hn.Name())
+	}
+
+	// The number of edges should be zero.
+	if hn.State.Edge.Total != 0 {
+		return fmt.Errorf("%s: found active edges, please "+
+			"clean them properly", hn.Name())
 	}
 
 	return nil
@@ -1207,8 +1223,8 @@ func (h *HarnessTest) openChannel(alice, bob *node.HarnessNode,
 
 	// Check that both alice and bob have seen the channel from their
 	// network topology.
-	h.AssertTopologyChannelOpen(alice, fundingChanPoint)
-	h.AssertTopologyChannelOpen(bob, fundingChanPoint)
+	h.AssertChannelInGraph(alice, fundingChanPoint)
+	h.AssertChannelInGraph(bob, fundingChanPoint)
 
 	// Check that the channel can be seen in their ListChannels.
 	h.AssertChannelExists(alice, fundingChanPoint)
@@ -1229,8 +1245,8 @@ func (h *HarnessTest) openChannelZeroConf(alice, bob *node.HarnessNode,
 
 	// Check that both alice and bob have seen the channel from their
 	// network topology.
-	h.AssertTopologyChannelOpen(alice, fundingChanPoint)
-	h.AssertTopologyChannelOpen(bob, fundingChanPoint)
+	h.AssertChannelInGraph(alice, fundingChanPoint)
+	h.AssertChannelInGraph(bob, fundingChanPoint)
 
 	// Finally, check that the channel can be seen in their ListChannels.
 	h.AssertChannelExists(alice, fundingChanPoint)
@@ -1814,8 +1830,8 @@ func (h *HarnessTest) OpenMultiChannelsAsync(
 		if !req.Param.Private {
 			// Check that both alice and bob have seen the channel
 			// from their channel watch request.
-			h.AssertTopologyChannelOpen(req.Local, cp)
-			h.AssertTopologyChannelOpen(req.Remote, cp)
+			h.AssertChannelInGraph(req.Local, cp)
+			h.AssertChannelInGraph(req.Remote, cp)
 		}
 
 		// Finally, check that the channel can be seen in their
@@ -2196,4 +2212,155 @@ func (h *HarnessTest) SendCoins(a, b *node.HarnessNode,
 	tx := h.GetNumTxsFromMempool(1)[0]
 
 	return tx
+}
+
+// CreateSimpleNetwork creates the number of nodes specified by the number of
+// configs and makes a topology of `node1 -> node2 -> node3...`. Each node is
+// created using the specified config, the neighbors are connected, and the
+// channels are opened. Each node will be funded with a single UTXO of 1 BTC
+// except the last one.
+//
+// For instance, to create a network with 2 nodes that share the same node
+// config,
+//
+//	cfg := []string{"--protocol.anchors"}
+//	cfgs := [][]string{cfg, cfg}
+//	params := OpenChannelParams{...}
+//	chanPoints, nodes := ht.CreateSimpleNetwork(cfgs, params)
+//
+// This will create two nodes and open an anchor channel between them.
+func (h *HarnessTest) CreateSimpleNetwork(nodeCfgs [][]string,
+	p OpenChannelParams) ([]*lnrpc.ChannelPoint, []*node.HarnessNode) {
+
+	// Create new nodes.
+	nodes := h.createNodes(nodeCfgs)
+
+	var resp []*lnrpc.ChannelPoint
+
+	// Open zero-conf channels if specified.
+	if p.ZeroConf {
+		resp = h.openZeroConfChannelsForNodes(nodes, p)
+	} else {
+		// Open channels between the nodes.
+		resp = h.openChannelsForNodes(nodes, p)
+	}
+
+	return resp, nodes
+}
+
+// acceptChannel is used to accept a single channel that comes across. This
+// should be run in a goroutine and is used to test nodes with the zero-conf
+// feature bit.
+func acceptChannel(t *testing.T, zeroConf bool, stream rpc.AcceptorClient) {
+	req, err := stream.Recv()
+	require.NoError(t, err)
+
+	resp := &lnrpc.ChannelAcceptResponse{
+		Accept:        true,
+		PendingChanId: req.PendingChanId,
+		ZeroConf:      zeroConf,
+	}
+	err = stream.Send(resp)
+	require.NoError(t, err)
+}
+
+// createNodes creates the number of nodes specified by the number of configs.
+// Each node is created using the specified config, the neighbors are
+// connected.
+func (h *HarnessTest) createNodes(nodeCfgs [][]string) []*node.HarnessNode {
+	// Get the number of nodes.
+	numNodes := len(nodeCfgs)
+
+	// Make a slice of nodes.
+	nodes := make([]*node.HarnessNode, numNodes)
+
+	// Create new nodes.
+	for i, nodeCfg := range nodeCfgs {
+		nodeName := fmt.Sprintf("Node%q", string(rune('A'+i)))
+		n := h.NewNode(nodeName, nodeCfg)
+		nodes[i] = n
+	}
+
+	// Connect the nodes in a chain.
+	for i := 1; i < len(nodes); i++ {
+		nodeA := nodes[i-1]
+		nodeB := nodes[i]
+		h.EnsureConnected(nodeA, nodeB)
+	}
+
+	// Fund all the nodes expect the last one.
+	for i := 0; i < len(nodes)-1; i++ {
+		node := nodes[i]
+		h.FundCoinsUnconfirmed(btcutil.SatoshiPerBitcoin, node)
+	}
+
+	// Mine 1 block to get the above coins confirmed.
+	h.MineBlocksAndAssertNumTxes(1, numNodes-1)
+
+	return nodes
+}
+
+// openChannelsForNodes takes a list of nodes and makes a topology of `node1 ->
+// node2 -> node3...`.
+func (h *HarnessTest) openChannelsForNodes(nodes []*node.HarnessNode,
+	p OpenChannelParams) []*lnrpc.ChannelPoint {
+
+	// Sanity check the params.
+	require.Greater(h, len(nodes), 1, "need at least 2 nodes")
+
+	// Open channels in batch to save blocks mined.
+	reqs := make([]*OpenChannelRequest, 0, len(nodes)-1)
+	for i := 0; i < len(nodes)-1; i++ {
+		nodeA := nodes[i]
+		nodeB := nodes[i+1]
+
+		req := &OpenChannelRequest{
+			Local:  nodeA,
+			Remote: nodeB,
+			Param:  p,
+		}
+		reqs = append(reqs, req)
+	}
+	resp := h.OpenMultiChannelsAsync(reqs)
+
+	// Make sure the nodes know each other's channels if they are public.
+	if !p.Private {
+		for _, node := range nodes {
+			for _, chanPoint := range resp {
+				h.AssertChannelInGraph(node, chanPoint)
+			}
+		}
+	}
+
+	return resp
+}
+
+// openZeroConfChannelsForNodes takes a list of nodes and makes a topology of
+// `node1 -> node2 -> node3...` with zero-conf channels.
+func (h *HarnessTest) openZeroConfChannelsForNodes(nodes []*node.HarnessNode,
+	p OpenChannelParams) []*lnrpc.ChannelPoint {
+
+	// Sanity check the params.
+	require.True(h, p.ZeroConf, "zero-conf channels must be enabled")
+	require.Greater(h, len(nodes), 1, "need at least 2 nodes")
+
+	// We are opening numNodes-1 channels.
+	cancels := make([]context.CancelFunc, 0, len(nodes)-1)
+
+	// Create the channel acceptors.
+	for _, node := range nodes[1:] {
+		acceptor, cancel := node.RPC.ChannelAcceptor()
+		go acceptChannel(h.T, true, acceptor)
+
+		cancels = append(cancels, cancel)
+	}
+
+	// Open channels between the nodes.
+	resp := h.openChannelsForNodes(nodes, p)
+
+	for _, cancel := range cancels {
+		cancel()
+	}
+
+	return resp
 }

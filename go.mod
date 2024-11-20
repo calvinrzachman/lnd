@@ -11,7 +11,7 @@ require (
 	github.com/btcsuite/btcd/chaincfg/chainhash v1.1.0
 	github.com/btcsuite/btclog v0.0.0-20241003133417-09c4e92e319c
 	github.com/btcsuite/btclog/v2 v2.0.0-20241017175713-3428138b75c7
-	github.com/btcsuite/btcwallet v0.16.10-0.20240912233857-ffb143c77cc5
+	github.com/btcsuite/btcwallet v0.16.10-0.20241113134707-b4ff60753aaa
 	github.com/btcsuite/btcwallet/wallet/txauthor v1.3.5
 	github.com/btcsuite/btcwallet/wallet/txrules v1.2.2
 	github.com/btcsuite/btcwallet/walletdb v1.4.4
@@ -64,6 +64,7 @@ require (
 	google.golang.org/protobuf v1.33.0
 	gopkg.in/macaroon-bakery.v2 v2.0.1
 	gopkg.in/macaroon.v2 v2.0.0
+	pgregory.net/rapid v1.1.0
 )
 
 require (

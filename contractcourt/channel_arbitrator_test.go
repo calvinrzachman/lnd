@@ -590,7 +590,7 @@ func TestChannelArbitratorRemoteForceClose(t *testing.T) {
 	chanArb.cfg.ChainEvents.RemoteUnilateralClosure <- &RemoteUnilateralCloseInfo{
 		UnilateralCloseSummary: uniClose,
 		CommitSet: CommitSet{
-			ConfCommitKey: &RemoteHtlcSet,
+			ConfCommitKey: fn.Some(RemoteHtlcSet),
 			HtlcSets:      make(map[HtlcSetKey][]channeldb.HTLC),
 		},
 	}
@@ -693,11 +693,15 @@ func TestChannelArbitratorLocalForceClose(t *testing.T) {
 	chanArbCtx.AssertState(StateCommitmentBroadcasted)
 
 	// Now notify about the local force close getting confirmed.
+	//
+	//nolint:lll
 	chanArb.cfg.ChainEvents.LocalUnilateralClosure <- &LocalUnilateralCloseInfo{
 		SpendDetail: &chainntnfs.SpendDetail{},
 		LocalForceCloseSummary: &lnwallet.LocalForceCloseSummary{
-			CloseTx:         &wire.MsgTx{},
-			HtlcResolutions: &lnwallet.HtlcResolutions{},
+			CloseTx: &wire.MsgTx{},
+			ContractResolutions: fn.Some(lnwallet.ContractResolutions{
+				HtlcResolutions: &lnwallet.HtlcResolutions{},
+			}),
 		},
 		ChannelCloseSummary: &channeldb.ChannelCloseSummary{},
 	}
@@ -777,7 +781,7 @@ func TestChannelArbitratorBreachClose(t *testing.T) {
 		},
 		AnchorResolution: anchorRes,
 		CommitSet: CommitSet{
-			ConfCommitKey: &RemoteHtlcSet,
+			ConfCommitKey: fn.Some(RemoteHtlcSet),
 			HtlcSets: map[HtlcSetKey][]channeldb.HTLC{
 				RemoteHtlcSet: {htlc1, htlc2},
 			},
@@ -931,6 +935,24 @@ func TestChannelArbitratorLocalForceClosePendingHtlc(t *testing.T) {
 		t.Fatalf("no response received")
 	}
 
+	// We expect an immediate resolution message for the outgoing dust htlc.
+	// It is not resolvable on-chain and it can be canceled back even before
+	// the commitment transaction confirmed.
+	select {
+	case msgs := <-chanArbCtx.resolutions:
+		if len(msgs) != 1 {
+			t.Fatalf("expected 1 message, instead got %v",
+				len(msgs))
+		}
+
+		if msgs[0].HtlcIndex != outgoingDustHtlc.HtlcIndex {
+			t.Fatalf("wrong htlc index: expected %v, got %v",
+				outgoingDustHtlc.HtlcIndex, msgs[0].HtlcIndex)
+		}
+	case <-time.After(defaultTimeout):
+		t.Fatalf("resolution msgs not sent")
+	}
+
 	// Now notify about the local force close getting confirmed.
 	closeTx := &wire.MsgTx{
 		TxIn: []*wire.TxIn{
@@ -969,19 +991,22 @@ func TestChannelArbitratorLocalForceClosePendingHtlc(t *testing.T) {
 		},
 	}
 
+	//nolint:lll
 	chanArb.cfg.ChainEvents.LocalUnilateralClosure <- &LocalUnilateralCloseInfo{
 		SpendDetail: &chainntnfs.SpendDetail{},
 		LocalForceCloseSummary: &lnwallet.LocalForceCloseSummary{
 			CloseTx: closeTx,
-			HtlcResolutions: &lnwallet.HtlcResolutions{
-				OutgoingHTLCs: []lnwallet.OutgoingHtlcResolution{
-					outgoingRes,
+			ContractResolutions: fn.Some(lnwallet.ContractResolutions{
+				HtlcResolutions: &lnwallet.HtlcResolutions{
+					OutgoingHTLCs: []lnwallet.OutgoingHtlcResolution{
+						outgoingRes,
+					},
 				},
-			},
+			}),
 		},
 		ChannelCloseSummary: &channeldb.ChannelCloseSummary{},
 		CommitSet: CommitSet{
-			ConfCommitKey: &LocalHtlcSet,
+			ConfCommitKey: fn.Some(LocalHtlcSet),
 			HtlcSets: map[HtlcSetKey][]channeldb.HTLC{
 				LocalHtlcSet: htlcSet,
 			},
@@ -992,22 +1017,6 @@ func TestChannelArbitratorLocalForceClosePendingHtlc(t *testing.T) {
 		StateContractClosed,
 		StateWaitingFullResolution,
 	)
-
-	// We expect an immediate resolution message for the outgoing dust htlc.
-	// It is not resolvable on-chain.
-	select {
-	case msgs := <-chanArbCtx.resolutions:
-		if len(msgs) != 1 {
-			t.Fatalf("expected 1 message, instead got %v", len(msgs))
-		}
-
-		if msgs[0].HtlcIndex != outgoingDustHtlc.HtlcIndex {
-			t.Fatalf("wrong htlc index: expected %v, got %v",
-				outgoingDustHtlc.HtlcIndex, msgs[0].HtlcIndex)
-		}
-	case <-time.After(defaultTimeout):
-		t.Fatalf("resolution msgs not sent")
-	}
 
 	// We'll grab the old notifier here as our resolvers are still holding
 	// a reference to this instance, and a new one will be created when we
@@ -1525,7 +1534,7 @@ func TestChannelArbitratorForceCloseBreachedChannel(t *testing.T) {
 		},
 	}
 	log.commitSet = &CommitSet{
-		ConfCommitKey: &RemoteHtlcSet,
+		ConfCommitKey: fn.Some(RemoteHtlcSet),
 		HtlcSets: map[HtlcSetKey][]channeldb.HTLC{
 			RemoteHtlcSet: {},
 		},
@@ -1611,12 +1620,15 @@ func TestChannelArbitratorCommitFailure(t *testing.T) {
 		},
 		{
 			closeType: channeldb.LocalForceClose,
+			//nolint:lll
 			sendEvent: func(chanArb *ChannelArbitrator) {
 				chanArb.cfg.ChainEvents.LocalUnilateralClosure <- &LocalUnilateralCloseInfo{
 					SpendDetail: &chainntnfs.SpendDetail{},
 					LocalForceCloseSummary: &lnwallet.LocalForceCloseSummary{
-						CloseTx:         &wire.MsgTx{},
-						HtlcResolutions: &lnwallet.HtlcResolutions{},
+						CloseTx: &wire.MsgTx{},
+						ContractResolutions: fn.Some(lnwallet.ContractResolutions{
+							HtlcResolutions: &lnwallet.HtlcResolutions{},
+						}),
 					},
 					ChannelCloseSummary: &channeldb.ChannelCloseSummary{},
 				}
@@ -1944,16 +1956,24 @@ func TestChannelArbitratorDanglingCommitForceClose(t *testing.T) {
 			// being canalled back. Also note that there're no HTLC
 			// resolutions sent since we have none on our
 			// commitment transaction.
+			//
+			//nolint:lll
 			uniCloseInfo := &LocalUnilateralCloseInfo{
 				SpendDetail: &chainntnfs.SpendDetail{},
 				LocalForceCloseSummary: &lnwallet.LocalForceCloseSummary{
-					CloseTx:         closeTx,
-					HtlcResolutions: &lnwallet.HtlcResolutions{},
+					CloseTx: closeTx,
+					ContractResolutions: fn.Some(lnwallet.ContractResolutions{
+						HtlcResolutions: &lnwallet.HtlcResolutions{},
+					}),
 				},
 				ChannelCloseSummary: &channeldb.ChannelCloseSummary{},
 				CommitSet: CommitSet{
-					ConfCommitKey: &testCase.confCommit,
-					HtlcSets:      make(map[HtlcSetKey][]channeldb.HTLC),
+					ConfCommitKey: fn.Some(
+						testCase.confCommit,
+					),
+					HtlcSets: make(
+						map[HtlcSetKey][]channeldb.HTLC,
+					),
 				},
 			}
 
@@ -2254,7 +2274,7 @@ func TestFindCommitmentDeadlineAndValue(t *testing.T) {
 	mockPreimageDB := newMockWitnessBeacon()
 	mockPreimageDB.lookupPreimage[rHash] = rHash
 
-	// Attack a mock PreimageDB and Registry to channel arbitrator.
+	// Attach a mock PreimageDB and Registry to channel arbitrator.
 	chanArb := chanArbCtx.chanArb
 	chanArb.cfg.PreimageDB = mockPreimageDB
 	chanArb.cfg.Registry = &mockRegistry{}
@@ -2445,7 +2465,7 @@ func TestSweepAnchors(t *testing.T) {
 	mockPreimageDB := newMockWitnessBeacon()
 	mockPreimageDB.lookupPreimage[rHash] = rHash
 
-	// Attack a mock PreimageDB and Registry to channel arbitrator.
+	// Attach a mock PreimageDB and Registry to channel arbitrator.
 	chanArb := chanArbCtx.chanArb
 	chanArb.cfg.PreimageDB = mockPreimageDB
 	chanArb.cfg.Registry = &mockRegistry{}
@@ -2596,6 +2616,116 @@ func TestSweepAnchors(t *testing.T) {
 	)
 }
 
+// TestSweepLocalAnchor checks the sweep params used for the local anchor will
+// be updated optionally based on the pending remote commit.
+func TestSweepLocalAnchor(t *testing.T) {
+	// Create a testing channel arbitrator.
+	log := &mockArbitratorLog{
+		state:     StateDefault,
+		newStates: make(chan ArbitratorState, 5),
+	}
+	chanArbCtx, err := createTestChannelArbitrator(t, log)
+	require.NoError(t, err, "unable to create ChannelArbitrator")
+
+	// Attach a mock PreimageDB and Registry to channel arbitrator.
+	chanArb := chanArbCtx.chanArb
+	mockPreimageDB := newMockWitnessBeacon()
+	chanArb.cfg.PreimageDB = mockPreimageDB
+	chanArb.cfg.Registry = &mockRegistry{}
+
+	// Set current block height.
+	heightHint := uint32(1000)
+	chanArbCtx.chanArb.blocks <- int32(heightHint)
+
+	htlcIndex := uint64(99)
+	deadlineDelta := uint32(10)
+
+	htlcAmt := lnwire.MilliSatoshi(1_000_000)
+
+	// Create one testing HTLC.
+	deadlineSmallDelta := deadlineDelta + 4
+	htlcSmallExipry := channeldb.HTLC{
+		HtlcIndex:     htlcIndex,
+		RefundTimeout: heightHint + deadlineSmallDelta,
+		Amt:           htlcAmt,
+	}
+
+	// Setup our local HTLC set such that it doesn't have any HTLCs. We
+	// expect an anchor sweeping request to be made using the params
+	// created from sweeping the anchor from the pending remote commit.
+	chanArb.activeHTLCs[LocalHtlcSet] = htlcSet{}
+
+	// Setup our remote HTLC set such that no valid HTLCs can be used, thus
+	// the anchor sweeping is skipped.
+	chanArb.activeHTLCs[RemoteHtlcSet] = htlcSet{}
+
+	// Setup out pending remote HTLC set such that we will use the HTLC's
+	// CLTV from the outgoing HTLC set.
+	// Only half of the deadline is used since the anchor cpfp sweep. The
+	// other half of the deadline is used to sweep the HTLCs at stake.
+	expectedPendingDeadline := heightHint + deadlineSmallDelta/2
+	chanArb.activeHTLCs[RemotePendingHtlcSet] = htlcSet{
+		outgoingHTLCs: map[uint64]channeldb.HTLC{
+			htlcSmallExipry.HtlcIndex: htlcSmallExipry,
+		},
+	}
+
+	// Mock FindOutgoingHTLCDeadline so the pending remote's outgoing HTLC
+	// returns the small expiry value.
+	chanArb.cfg.FindOutgoingHTLCDeadline = func(
+		htlc channeldb.HTLC) fn.Option[int32] {
+
+		if htlc.RHash != htlcSmallExipry.RHash {
+			return fn.None[int32]()
+		}
+
+		return fn.Some(int32(htlcSmallExipry.RefundTimeout))
+	}
+
+	// Create AnchorResolutions.
+	anchors := &lnwallet.AnchorResolutions{
+		Local: &lnwallet.AnchorResolution{
+			AnchorSignDescriptor: input.SignDescriptor{
+				Output: &wire.TxOut{Value: 1},
+			},
+		},
+		Remote: &lnwallet.AnchorResolution{
+			AnchorSignDescriptor: input.SignDescriptor{
+				Output: &wire.TxOut{Value: 1},
+			},
+		},
+		RemotePending: &lnwallet.AnchorResolution{
+			AnchorSignDescriptor: input.SignDescriptor{
+				Output: &wire.TxOut{Value: 1},
+			},
+		},
+	}
+
+	// Sweep anchors and check there's no error.
+	err = chanArb.sweepAnchors(anchors, heightHint)
+	require.NoError(t, err)
+
+	// Verify deadlines are used as expected.
+	deadlines := chanArbCtx.sweeper.deadlines
+
+	// We should see two `SweepInput` calls - one for sweeping the local
+	// anchor, the other from the remote pending anchor.
+	require.Len(t, deadlines, 2)
+
+	// Both deadlines should be the same since the local anchor uses the
+	// parameters from the pending remote commitment.
+	require.EqualValues(
+		t, expectedPendingDeadline, deadlines[0],
+		"local deadline not matched, want %v, got %v",
+		expectedPendingDeadline, deadlines[0],
+	)
+	require.EqualValues(
+		t, expectedPendingDeadline, deadlines[1],
+		"pending remote deadline not matched, want %v, got %v",
+		expectedPendingDeadline, deadlines[1],
+	)
+}
+
 // TestChannelArbitratorAnchors asserts that the commitment tx anchor is swept.
 func TestChannelArbitratorAnchors(t *testing.T) {
 	log := &mockArbitratorLog{
@@ -2619,7 +2749,7 @@ func TestChannelArbitratorAnchors(t *testing.T) {
 	mockPreimageDB := newMockWitnessBeacon()
 	mockPreimageDB.lookupPreimage[rHash] = rHash
 
-	// Attack a mock PreimageDB and Registry to channel arbitrator.
+	// Attach a mock PreimageDB and Registry to channel arbitrator.
 	chanArb := chanArbCtx.chanArb
 	chanArb.cfg.PreimageDB = mockPreimageDB
 	chanArb.cfg.Registry = &mockRegistry{}
@@ -2754,16 +2884,19 @@ func TestChannelArbitratorAnchors(t *testing.T) {
 		},
 	}
 
+	//nolint:lll
 	chanArb.cfg.ChainEvents.LocalUnilateralClosure <- &LocalUnilateralCloseInfo{
 		SpendDetail: &chainntnfs.SpendDetail{},
 		LocalForceCloseSummary: &lnwallet.LocalForceCloseSummary{
-			CloseTx:          closeTx,
-			HtlcResolutions:  &lnwallet.HtlcResolutions{},
-			AnchorResolution: anchorResolution,
+			CloseTx: closeTx,
+			ContractResolutions: fn.Some(lnwallet.ContractResolutions{
+				HtlcResolutions:  &lnwallet.HtlcResolutions{},
+				AnchorResolution: anchorResolution,
+			}),
 		},
 		ChannelCloseSummary: &channeldb.ChannelCloseSummary{},
 		CommitSet: CommitSet{
-			ConfCommitKey: &LocalHtlcSet,
+			ConfCommitKey: fn.Some(LocalHtlcSet),
 			HtlcSets:      map[HtlcSetKey][]channeldb.HTLC{},
 		},
 	}
@@ -2993,14 +3126,10 @@ func (m *mockChannel) NewAnchorResolutions() (*lnwallet.AnchorResolutions,
 	return &lnwallet.AnchorResolutions{}, nil
 }
 
-func (m *mockChannel) ForceCloseChan() (*lnwallet.LocalForceCloseSummary, error) {
+func (m *mockChannel) ForceCloseChan() (*wire.MsgTx, error) {
 	if m.forceCloseErr != nil {
 		return nil, m.forceCloseErr
 	}
 
-	summary := &lnwallet.LocalForceCloseSummary{
-		CloseTx:         &wire.MsgTx{},
-		HtlcResolutions: &lnwallet.HtlcResolutions{},
-	}
-	return summary, nil
+	return &wire.MsgTx{}, nil
 }

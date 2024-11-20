@@ -172,10 +172,10 @@ func testSphinxReplayPersistence(ht *lntest.HarnessTest) {
 	invoiceResp := dave.RPC.AddInvoice(invoice)
 
 	// Wait for all channels to be recognized and advertized.
-	ht.AssertTopologyChannelOpen(carol, chanPoint)
-	ht.AssertTopologyChannelOpen(dave, chanPoint)
-	ht.AssertTopologyChannelOpen(carol, chanPointFC)
-	ht.AssertTopologyChannelOpen(fred, chanPointFC)
+	ht.AssertChannelInGraph(carol, chanPoint)
+	ht.AssertChannelInGraph(dave, chanPoint)
+	ht.AssertChannelInGraph(carol, chanPointFC)
+	ht.AssertChannelInGraph(fred, chanPointFC)
 
 	// With the invoice for Dave added, send a payment from Fred paying
 	// to the above generated invoice.
@@ -417,7 +417,7 @@ func testMaxPendingChannels(ht *lntest.HarnessTest) {
 		// Ensure that the funding transaction enters a block, and is
 		// properly advertised by Alice.
 		ht.AssertTxInBlock(block, fundingTxID)
-		ht.AssertTopologyChannelOpen(alice, fundingChanPoint)
+		ht.AssertChannelInGraph(alice, fundingChanPoint)
 
 		// The channel should be listed in the peer information
 		// returned by both peers.
@@ -1421,9 +1421,10 @@ func testSendSelectedCoinsChannelReserve(ht *lntest.HarnessTest) {
 	// Create a two-hop network: Alice -> Bob.
 	//
 	// NOTE: Alice will have one UTXO after the funding.
-	_, nodes := createSimpleNetwork(
-		ht, []string{"--protocol.anchors"}, 2,
-		lntest.OpenChannelParams{
+	cfg := []string{"--protocol.anchors"}
+	cfgs := [][]string{cfg, cfg}
+	_, nodes := ht.CreateSimpleNetwork(
+		cfgs, lntest.OpenChannelParams{
 			Amt: chanAmt,
 		},
 	)

@@ -399,6 +399,9 @@ func (hn *HarnessNode) StartLndCmd(ctxb context.Context) error {
 		return err
 	}
 
+	pid := hn.cmd.Process.Pid
+	hn.T.Logf("Starting node (name=%v) with PID=%v", hn.Cfg.Name, pid)
+
 	return nil
 }
 
@@ -794,6 +797,18 @@ func (hn *HarnessNode) Shutdown() error {
 // Kill kills the lnd process.
 func (hn *HarnessNode) Kill() error {
 	return hn.cmd.Process.Kill()
+}
+
+// KillAndWait kills the lnd process and waits for it to finish.
+func (hn *HarnessNode) KillAndWait() error {
+	err := hn.cmd.Process.Kill()
+	if err != nil {
+		return err
+	}
+
+	_, err = hn.cmd.Process.Wait()
+
+	return err
 }
 
 // printErrf prints an error to the console.

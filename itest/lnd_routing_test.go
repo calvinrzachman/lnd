@@ -344,7 +344,7 @@ func runMultiHopSendToRoute(ht *lntest.HarnessTest, useGraphCache bool) {
 	defer ht.CloseChannel(carol, chanPointBob)
 
 	// Make sure Alice knows the channel between Bob and Carol.
-	ht.AssertTopologyChannelOpen(alice, chanPointBob)
+	ht.AssertChannelInGraph(alice, chanPointBob)
 
 	// Create 5 invoices for Carol, which expect a payment from Alice for
 	// 1k satoshis with a different preimage each time.
@@ -591,12 +591,12 @@ func testPrivateChannels(ht *lntest.HarnessTest) {
 
 	// Carol and Alice should know about 4, while Bob and Dave should only
 	// know about 3, since one channel is private.
-	ht.AssertNumEdges(alice, 4, true)
-	ht.AssertNumEdges(alice, 3, false)
-	ht.AssertNumEdges(bob, 3, true)
-	ht.AssertNumEdges(carol, 4, true)
-	ht.AssertNumEdges(carol, 3, false)
-	ht.AssertNumEdges(dave, 3, true)
+	ht.AssertNumActiveEdges(alice, 4, true)
+	ht.AssertNumActiveEdges(alice, 3, false)
+	ht.AssertNumActiveEdges(bob, 3, true)
+	ht.AssertNumActiveEdges(carol, 4, true)
+	ht.AssertNumActiveEdges(carol, 3, false)
+	ht.AssertNumActiveEdges(dave, 3, true)
 
 	// Close all channels.
 	ht.CloseChannel(alice, chanPointAlice)
@@ -965,7 +965,7 @@ func testMultiHopOverPrivateChannels(ht *lntest.HarnessTest) {
 	)
 
 	// Alice should know the new channel from Bob.
-	ht.AssertTopologyChannelOpen(alice, chanPointBob)
+	ht.AssertChannelInGraph(alice, chanPointBob)
 
 	// Next, we'll create Dave's node and open a private channel between
 	// him and Carol with Carol being the funder.
@@ -981,7 +981,7 @@ func testMultiHopOverPrivateChannels(ht *lntest.HarnessTest) {
 	)
 
 	// Dave should know the channel[Bob<->Carol] from Carol.
-	ht.AssertTopologyChannelOpen(dave, chanPointBob)
+	ht.AssertChannelInGraph(dave, chanPointBob)
 
 	// Now that all the channels are set up according to the topology from
 	// above, we can proceed to test payments. We'll create an invoice for
@@ -1077,8 +1077,8 @@ func testQueryRoutes(ht *lntest.HarnessTest) {
 
 	// Before we continue, give Alice some time to catch up with the newly
 	// opened channels.
-	ht.AssertTopologyChannelOpen(alice, chanPointBob)
-	ht.AssertTopologyChannelOpen(alice, chanPointCarol)
+	ht.AssertChannelInGraph(alice, chanPointBob)
+	ht.AssertChannelInGraph(alice, chanPointCarol)
 
 	// Query for routes to pay from Alice to Dave.
 	const paymentAmt = 1000
@@ -1389,7 +1389,7 @@ func testRouteFeeCutoff(ht *lntest.HarnessTest) {
 	}
 	for _, chanPoint := range networkChans {
 		for _, node := range nodes {
-			ht.AssertTopologyChannelOpen(node, chanPoint)
+			ht.AssertChannelInGraph(node, chanPoint)
 		}
 	}
 
@@ -1525,8 +1525,9 @@ func testRouteFeeCutoff(ht *lntest.HarnessTest) {
 func testFeeLimitAfterQueryRoutes(ht *lntest.HarnessTest) {
 	// Create a three hop network: Alice -> Bob -> Carol.
 	chanAmt := btcutil.Amount(100000)
-	chanPoints, nodes := createSimpleNetwork(
-		ht, []string{}, 3, lntest.OpenChannelParams{Amt: chanAmt},
+	cfgs := [][]string{nil, nil, nil}
+	chanPoints, nodes := ht.CreateSimpleNetwork(
+		cfgs, lntest.OpenChannelParams{Amt: chanAmt},
 	)
 	alice, bob, carol := nodes[0], nodes[1], nodes[2]
 	chanPointAliceBob, chanPointBobCarol := chanPoints[0], chanPoints[1]

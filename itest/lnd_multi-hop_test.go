@@ -250,17 +250,16 @@ func runMultiHopHtlcLocalTimeout(ht *lntest.HarnessTest,
 	op := ht.OutPointFromChannelPoint(bobChanPoint)
 	closeTx := ht.AssertOutpointInMempool(op)
 
+	// Dust HTLCs are immediately canceled backwards as soon as the local
+	// commitment tx is successfully broadcasted to the local mempool.
+	ht.AssertActiveHtlcs(alice, payHash)
+
 	// Bob's anchor output should be offered to his sweep since Bob has
 	// time-sensitive HTLCs - we expect both anchors are offered.
 	ht.AssertNumPendingSweeps(bob, 2)
 
 	// Mine a block to confirm the closing transaction.
 	ht.MineBlocksAndAssertNumTxes(1, 1)
-
-	// At this point, Bob should have canceled backwards the dust HTLC
-	// that we sent earlier. This means Alice should now only have a single
-	// HTLC on her channel.
-	ht.AssertActiveHtlcs(alice, payHash)
 
 	// With the closing transaction confirmed, we should expect Bob's HTLC
 	// timeout transaction to be offered to the sweeper due to the expiry
@@ -2296,8 +2295,8 @@ func createThreeHopNetwork(ht *lntest.HarnessTest,
 	// We'll only do this though if it wasn't a private channel we opened
 	// earlier.
 	if !privateChan {
-		ht.AssertTopologyChannelOpen(alice, bobChanPoint)
-		ht.AssertTopologyChannelOpen(carol, aliceChanPoint)
+		ht.AssertChannelInGraph(alice, bobChanPoint)
+		ht.AssertChannelInGraph(carol, aliceChanPoint)
 	} else {
 		// Otherwise, we want to wait for all the channels to be shown
 		// as active before we proceed.

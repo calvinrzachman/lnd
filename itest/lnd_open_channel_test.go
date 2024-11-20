@@ -80,11 +80,11 @@ func testOpenChannelAfterReorg(ht *lntest.HarnessTest) {
 
 	// Wait for Alice and Bob to recognize and advertise the new channel
 	// generated above.
-	ht.AssertTopologyChannelOpen(alice, chanPoint)
-	ht.AssertTopologyChannelOpen(bob, chanPoint)
+	ht.AssertChannelInGraph(alice, chanPoint)
+	ht.AssertChannelInGraph(bob, chanPoint)
 
 	// Alice should now have 1 edge in her graph.
-	ht.AssertNumEdges(alice, 1, true)
+	ht.AssertNumActiveEdges(alice, 1, true)
 
 	// Now we disconnect Alice's chain backend from the original miner, and
 	// connect the two miners together. Since the temporary miner knows
@@ -112,7 +112,7 @@ func testOpenChannelAfterReorg(ht *lntest.HarnessTest) {
 
 	// Since the fundingtx was reorged out, Alice should now have no edges
 	// in her graph.
-	ht.AssertNumEdges(alice, 0, true)
+	ht.AssertNumActiveEdges(alice, 0, true)
 
 	// Cleanup by mining the funding tx again, then closing the channel.
 	block = ht.MineBlocksAndAssertNumTxes(1, 1)[0]

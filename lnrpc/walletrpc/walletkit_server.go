@@ -536,7 +536,9 @@ func (w *WalletKit) ReleaseOutput(ctx context.Context,
 		return nil, err
 	}
 
-	return &ReleaseOutputResponse{}, nil
+	return &ReleaseOutputResponse{
+		Status: fmt.Sprintf("output %v released", op.String()),
+	}, nil
 }
 
 // ListLeases returns a list of all currently locked utxos.
@@ -1443,7 +1445,10 @@ func (w *WalletKit) LabelTransaction(ctx context.Context,
 	}
 
 	err = w.cfg.Wallet.LabelTransaction(*hash, req.Label, req.Overwrite)
-	return &LabelTransactionResponse{}, err
+
+	return &LabelTransactionResponse{
+		Status: fmt.Sprintf("transaction label '%s' added", req.Label),
+	}, err
 }
 
 // FundPsbt creates a fully populated PSBT that contains enough inputs to fund
@@ -1626,11 +1631,17 @@ func (w *WalletKit) FundPsbt(_ context.Context,
 			return nil, fmt.Errorf("unknown change output type")
 		}
 
+		maxFeeRatio := chanfunding.DefaultMaxFeeRatio
+
+		if req.MaxFeeRatio != 0 {
+			maxFeeRatio = req.MaxFeeRatio
+		}
+
 		// Run the actual funding process now, using the channel funding
 		// coin selection algorithm.
 		return w.fundPsbtCoinSelect(
 			account, changeIndex, packet, minConfs, changeType,
-			feeSatPerKW, coinSelectionStrategy,
+			feeSatPerKW, coinSelectionStrategy, maxFeeRatio,
 		)
 
 	// The template is specified as a RPC message. We need to create a new
@@ -1833,8 +1844,8 @@ func (w *WalletKit) fundPsbtInternalWallet(account string,
 func (w *WalletKit) fundPsbtCoinSelect(account string, changeIndex int32,
 	packet *psbt.Packet, minConfs int32,
 	changeType chanfunding.ChangeAddressType,
-	feeRate chainfee.SatPerKWeight, strategy base.CoinSelectionStrategy) (
-	*FundPsbtResponse, error) {
+	feeRate chainfee.SatPerKWeight, strategy base.CoinSelectionStrategy,
+	maxFeeRatio float64) (*FundPsbtResponse, error) {
 
 	// We want to make sure we don't select any inputs that are already
 	// specified in the template. To do that, we require those inputs to
@@ -1922,6 +1933,7 @@ func (w *WalletKit) fundPsbtCoinSelect(account string, changeIndex int32,
 		changeAmt, needMore, err := chanfunding.CalculateChangeAmount(
 			inputSum, outputSum, packetFeeNoChange,
 			packetFeeWithChange, changeDustLimit, changeType,
+			maxFeeRatio,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("error calculating change "+
@@ -1978,7 +1990,7 @@ func (w *WalletKit) fundPsbtCoinSelect(account string, changeIndex int32,
 
 		selectedCoins, changeAmount, err := chanfunding.CoinSelect(
 			feeRate, fundingAmount, changeDustLimit, coins,
-			strategy, estimator, changeType,
+			strategy, estimator, changeType, maxFeeRatio,
 		)
 		if err != nil {
 			return fmt.Errorf("error selecting coins: %w", err)
@@ -2889,7 +2901,10 @@ func (w *WalletKit) ImportPublicKey(_ context.Context,
 		return nil, err
 	}
 
-	return &ImportPublicKeyResponse{}, nil
+	return &ImportPublicKeyResponse{
+		Status: fmt.Sprintf("public key %x imported",
+			pubKey.SerializeCompressed()),
+	}, nil
 }
 
 // ImportTapscript imports a Taproot script and internal key and adds the

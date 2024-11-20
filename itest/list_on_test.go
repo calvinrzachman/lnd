@@ -702,4 +702,12 @@ var allTestCases = []*lntest.TestCase{
 		Name:     "send to route failed htlc timeout",
 		TestFunc: testSendToRouteFailHTLCTimeout,
 	},
+	{
+		Name:     "debuglevel show",
+		TestFunc: testDebuglevelShow,
+	},
+	{
+		Name:     "switch store rpc",
+		TestFunc: testFetchAttemptResults,
+	},
 }
