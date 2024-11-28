@@ -1127,8 +1127,19 @@ func (s *Server) TrackOnion(ctx context.Context,
 		// NOTE(calvin): Is an HTLC in-flight? It depends what kind of
 		// error we get. We should consider making the Switch's error
 		// types more capable of helping us make this distinction.
-		return nil, status.Errorf(codes.Internal,
-			"failed locate payment attempt: %v", err)
+		message, code := htlcswitch.TranslateErrorForRPC(err)
+
+		// If this is a htlcswitch.ErrPaymentIDNotFound error, we need
+		// to transmit that fact to the client so they can know with
+		// certainty that no HTLC by that attempt ID is in-flight and
+		// that it is safe to retry.
+		return &TrackOnionResponse{
+			Success:      false,
+			ErrorCode:    code,
+			ErrorMessage: message,
+		}, nil
+		// return nil, status.Errorf(codes.Internal,
+		// 	"failed locate payment attempt: %v", err)
 	}
 
 	// The switch knows about this payment, we'll wait for a result to be
