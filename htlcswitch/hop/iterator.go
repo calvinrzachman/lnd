@@ -756,6 +756,8 @@ func (p *OnionProcessor) DecodeHopIterator(r io.Reader, rHash []byte,
 		}
 	}
 
+	log.Debugf("Onion Packet: %+v", onionPkt)
+
 	// Attempt to process the Sphinx packet. We include the payment hash of
 	// the HTLC as it's authenticated within the Sphinx packet itself as
 	// associated data in order to thwart attempts a replay attacks. In the
@@ -834,6 +836,9 @@ func (p *OnionProcessor) DecodeHopIterators(id []byte,
 				b.Val,
 			))
 		})
+
+		log.Debugf("Onion Packet: %+v", onionPkt)
+
 		err = tx.ProcessOnionPacket(
 			seqNum, onionPkt, req.RHash, req.IncomingCltv, opts...,
 		)
