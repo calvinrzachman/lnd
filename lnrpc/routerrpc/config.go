@@ -2,6 +2,7 @@ package routerrpc
 
 import (
 	"github.com/lightningnetwork/lnd/aliasmgr"
+	"github.com/lightningnetwork/lnd/htlcswitch"
 	"github.com/lightningnetwork/lnd/macaroons"
 	"github.com/lightningnetwork/lnd/routing"
 )
@@ -55,9 +56,18 @@ type Config struct {
 	// HTLCSwitch contains shared logic between this sub server and the
 	// main rpc server.
 	// HtlcSwitch     *htlcswitch.Switch
-	HtlcDispatcher routing.PaymentAttemptDispatcher
+	// HtlcDispatcher routing.PaymentAttemptDispatcher
+	HtlcDispatcher HtlcDispatcher
 
 	ChannelInfoAccessor ChannelInfoAccessor
+}
+
+// HtlcDispatcher provides the means to safely send HTLCs via the lightning
+// network. It is expected that the underlying implementation is idempotent
+// in that it will not forward the same (attempt ID, onion) twice.
+type HtlcDispatcher interface {
+	routing.PaymentAttemptDispatcher
+	htlcswitch.Store
 }
 
 // DefaultConfig defines the config defaults.

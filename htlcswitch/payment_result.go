@@ -109,10 +109,70 @@ func newNetworkResultStore(db kvdb.Backend) *networkResultStore {
 	}
 }
 
-// InitPayment stores the networkResult for the given attemptID, and notifies
-// any subscribers.
+// InitAttempt initializes the payment attempt with the given attemptID.
+// If the attemptID has already been initialized, it returns an error. This
+// method ensures that we do not create duplicate payment attempts for the same
+// attemptID.
+//
+// NOTE(calvin): Subscribed clients do not receive notice of this initialization.
 func (store *networkResultStore) InitAttempt(attemptID uint64) error {
-	return store.StoreResult(attemptID, nil)
+
+	// We get a mutex for this attempt ID to ensure no concurrent writes
+	// for the same attempt ID.
+	store.attemptIDMtx.Lock(attemptID)
+	defer store.attemptIDMtx.Unlock(attemptID)
+
+	// Check if the attemptID is already initialized or exists in the store
+	existingResult, err := store.GetResult(attemptID)
+	if err != nil && !errors.Is(err, ErrPaymentIDNotFound) {
+		// If the error is anything other than "not found", return it.
+		return err
+	}
+
+	if existingResult != nil {
+		// If the result is already in-progress, return an error
+		// indicating that the attempt already exists.
+		return ErrPaymentIDAlreadyExists
+	}
+
+	// Create an empty networkResult to serve as place holder until a result
+	// from the network is received.
+	inProgressResult := &networkResult{
+		msg:          &emptyMessage{}, // no actual message here
+		unencrypted:  true,
+		isResolution: false,
+	}
+
+	// This is an in-progress result, no need to notify subscribers yet.
+	var b bytes.Buffer
+	if err := serializeNetworkResult(&b, inProgressResult); err != nil {
+		return err
+	}
+
+	var attemptIDBytes [8]byte
+	binary.BigEndian.PutUint64(attemptIDBytes[:], attemptID)
+
+	// Mark this an HTLC attempt with this ID as having been seen. No
+	// network result is available yet.
+	//
+	// NOTE(calvin): subscribing clients expecting to block until a network
+	// result is available must not be notified of this initialization.
+	err = kvdb.Batch(store.backend, func(tx kvdb.RwTx) error {
+		networkResults, err := tx.CreateTopLevelBucket(
+			networkResultStoreBucketKey,
+		)
+		if err != nil {
+			return err
+		}
+
+		// Store the in-progress result.
+		return networkResults.Put(attemptIDBytes[:], b.Bytes())
+	})
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // storeResult stores the networkResult for the given attemptID, and notifies
@@ -127,36 +187,6 @@ func (store *networkResultStore) StoreResult(attemptID uint64,
 	defer store.attemptIDMtx.Unlock(attemptID)
 
 	log.Debugf("Storing result for attemptID=%v", attemptID)
-
-	// If the result is "in-progress", we store it but do not notify subscribers
-	// (i.e., do not add to store.results).
-	if result == nil {
-		// This is an in-progress result, no need to notify subscribers yet.
-		var b bytes.Buffer
-		if err := serializeNetworkResult(&b, result); err != nil {
-			return err
-		}
-
-		var attemptIDBytes [8]byte
-		binary.BigEndian.PutUint64(attemptIDBytes[:], attemptID)
-
-		err := kvdb.Batch(store.backend, func(tx kvdb.RwTx) error {
-			networkResults, err := tx.CreateTopLevelBucket(
-				networkResultStoreBucketKey,
-			)
-			if err != nil {
-				return err
-			}
-
-			// Store the in-progress result but don't notify.
-			return networkResults.Put(attemptIDBytes[:], b.Bytes())
-		})
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}
 
 	// Handle finalized result (success or failure)
 	var b bytes.Buffer
@@ -254,6 +284,8 @@ func (store *networkResultStore) SubscribeResult(attemptID uint64) (
 
 // getResult attempts to immediately fetch the result for the given pid from
 // the store. If no result is available, ErrPaymentIDNotFound is returned.
+//
+// TODO(calvin): This does not yet grab the lock. Any consequence of this?
 func (store *networkResultStore) GetResult(pid uint64) (
 	*networkResult, error) {
 
@@ -418,4 +450,27 @@ func (store *networkResultStore) DeleteResult(attemptID uint64) error {
 
 		return nil
 	}, func() {})
+}
+
+// emptyMessage is a dummy message that implements the Message interface.
+// It acts as a placeholder for the in-progress state of an HTLC payment attempt.
+type emptyMessage struct{}
+
+// MsgType returns a default MessageType.
+func (e *emptyMessage) MsgType() lnwire.MessageType {
+	return lnwire.MessageType(0)
+}
+
+// Decode is a no-op decoder for the empty message. Since this is just a placeholder,
+// it doesn't actually decode any data.
+func (e *emptyMessage) Decode(r io.Reader, pver uint32) error {
+	// No decoding necessary for an empty message
+	return nil
+}
+
+// Encode is a no-op encoder for the empty message. Since this is just a placeholder,
+// it doesn't actually encode any data.
+func (e *emptyMessage) Encode(w *bytes.Buffer, pver uint32) error {
+	// No encoding necessary for an empty message
+	return nil
 }

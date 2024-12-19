@@ -470,10 +470,10 @@ type htlcNotifier interface {
 		info channeldb.FinalHtlcInfo)
 }
 
-// SwitchStore defines the interface for storing and managing the results
+// Store defines the interface for storing and managing the results
 // of HTLC payment attempts. It is designed to support both local and remote
 // lifecycle controllers, allowing full control over result storage and cleanup.
-type SwitchStore interface {
+type Store interface {
 	// Initialize the payment attempt. This is called before actually sending the HTLC.
 	InitAttempt(attemptID uint64) error
 

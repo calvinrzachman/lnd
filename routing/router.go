@@ -110,6 +110,12 @@ type PaymentAttemptDispatcher interface {
 	// forward a fully encoded payment to the first hop in the route
 	// denoted by its public key. A non-nil error is to be returned if the
 	// payment was unsuccessful.
+	//
+	// NOTE(calvin): Current use of this interface makes the assumption that
+	// if this method errors, the HTLC is guaranteed to not have ever been
+	// in-flight. This does not hold without care when Router and Switch
+	// are run in different processes and communicate over inherently asyc
+	// and unreliable network.
 	SendHTLC(firstHop lnwire.ShortChannelID,
 		attemptID uint64,
 		htlcAdd *lnwire.UpdateAddHTLC) error

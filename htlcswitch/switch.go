@@ -268,7 +268,8 @@ type Switch struct {
 	// should be given a unique integer ID when it is created, otherwise
 	// results might be overwritten.
 	// networkResults *networkResultStore
-	store SwitchStore
+	// store SwitchStore
+	Store
 
 	// circuits is storage for payment circuits which are used to
 	// forward the settle/fail htlc updates back to the add htlc initiator.
@@ -388,7 +389,7 @@ func New(cfg Config, currentHeight uint32) (*Switch, error) {
 		interfaceIndex:    make(map[[33]byte]map[lnwire.ChannelID]ChannelLink),
 		pendingLinkIndex:  make(map[lnwire.ChannelID]ChannelLink),
 		linkStopIndex:     make(map[lnwire.ChannelID]chan struct{}),
-		store:             newNetworkResultStore(cfg.DB),
+		Store:             newNetworkResultStore(cfg.DB),
 		htlcPlex:          make(chan *plexPacket),
 		chanCloseRequests: make(chan *ChanClose),
 		resolutionMsgs:    make(chan *resolutionMsg),
@@ -446,7 +447,7 @@ func (s *Switch) ProcessContractResolution(msg contractcourt.ResolutionMsg) erro
 // HasAttemptResult reads the network result store to fetch the specified
 // attempt. Returns true if the attempt result exists.
 func (s *Switch) HasAttemptResult(attemptID uint64) (bool, error) {
-	_, err := s.store.GetResult(attemptID)
+	_, err := s.Store.GetResult(attemptID)
 	if err == nil {
 		return true, nil
 	}
@@ -483,7 +484,7 @@ func (s *Switch) GetAttemptResult(attemptID uint64, paymentHash lntypes.Hash,
 	// is already available.
 	// Assumption: no one will add this attempt ID other than the caller.
 	if s.circuits.LookupCircuit(inKey) == nil {
-		res, err := s.store.GetResult(attemptID)
+		res, err := s.Store.GetResult(attemptID)
 		if err != nil {
 			return nil, err
 		}
@@ -493,7 +494,7 @@ func (s *Switch) GetAttemptResult(attemptID uint64, paymentHash lntypes.Hash,
 	} else {
 		// The HTLC was committed to the circuits, subscribe for a
 		// result.
-		nChan, err = s.store.SubscribeResult(attemptID)
+		nChan, err = s.Store.SubscribeResult(attemptID)
 		if err != nil {
 			// NOTE(calvin): HTLC has entry in CircuitMap. HTLC is in-flight!
 			// Consider adding a distinguishable error type here!
@@ -554,12 +555,12 @@ func (s *Switch) CleanStore(keepPids map[uint64]struct{}) error {
 		return nil
 	}
 
-	return s.store.CleanStore(keepPids)
+	return s.Store.CleanStore(keepPids)
 }
 
 // FetchAttemptResults retrieves all results from the network result store.
 func (s *Switch) FetchAttemptResults() (map[uint64]*networkResult, error) {
-	return s.store.FetchAttemptResults()
+	return s.Store.FetchAttemptResults()
 }
 
 // DeleteAttemptResult removes the given payment attempt result from the store
@@ -567,7 +568,7 @@ func (s *Switch) FetchAttemptResults() (map[uint64]*networkResult, error) {
 // deletion between the creator of the attempt (router) and HTLC forwarder to
 // prevent state from being cleaned up prematurely.
 func (s *Switch) DeleteAttemptResult(attemptID uint64) error {
-	return s.store.DeleteResult(attemptID)
+	return s.Store.DeleteResult(attemptID)
 }
 
 // SendHTLC is used by other subsystems which aren't belong to htlc switch
@@ -1075,7 +1076,7 @@ func (s *Switch) handleLocalResponse(pkt *htlcPacket) {
 
 	// Store the result to the db. This will also notify subscribers about
 	// the result.
-	if err := s.store.StoreResult(attemptID, n); err != nil {
+	if err := s.StoreResult(attemptID, n); err != nil {
 		log.Errorf("Unable to store attempt result for pid=%v: %v",
 			attemptID, err)
 		return

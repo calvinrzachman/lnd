@@ -1051,6 +1051,27 @@ func (s *Server) SendOnion(_ context.Context,
 			"unable to find eligible channel ID: %v", err)
 	}
 
+	// Initialize the payment attempt and check if it already exists
+	err = s.cfg.HtlcDispatcher.InitAttempt(req.AttemptId)
+	if err != nil {
+		// If InitAttempt returns an error, the payment attempt has already been processed
+		if errors.Is(err, htlcswitch.ErrPaymentIDAlreadyExists) {
+			// TODO(calvin): Any utility in communicating this fact
+			// to callers? Callers can stop retrying if they get
+			// an 'AlreadyExists' error.
+			// return &SendOnionResponse{
+			// 	Success:      false,
+			// 	ErrorMessage: htlcswitch.ErrPaymentIDAlreadyExists.Error(),
+			// 	ErrorCode:    codes.AlreadyExists.String(),
+			// }, nil
+			return nil, status.Errorf(codes.AlreadyExists,
+				"failed to initialize payment attempt: %v", err)
+		}
+
+		return nil, status.Errorf(codes.Internal,
+			"failed to initialize payment attempt: %v", err)
+	}
+
 	// Craft an HTLC packet to send to the htlcswitch. The metadata within
 	// this packet will be used to route the payment through the network,
 	// starting with the first-hop.
