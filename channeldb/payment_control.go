@@ -455,6 +455,81 @@ func (p *PaymentControl) RegisterAttempt(paymentHash lntypes.Hash,
 	return payment, err
 }
 
+// AcknowledgeAttempt updates the state of a specific HTLC attempt to mark it
+// as acknowledged.
+func (p *PaymentControl) AcknowledgeAttempt(paymentHash lntypes.Hash,
+	attemptID uint64) (*MPPayment, error) {
+
+	htlcIDBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(htlcIDBytes, attemptID)
+
+	var payment *MPPayment
+	err := kvdb.Batch(p.db.Backend, func(tx kvdb.RwTx) error {
+		// Prefetch the payment data for efficient access.
+		prefetchPayment(tx, paymentHash)
+
+		// Fetch the payment bucket for updates.
+		bucket, err := fetchPaymentBucketUpdate(tx, paymentHash)
+		if err != nil {
+			return err
+		}
+
+		// Retrieve the payment and its current HTLC attempts.
+		payment, err = fetchPayment(bucket)
+		if err != nil {
+			return err
+		}
+
+		// Locate the specific HTLC attempt by its ID.
+		var attempt *HTLCAttempt
+		for i := range payment.HTLCs {
+			if payment.HTLCs[i].AttemptID == attemptID {
+				attempt = &payment.HTLCs[i]
+				break
+			}
+		}
+
+		if attempt == nil {
+			return fmt.Errorf("attempt %d not found for payment %v",
+				attemptID, paymentHash)
+		}
+
+		// Mark the attempt as acknowledged.
+		attempt.Acknowledged = true
+
+		// Serialize the updated attempt for persistence.
+		var a bytes.Buffer
+		err = serializeHTLCAttemptInfo(&a, &attempt.HTLCAttemptInfo)
+		if err != nil {
+			return err
+		}
+
+		// Update the attempt in the payment bucket.
+		htlcsBucket := bucket.NestedReadWriteBucket(paymentHtlcsBucket)
+		if htlcsBucket == nil {
+			return fmt.Errorf("HTLCs bucket not found for payment %v",
+				paymentHash)
+		}
+
+		err = htlcsBucket.Put(
+			htlcBucketKey(htlcAttemptInfoKey, htlcIDBytes),
+			a.Bytes(),
+		)
+		if err != nil {
+			return err
+		}
+
+		// Fetch updated payment for notification.
+		payment, err = fetchPayment(bucket)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return payment, nil
+}
+
 // SettleAttempt marks the given attempt settled with the preimage. If this is
 // a multi shard payment, this might implicitly mean that the full payment
 // succeeded.

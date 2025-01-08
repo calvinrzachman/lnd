@@ -59,6 +59,11 @@ type ControlTower interface {
 	// RegisterAttempt atomically records the provided HTLCAttemptInfo.
 	RegisterAttempt(lntypes.Hash, *channeldb.HTLCAttemptInfo) error
 
+	// AcknowledgeAttempt marks the given attempt as successfully sent to
+	// the switch. This is relevant in the case where errors on attempt
+	// dispatch are ambigous as to whether the HTLC is or is not in-flight.
+	AcknowledgeAttempt(paymentHash lntypes.Hash, attemptID uint64) error
+
 	// SettleAttempt marks the given attempt settled with the preimage. If
 	// this is a multi shard payment, this might implicitly mean the the
 	// full payment succeeded.
@@ -226,6 +231,28 @@ func (p *controlTower) RegisterAttempt(paymentHash lntypes.Hash,
 	}
 
 	// Notify subscribers of the attempt registration.
+	p.notifySubscribers(paymentHash, payment)
+
+	return nil
+}
+
+// AcknowledgeAttempt marks the given attempt as successfully sent to the
+// switch. This updates the attempt state to "Acknowledged" in the DB and
+// notifies subscribers of the update.
+func (p *controlTower) AcknowledgeAttempt(
+	paymentHash lntypes.Hash, attemptID uint64) error {
+
+	// Acquire the lock for this payment to ensure consistent updates.
+	p.paymentsMtx.Lock(paymentHash)
+	defer p.paymentsMtx.Unlock(paymentHash)
+
+	// Update the state of the HTLC attempt in the database.
+	payment, err := p.db.AcknowledgeAttempt(paymentHash, attemptID)
+	if err != nil {
+		return err
+	}
+
+	// Notify subscribers of the state change.
 	p.notifySubscribers(paymentHash, payment)
 
 	return nil
