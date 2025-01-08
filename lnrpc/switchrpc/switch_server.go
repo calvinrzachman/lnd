@@ -221,10 +221,10 @@ func (s *Server) SendOnion(_ context.Context,
 		return nil, status.Error(codes.InvalidArgument,
 			"onion blob is required")
 	}
-	if len(req.OnionBlob) > lnwire.OnionPacketSize {
+	if len(req.OnionBlob) != lnwire.OnionPacketSize {
 		return nil, status.Errorf(codes.InvalidArgument,
-			"onion blob size exceeds limit of %d bytes",
-			lnwire.OnionPacketSize)
+			"onion blob size=%d does not match expected %d bytes",
+			len(req.OnionBlob), lnwire.OnionPacketSize)
 	}
 
 	if len(req.FirstHopPubkey) == 0 {
@@ -247,7 +247,7 @@ func (s *Server) SendOnion(_ context.Context,
 	hash, err := lntypes.MakeHash(req.PaymentHash)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument,
-			"invalid payment hash: %v", err)
+			"invalid payment_hash=%x: %v", req.PaymentHash, err)
 	}
 
 	// Convert the first hop pubkey into a format usable by the forwarding
@@ -272,7 +272,8 @@ func (s *Server) SendOnion(_ context.Context,
 	if err != nil {
 		// NOTE(calvin): Should this error be communicated via RPC proto?
 		return nil, status.Errorf(codes.Internal,
-			"unable to find eligible channel ID: %v", err)
+			"unable to find eligible channel ID for pubkey=%x: %v",
+			firstHop.SerializeCompressed(), err)
 	}
 
 	// Craft an HTLC packet to send to the htlcswitch. The metadata within
@@ -282,7 +283,7 @@ func (s *Server) SendOnion(_ context.Context,
 		Amount:      amount,
 		Expiry:      req.Timelock,
 		PaymentHash: hash,
-		OnionBlob:   [1366]byte(req.OnionBlob),
+		OnionBlob:   [lnwire.OnionPacketSize]byte(req.OnionBlob),
 	}
 
 	log.Debugf("Dispatching HTLC attempt(id=%v, amt=%v) for payment=%v via "+
@@ -484,7 +485,7 @@ func buildErrorDecryptor(sessionKeyBytes []byte,
 	// key? This is untrusted input received via RPC.
 	sessionKey, _ := btcec.PrivKeyFromBytes(sessionKeyBytes)
 
-	var pubKeys []*btcec.PublicKey
+	pubKeys := make([]*btcec.PublicKey, 0, len(hopPubkeys))
 	for _, keyBytes := range hopPubkeys {
 		pubKey, err := btcec.ParsePubKey(keyBytes)
 		if err != nil {

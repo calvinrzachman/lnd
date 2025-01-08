@@ -86,7 +86,6 @@ func testSendOnion(ht *lntest.HarnessTest) {
 	routesReq := &lnrpc.QueryRoutesRequest{
 		PubKey: dave.PubKeyStr,
 		Amt:    paymentAmt,
-		// AmtMsat: paymentAmt,
 	}
 	routes := alice.RPC.QueryRoutes(routesReq)
 	route := routes.Routes[0]
@@ -112,7 +111,7 @@ func testSendOnion(ht *lntest.HarnessTest) {
 		Timelock:       route.TotalTimeLock,
 		PaymentHash:    paymentHash,
 		OnionBlob:      onionResp.OnionBlob,
-		AttemptId:      0,
+		AttemptId:      1,
 	}
 
 	// NOTE(calvin): We may want our wrapper RPC client to allow errors
@@ -138,7 +137,7 @@ func testSendOnion(ht *lntest.HarnessTest) {
 	//
 	// NOTE(calvin): This currently blocks until payment success/failure.
 	trackReq := &switchrpc.TrackOnionRequest{
-		AttemptId:   0,
+		AttemptId:   1,
 		PaymentHash: paymentHash,
 		SessionKey:  onionResp.SessionKey,
 		HopPubkeys:  onionResp.HopPubkeys,

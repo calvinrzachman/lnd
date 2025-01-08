@@ -2510,12 +2510,12 @@ func (s *Switch) GetLinksByPubkey(hop [33]byte) ([]ChannelInfoProvider,
 	s.indexMtx.RLock()
 	defer s.indexMtx.RUnlock()
 
-	var handlers []ChannelInfoProvider
-
 	links, err := s.getLinks(hop)
 	if err != nil {
 		return nil, err
 	}
+
+	handlers := make([]ChannelInfoProvider, 0, len(links))
 
 	// Range over the returned []ChannelLink to convert them into
 	// []ChannelUpdateHandler.
