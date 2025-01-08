@@ -329,6 +329,10 @@ func (s *subRPCServerConfigs) PopulateDependencies(cfg *Config,
 				reflect.ValueOf(htlcSwitch),
 			)
 
+			subCfgValue.FieldByName("RouteProcessor").Set(
+				reflect.ValueOf(routerBackend),
+			)
+
 			// Populate switchrpc dependencies.
 			// s.SwitchRPC.Switch = htlcSwitch
 			// s.SwitchRPC.HtlcDispatcher = htlcSwitch
