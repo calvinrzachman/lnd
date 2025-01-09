@@ -91,7 +91,7 @@ message TrackOnionRequest {
     uint64 attempt_id = 2;
 
     // Optional: Session key used to generate the onion/sphinx packet.
-    bytes session_key = 3;
+    optional bytes session_key = 3;
 
     // Optional: Public keys of nodes along the route, used with session_key.
     repeated bytes hop_pubkeys = 4;
@@ -115,7 +115,7 @@ message TrackOnionResponse {
 
     // A code representing the type of error that occurred. This can be used
     // to programmatically distinguish between different kinds of errors.
-    string error_code = 4;
+    ErrorCode error_code = 4;
 
     // If the caller provides no means to decrypt the error then we'll defer
     // error decryption on the server and return the encrypted error blob.

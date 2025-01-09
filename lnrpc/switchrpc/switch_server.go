@@ -440,12 +440,11 @@ func (s *Server) TrackOnion(ctx context.Context,
 		log.Errorf("Payment via onion failed for hash %x",
 			req.PaymentHash)
 
-		// TODO(calvin): Check error handling to see if we need to
-		// include a code.
-		message, _ := TranslateErrorForRPC(result.Error)
+		message, code := TranslateErrorForRPC(result.Error)
 
 		return &TrackOnionResponse{
 			Success:      false,
+			ErrorCode:    code,
 			ErrorMessage: message,
 		}, nil
 	}
