@@ -186,7 +186,18 @@ func (p *paymentLifecycle) resumePayment(ctx context.Context) ([32]byte,
 		log.Infof("Resuming HTLC attempt %v for payment %v",
 			a.AttemptID, p.identifier)
 
-		p.resultCollector(&a)
+		if a.Acknowledged {
+			// Proceed to track acknowledged attempts.
+			p.resultCollector(&a)
+		} else {
+			// Retry sending non-acknowledged attempts.
+			err := p.retrySendHTLC(&a)
+			if err != nil {
+				log.Errorf("Failed to retry non-acknowledged "+
+					"HTLC attempt %v for payment %v: %v",
+					a.AttemptID, p.identifier, err)
+			}
+		}
 	}
 
 	// Get the payment status.
@@ -332,6 +343,55 @@ lifecycle:
 
 	// Otherwise return the payment failure reason.
 	return [32]byte{}, nil, *failure
+}
+
+func (p *paymentLifecycle) retrySendHTLC(attempt *channeldb.HTLCAttempt) error {
+	log.Infof("Retrying HTLC attempt %v for payment %v",
+		attempt.AttemptID, p.identifier)
+
+	// Recreate the HTLC add message using the original route and attempt data.
+	htlcAdd := &lnwire.UpdateAddHTLC{
+		Amount:        attempt.Route.FirstHopAmount.Val.Int(),
+		Expiry:        attempt.Route.TotalTimeLock,
+		PaymentHash:   *attempt.Hash,
+		CustomRecords: attempt.Route.FirstHopWireCustomRecords,
+	}
+
+	// Generate the raw encoded sphinx packet to include with the HTLC.
+	onionBlob, _, err := GenerateSphinxPacket(
+		&attempt.Route, attempt.Hash[:], attempt.SessionKey(),
+	)
+	if err != nil {
+		log.Errorf("Failed to create onion blob: attempt=%d in "+
+			"payment=%v, err=%v", attempt.AttemptID, p.identifier, err)
+		return err
+	}
+	copy(htlcAdd.OnionBlob[:], onionBlob)
+
+	// Send the HTLC to the switch.
+	firstHop := lnwire.NewShortChanIDFromInt(attempt.Route.Hops[0].ChannelID)
+	err = p.router.cfg.Payer.SendHTLC(firstHop, attempt.AttemptID, htlcAdd)
+	if err != nil {
+		log.Errorf("Failed to retry HTLC attempt %d for payment %v: %v",
+			attempt.AttemptID, p.identifier, err)
+		return err
+	}
+
+	// Mark the attempt as acknowledged.
+	err = p.router.cfg.Control.AcknowledgeAttempt(p.identifier, attempt.AttemptID)
+	if err != nil {
+		log.Warnf("Failed to mark attempt %d as acknowledged: %v",
+			attempt.AttemptID, err)
+		// Proceed as best effort.
+	}
+
+	log.Infof("Successfully retried and acknowledged HTLC attempt %v "+
+		"for payment %v", attempt.AttemptID, p.identifier)
+
+	// Spawn a result collector for the retried attempt.
+	p.resultCollector(attempt)
+
+	return nil
 }
 
 // checkContext checks whether the payment context has been canceled.
@@ -734,6 +794,16 @@ func (p *paymentLifecycle) sendAttempt(
 			"switch: %v", attempt.AttemptID, p.identifier, err)
 
 		return p.handleSwitchErr(attempt, err)
+	}
+
+	// Mark the attempt as acknowledged in the ControlTower.
+	err = p.router.cfg.Control.AcknowledgeAttempt(
+		p.identifier, attempt.AttemptID,
+	)
+	if err != nil {
+		log.Warnf("Failed to mark attempt %d as acknowledged: %v",
+			attempt.AttemptID, err)
+		// Proceed as best effort.
 	}
 
 	log.Debugf("Attempt %v for payment %v successfully sent to switch, "+

@@ -45,6 +45,10 @@ type HTLCAttemptInfo struct {
 	// in which the payment's PaymentHash in the PaymentCreationInfo should
 	// be used.
 	Hash *lntypes.Hash
+
+	// Acknowledged indicates whether the HTLC attempt was successfully
+	// sent to the switch.
+	Acknowledged bool
 }
 
 // NewHtlcAttempt creates a htlc attempt.

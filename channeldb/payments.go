@@ -1125,6 +1125,11 @@ func serializeHTLCAttemptInfo(w io.Writer, a *HTLCAttemptInfo) error {
 		return err
 	}
 
+	// Serialize the Acknowledged field.
+	if err := WriteElements(w, a.Acknowledged); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -1177,6 +1182,16 @@ func deserializeHTLCAttemptInfo(r io.Reader) (*HTLCAttemptInfo, error) {
 	}
 
 	a.Route.FirstHopWireCustomRecords = customRecords
+
+	// Deserialize the Acknowledged field.
+	if err := ReadElements(r, &a.Acknowledged); err != nil {
+		// For backward compatibility, default to false if not present.
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			a.Acknowledged = false
+		} else {
+			return nil, err
+		}
+	}
 
 	return a, nil
 }
