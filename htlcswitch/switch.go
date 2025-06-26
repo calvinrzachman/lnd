@@ -261,7 +261,9 @@ type Switch struct {
 	// user of the result when they are complete. Each payment attempt
 	// should be given a unique integer ID when it is created, otherwise
 	// results might be overwritten.
-	networkResults *networkResultStore
+	// networkResults *networkResultStore
+	// store SwitchStore
+	Store
 
 	// circuits is storage for payment circuits which are used to
 	// forward the settle/fail htlc updates back to the add htlc initiator.
@@ -381,7 +383,7 @@ func New(cfg Config, currentHeight uint32) (*Switch, error) {
 		interfaceIndex:    make(map[[33]byte]map[lnwire.ChannelID]ChannelLink),
 		pendingLinkIndex:  make(map[lnwire.ChannelID]ChannelLink),
 		linkStopIndex:     make(map[lnwire.ChannelID]chan struct{}),
-		networkResults:    newNetworkResultStore(cfg.DB),
+		Store:             newNetworkResultStore(cfg.DB),
 		htlcPlex:          make(chan *plexPacket),
 		chanCloseRequests: make(chan *ChanClose),
 		resolutionMsgs:    make(chan *resolutionMsg),
@@ -439,7 +441,7 @@ func (s *Switch) ProcessContractResolution(msg contractcourt.ResolutionMsg) erro
 // HasAttemptResult reads the network result store to fetch the specified
 // attempt. Returns true if the attempt result exists.
 func (s *Switch) HasAttemptResult(attemptID uint64) (bool, error) {
-	_, err := s.networkResults.getResult(attemptID)
+	_, err := s.Store.GetResult(attemptID)
 	if err == nil {
 		return true, nil
 	}
@@ -476,7 +478,7 @@ func (s *Switch) GetAttemptResult(attemptID uint64, paymentHash lntypes.Hash,
 	// is already available.
 	// Assumption: no one will add this attempt ID other than the caller.
 	if s.circuits.LookupCircuit(inKey) == nil {
-		res, err := s.networkResults.getResult(attemptID)
+		res, err := s.Store.GetResult(attemptID)
 		if err != nil {
 			return nil, err
 		}
@@ -486,7 +488,7 @@ func (s *Switch) GetAttemptResult(attemptID uint64, paymentHash lntypes.Hash,
 	} else {
 		// The HTLC was committed to the circuits, subscribe for a
 		// result.
-		nChan, err = s.networkResults.subscribeResult(attemptID)
+		nChan, err = s.Store.SubscribeResult(attemptID)
 		if err != nil {
 			return nil, err
 		}
@@ -538,15 +540,40 @@ func (s *Switch) GetAttemptResult(attemptID uint64, paymentHash lntypes.Hash,
 // preiodically to let the switch clean up payment results that we have
 // handled.
 func (s *Switch) CleanStore(keepPids map[uint64]struct{}) error {
-	return s.networkResults.cleanStore(keepPids)
+	return s.Store.CleanStore(keepPids)
 }
 
-// SendHTLC is used by other subsystems which aren't belong to htlc switch
-// package in order to send the htlc update. The attemptID used MUST be unique
-// for this HTLC, and MUST be used only once, otherwise the switch might reject
-// it.
+// SendHTLC attempts to forward an HTLC to the given first hop using the
+// specified attempt ID. It can be used by other subsystems in order to dispatch
+// a payment attempt. The attemptID MUST be globally unique across the lifetime
+// of the payment.
+//
+// Duplicate attemptIDs are rejected to ensure correctness of the
+// asynchronous payment result store and to prevent reuse after completion.
+//
+// The Switch guarantees that only one HTLC will be forwarded for a given
+// attemptID, and will return ErrDuplicateAdd for subsequent uses.
+//
+// This method is safe to call from remote clients via SendOnion or from
+// a local ChannelRouter.
 func (s *Switch) SendHTLC(firstHop lnwire.ShortChannelID, attemptID uint64,
 	htlc *lnwire.UpdateAddHTLC) error {
+
+	// Safety check to ensure that this attempt ID is not currently created
+	// within the result store.
+	err := s.Store.InitAttempt(attemptID)
+	if err != nil {
+		if errors.Is(err, ErrPaymentIDAlreadyExists) {
+			log.Debugf("Attempt id=%v already exists", attemptID)
+
+			return ErrDuplicateAdd
+		}
+
+		log.Errorf("unable to initialize attempt id=%d: %v",
+			attemptID, err)
+
+		return err
+	}
 
 	// Generate and send new update packet, if error will be received on
 	// this stage it means that packet haven't left boundaries of our
@@ -959,7 +986,7 @@ func (s *Switch) handleLocalResponse(pkt *htlcPacket) {
 
 	// Store the result to the db. This will also notify subscribers about
 	// the result.
-	if err := s.networkResults.storeResult(attemptID, n); err != nil {
+	if err := s.StoreResult(attemptID, n); err != nil {
 		log.Errorf("Unable to store attempt result for pid=%v: %v",
 			attemptID, err)
 		return
