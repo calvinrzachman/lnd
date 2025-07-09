@@ -26,6 +26,13 @@ service Switch {
     BuildOnion attempts to build an onion packet for the specified route.
     */
     rpc BuildOnion (BuildOnionRequest) returns (BuildOnionResponse);
+
+    /*
+    NextAttemptID returns a new unique attempt ID for use in a SendOnion call.
+    The caller may optionally specify a namespace to ensure non-colliding
+    IDs in multi-client scenarios.
+    */
+    rpc NextAttemptID (NextAttemptIDRequest) returns (NextAttemptIDResponse);
 }
 
 message SendOnionRequest {
@@ -161,4 +168,14 @@ message BuildOnionResponse {
     // The serialized public keys of all nodes along the route for the
     // constructed onion.
     repeated bytes hop_pubkeys = 3;
+}
+
+message NextAttemptIDRequest {
+    // Optional namespace to scope attempt ID generation.
+    bytes namespace = 1;
+}
+
+message NextAttemptIDResponse {
+    // A unique attempt ID safe to use in a subsequent SendOnion call.
+    uint64 attempt_id = 1;
 }
