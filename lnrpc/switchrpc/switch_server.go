@@ -710,3 +710,68 @@ func ParseForwardingError(errStr string) (*htlcswitch.ForwardingError, error) {
 
 	return htlcswitch.NewForwardingError(wireMsg, idx), nil
 }
+
+// NextAttemptID...
+func (s *Server) NextAttemptID(_ context.Context,
+	req *NextAttemptIDRequest) (*NextAttemptIDResponse, error) {
+
+	var namespace [33]byte
+	if len(req.Namespace) > 0 {
+		if len(req.Namespace) != 33 {
+			return nil, status.Errorf(codes.InvalidArgument,
+				"namespace must be 33 bytes (compressed pubkey)")
+		}
+		copy(namespace[:], req.Namespace)
+	}
+
+	id, err := s.cfg.HtlcDispatcher.NextPaymentID(namespace)
+	if err != nil {
+		log.Errorf("NextAttemptID failed: %v", err)
+		return nil, status.Errorf(codes.Internal, "id generation error")
+	}
+
+	return &NextAttemptIDResponse{AttemptId: id}, nil
+}
+
+// CleanStore ...
+func (s *Server) CleanStore(_ context.Context,
+	req *CleanStoreRequest) (*CleanStoreResponse, error) {
+
+	var namespace [33]byte
+	if len(req.Namespace) > 0 {
+		if len(req.Namespace) != 33 {
+			return nil, status.Errorf(codes.InvalidArgument,
+				"namespace must be 33 bytes")
+		}
+		copy(namespace[:], req.Namespace)
+	}
+
+	// Deduplicate keep set.
+	keepSet := make(map[uint64]struct{}, len(req.KeepAttemptIds))
+	for _, id := range req.KeepAttemptIds {
+		keepSet[id] = struct{}{}
+	}
+
+	// TODO: Update the function signature for CleanStore in the
+	// PaymentAttemptDispatcher interface. The local on-board ChannelRouter
+	// can use a default namespace.
+	numDeleted, err := s.cfg.Switch.CleanStore(namespace, keepSet)
+	err = s.cfg.Switch.CleanStore(keepSet)
+	if err != nil {
+		log.Errorf("CleanStore failed: %v", err)
+		return nil, status.Errorf(codes.Internal, "store cleanup error")
+	}
+
+	return &CleanStoreResponse{
+		DeletedAttempts: uint32(numDeleted),
+	}, nil
+}
+
+// DeleteAttempts...
+func (s *Server) DeleteAttempts(_ context.Context,
+	req *DeleteAttemptsRequest) (*DeleteAttemptsResponse, error) {
+
+	// TODO: implement.
+
+	return nil, nil
+}
