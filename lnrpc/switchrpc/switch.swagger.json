@@ -390,6 +390,16 @@
       },
       "description": "BuildOnionResponse contains the constructed onion packet."
     },
+    "switchrpcCleanStoreResponse": {
+      "type": "object",
+      "properties": {
+        "deleted_attempts": {
+          "type": "integer",
+          "format": "int64",
+          "description": "The number of entries removed from the result store."
+        }
+      }
+    },
     "switchrpcDisableRemoteRouterResponse": {
       "type": "object"
     },

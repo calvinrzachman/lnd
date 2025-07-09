@@ -42,6 +42,11 @@ type SwitchClient interface {
 	// default embedded router. This RPC will fail if there are any active,
 	// in-flight HTLCs.
 	DisableRemoteRouter(ctx context.Context, in *DisableRemoteRouterRequest, opts ...grpc.CallOption) (*DisableRemoteRouterResponse, error)
+	// CleanStore deletes all attempt results except those specified in
+	// keep_attempt_ids. If a namespace is provided, the deletion is scoped to that
+	// namespace. This allows for remote maintainence of HTLC attempt data in the
+	// Switch's underlying attempt store.
+	CleanStore(ctx context.Context, in *CleanStoreRequest, opts ...grpc.CallOption) (*CleanStoreResponse, error)
 }
 
 type switchClient struct {
@@ -88,6 +93,15 @@ func (c *switchClient) DisableRemoteRouter(ctx context.Context, in *DisableRemot
 	return out, nil
 }
 
+func (c *switchClient) CleanStore(ctx context.Context, in *CleanStoreRequest, opts ...grpc.CallOption) (*CleanStoreResponse, error) {
+	out := new(CleanStoreResponse)
+	err := c.cc.Invoke(ctx, "/switchrpc.Switch/CleanStore", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SwitchServer is the server API for Switch service.
 // All implementations must embed UnimplementedSwitchServer
 // for forward compatibility
@@ -116,6 +130,11 @@ type SwitchServer interface {
 	// default embedded router. This RPC will fail if there are any active,
 	// in-flight HTLCs.
 	DisableRemoteRouter(context.Context, *DisableRemoteRouterRequest) (*DisableRemoteRouterResponse, error)
+	// CleanStore deletes all attempt results except those specified in
+	// keep_attempt_ids. If a namespace is provided, the deletion is scoped to that
+	// namespace. This allows for remote maintainence of HTLC attempt data in the
+	// Switch's underlying attempt store.
+	CleanStore(context.Context, *CleanStoreRequest) (*CleanStoreResponse, error)
 	mustEmbedUnimplementedSwitchServer()
 }
 
@@ -134,6 +153,9 @@ func (UnimplementedSwitchServer) BuildOnion(context.Context, *BuildOnionRequest)
 }
 func (UnimplementedSwitchServer) DisableRemoteRouter(context.Context, *DisableRemoteRouterRequest) (*DisableRemoteRouterResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DisableRemoteRouter not implemented")
+}
+func (UnimplementedSwitchServer) CleanStore(context.Context, *CleanStoreRequest) (*CleanStoreResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CleanStore not implemented")
 }
 func (UnimplementedSwitchServer) mustEmbedUnimplementedSwitchServer() {}
 
@@ -220,6 +242,24 @@ func _Switch_DisableRemoteRouter_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Switch_CleanStore_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CleanStoreRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SwitchServer).CleanStore(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/switchrpc.Switch/CleanStore",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SwitchServer).CleanStore(ctx, req.(*CleanStoreRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Switch_ServiceDesc is the grpc.ServiceDesc for Switch service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -242,6 +282,10 @@ var Switch_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DisableRemoteRouter",
 			Handler:    _Switch_DisableRemoteRouter_Handler,
+		},
+		{
+			MethodName: "CleanStore",
+			Handler:    _Switch_CleanStore_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
