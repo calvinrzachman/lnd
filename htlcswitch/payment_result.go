@@ -57,11 +57,17 @@ type networkResult struct {
 	// isResolution indicates whether this is a resolution message, in
 	// which the failure reason might not be included.
 	isResolution bool
+
+	// remoteTracked indicates that this result should *not* be cleaned
+	// until marked appropriate to do so.
+	remoteTracked bool
 }
 
 // serializeNetworkResult serializes the networkResult.
 func serializeNetworkResult(w io.Writer, n *networkResult) error {
-	return channeldb.WriteElements(w, n.msg, n.unencrypted, n.isResolution)
+	return channeldb.WriteElements(w,
+		n.msg, n.unencrypted, n.isResolution, n.remoteTracked,
+	)
 }
 
 // deserializeNetworkResult deserializes the networkResult.
@@ -69,7 +75,7 @@ func deserializeNetworkResult(r io.Reader) (*networkResult, error) {
 	n := &networkResult{}
 
 	if err := channeldb.ReadElements(r,
-		&n.msg, &n.unencrypted, &n.isResolution,
+		&n.msg, &n.unencrypted, &n.isResolution, &n.remoteTracked,
 	); err != nil {
 		return nil, err
 	}
@@ -272,6 +278,21 @@ func (store *networkResultStore) cleanStore(keep map[uint64]struct{}) error {
 		var toClean [][]byte
 		if err := networkResults.ForEach(func(k, _ []byte) error {
 			pid := binary.BigEndian.Uint64(k)
+
+			result, err := fetchResult(tx, pid)
+			if err != nil {
+				return err
+			}
+
+			// If the result is being tracked remotely, we skip
+			// cleaning it.
+			if result.remoteTracked {
+				log.Debugf("Skipping externally tracked result"+
+					" for attempt ID: %d", pid)
+
+				return nil
+			}
+
 			if _, ok := keep[pid]; ok {
 				return nil
 			}
@@ -295,5 +316,28 @@ func (store *networkResultStore) cleanStore(keep map[uint64]struct{}) error {
 		}
 
 		return nil
+	}, func() {})
+}
+
+// markResultAsTracked indicates that the result for the given attempt is no
+// longer being tracked remotely. This frees the result for eventual deletion.
+func (store *networkResultStore) markResultTracked(attemptID uint64) error {
+	return kvdb.Update(store.backend, func(tx kvdb.RwTx) error {
+		result, err := fetchResult(tx, attemptID)
+		if err != nil {
+			return err
+		}
+
+		result.remoteTracked = false
+		var b bytes.Buffer
+		if err := serializeNetworkResult(&b, result); err != nil {
+			return err
+		}
+
+		var attemptIDBytes [8]byte
+		binary.BigEndian.PutUint64(attemptIDBytes[:], attemptID)
+
+		networkResults := tx.ReadWriteBucket(networkResultStoreBucketKey)
+		return networkResults.Put(attemptIDBytes[:], b.Bytes())
 	}, func() {})
 }

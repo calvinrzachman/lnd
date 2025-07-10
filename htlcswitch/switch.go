@@ -217,6 +217,11 @@ type Config struct {
 	// a mailbox via AddPacket.
 	MailboxDeliveryTimeout time.Duration
 
+	// RemoteTracking determines whether all HTLC attempts should be marked
+	// as tracked remotely. If true, the switch will treat all attempts as
+	// if they are managed by a remote controller.
+	RemoteTracking bool
+
 	// MaxFeeExposure is the threshold in milli-satoshis after which we'll
 	// fail incoming or outgoing payments for a particular channel.
 	MaxFeeExposure lnwire.MilliSatoshi
@@ -538,7 +543,20 @@ func (s *Switch) GetAttemptResult(attemptID uint64, paymentHash lntypes.Hash,
 // preiodically to let the switch clean up payment results that we have
 // handled.
 func (s *Switch) CleanStore(keepPids map[uint64]struct{}) error {
+	if s.cfg.RemoteTracking {
+		log.Infof("Switch store automatic cleaning disabled.")
+		return nil
+	}
+
 	return s.networkResults.cleanStore(keepPids)
+}
+
+// MarkResultTracked marks the given payment attempt result as tracked so that
+// it can be cleaned from the result store. This allows for synchronization of
+// state deletion between the creator of the attempt (router) and HTLC forwarder
+// to prevent state from being cleaned up prematurely.
+func (s *Switch) MarkResultTracked(attemptID uint64) error {
+	return s.networkResults.markResultTracked(attemptID)
 }
 
 // SendHTLC is used by other subsystems which aren't belong to htlc switch
@@ -961,6 +979,9 @@ func (s *Switch) handleLocalResponse(pkt *htlcPacket) {
 		msg:          pkt.htlc,
 		unencrypted:  unencrypted,
 		isResolution: pkt.isResolution,
+		// NOTE(calvin): The network results for all local payments
+		// will be persisted until explicitly marked for safe deletion.
+		remoteTracked: s.cfg.RemoteTracking,
 	}
 
 	// Store the result to the db. This will also notify subscribers about
