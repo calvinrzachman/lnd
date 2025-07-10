@@ -2,12 +2,11 @@ package routing
 
 import (
 	"context"
-	"sync/atomic"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/go-errors/errors"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/htlcswitch"
@@ -1074,11 +1073,11 @@ func TestResumePaymentFailOnRegisterAttemptErr(t *testing.T) {
 	// 5. mock shardTracker used in `createNewPaymentAttempt` to return an
 	// error.
 	//
-	// Mock NextPaymentID to always return the attemptID.
+	// Mock NextAttemptID to always return the attemptID.
 	attemptID := uint64(1)
-	p.router.cfg.NextPaymentID = func() (uint64, error) {
-		return attemptID, nil
-	}
+	m.payer.On("NextAttemptID",
+		htlcswitch.DefaultAttemptStoreNamespace,
+	).Return(attemptID, nil).Once()
 
 	// Return an error to end the lifecycle.
 	m.shardTracker.On("NewShard",
@@ -1133,11 +1132,11 @@ func TestResumePaymentFailOnSendAttemptErr(t *testing.T) {
 
 	// 5. mock `registerAttempt` to return an attempt.
 	//
-	// Mock NextPaymentID to always return the attemptID.
+	// Mock NextAttemptID to always return the attemptID.
 	attemptID := uint64(1)
-	p.router.cfg.NextPaymentID = func() (uint64, error) {
-		return attemptID, nil
-	}
+	m.payer.On("NextAttemptID",
+		htlcswitch.DefaultAttemptStoreNamespace,
+	).Return(attemptID, nil).Once()
 
 	// Mock shardTracker to return the mock shard.
 	m.shardTracker.On("NewShard",
@@ -1225,11 +1224,11 @@ func TestResumePaymentSuccess(t *testing.T) {
 
 	// 1.5. mock `registerAttempt` to return an attempt.
 	//
-	// Mock NextPaymentID to always return the attemptID.
+	// Mock NextAttemptID to always return the attemptID.
 	attemptID := uint64(1)
-	p.router.cfg.NextPaymentID = func() (uint64, error) {
-		return attemptID, nil
-	}
+	m.payer.On("NextAttemptID",
+		htlcswitch.DefaultAttemptStoreNamespace,
+	).Return(attemptID, nil).Once()
 
 	// Mock shardTracker to return the mock shard.
 	m.shardTracker.On("NewShard",
@@ -1330,17 +1329,15 @@ func TestResumePaymentSuccessWithTwoAttempts(t *testing.T) {
 
 	// 1.5. mock `registerAttempt` to return an attempt.
 	//
-	// Mock NextPaymentID to return the first attemptID on the first call
+	// Mock NextAttemptID to return the first attemptID on the first call
 	// and the second attemptID on the second call.
-	var numAttempts atomic.Uint64
-	p.router.cfg.NextPaymentID = func() (uint64, error) {
-		numAttempts.Add(1)
-		if numAttempts.Load() == 1 {
-			return attemptID1, nil
-		}
+	m.payer.On("NextAttemptID",
+		htlcswitch.DefaultAttemptStoreNamespace,
+	).Return(attemptID1, nil).Once()
 
-		return attemptID2, nil
-	}
+	m.payer.On("NextAttemptID",
+		htlcswitch.DefaultAttemptStoreNamespace,
+	).Return(attemptID2, nil).Once()
 
 	// Mock shardTracker to return the mock shard.
 	m.shardTracker.On("NewShard",

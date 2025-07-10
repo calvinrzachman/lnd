@@ -9,7 +9,6 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -145,18 +144,14 @@ func createTestCtxFromGraphInstanceAssumeValid(t *testing.T,
 	graphBuilder := newMockGraphBuilder(graphInstance.graph)
 
 	router, err := New(Config{
-		SelfNode:       sourceNode.PubKeyBytes,
-		RoutingGraph:   graphInstance.graph,
-		Chain:          chain,
-		Payer:          &mockPaymentAttemptDispatcherOld{},
-		Control:        makeMockControlTower(),
-		MissionControl: mc,
-		SessionSource:  sessionSource,
-		GetLink:        graphInstance.getLink,
-		NextPaymentID: func() (uint64, error) {
-			next := atomic.AddUint64(&uniquePaymentID, 1)
-			return next, nil
-		},
+		SelfNode:           sourceNode.PubKeyBytes,
+		RoutingGraph:       graphInstance.graph,
+		Chain:              chain,
+		Payer:              &mockPaymentAttemptDispatcherOld{},
+		Control:            makeMockControlTower(),
+		MissionControl:     mc,
+		SessionSource:      sessionSource,
+		GetLink:            graphInstance.getLink,
 		PathFindingConfig:  pathFindingConfig,
 		Clock:              clock.NewTestClock(time.Unix(1, 0)),
 		ApplyChannelUpdate: graphBuilder.ApplyChannelUpdate,
@@ -2176,16 +2171,17 @@ func TestSendToRouteSkipTempErrSuccess(t *testing.T) {
 	payer := &mockPaymentAttemptDispatcher{}
 	missionControl := &mockMissionControl{}
 
+	payer.On("NextAttemptID",
+		htlcswitch.DefaultAttemptStoreNamespace,
+	).Return(uint64(0), nil).Once()
+
 	// Create the router.
 	router := &ChannelRouter{cfg: &Config{
 		Control:        controlTower,
 		Payer:          payer,
 		MissionControl: missionControl,
 		Clock:          clock.NewTestClock(time.Unix(1, 0)),
-		NextPaymentID: func() (uint64, error) {
-			return 0, nil
-		},
-		ClosedSCIDs: mockClosedSCIDs,
+		ClosedSCIDs:    mockClosedSCIDs,
 		TrafficShaper: fn.Some[htlcswitch.AuxTrafficShaper](
 			&mockTrafficShaper{},
 		),
@@ -2261,10 +2257,7 @@ func TestSendToRouteSkipTempErrNonMPP(t *testing.T) {
 		Payer:          payer,
 		MissionControl: missionControl,
 		Clock:          clock.NewTestClock(time.Unix(1, 0)),
-		NextPaymentID: func() (uint64, error) {
-			return 0, nil
-		},
-		ClosedSCIDs: mockClosedSCIDs,
+		ClosedSCIDs:    mockClosedSCIDs,
 		TrafficShaper: fn.Some[htlcswitch.AuxTrafficShaper](
 			&mockTrafficShaper{},
 		),
@@ -2313,16 +2306,17 @@ func TestSendToRouteSkipTempErrTempFailure(t *testing.T) {
 	payer := &mockPaymentAttemptDispatcher{}
 	missionControl := &mockMissionControl{}
 
+	payer.On("NextAttemptID",
+		htlcswitch.DefaultAttemptStoreNamespace,
+	).Return(uint64(0), nil).Once()
+
 	// Create the router.
 	router := &ChannelRouter{cfg: &Config{
 		Control:        controlTower,
 		Payer:          payer,
 		MissionControl: missionControl,
 		Clock:          clock.NewTestClock(time.Unix(1, 0)),
-		NextPaymentID: func() (uint64, error) {
-			return 0, nil
-		},
-		ClosedSCIDs: mockClosedSCIDs,
+		ClosedSCIDs:    mockClosedSCIDs,
 		TrafficShaper: fn.Some[htlcswitch.AuxTrafficShaper](
 			&mockTrafficShaper{},
 		),
@@ -2391,16 +2385,17 @@ func TestSendToRouteSkipTempErrPermanentFailure(t *testing.T) {
 	payer := &mockPaymentAttemptDispatcher{}
 	missionControl := &mockMissionControl{}
 
+	payer.On("NextAttemptID",
+		htlcswitch.DefaultAttemptStoreNamespace,
+	).Return(uint64(0), nil).Once()
+
 	// Create the router.
 	router := &ChannelRouter{cfg: &Config{
 		Control:        controlTower,
 		Payer:          payer,
 		MissionControl: missionControl,
 		Clock:          clock.NewTestClock(time.Unix(1, 0)),
-		NextPaymentID: func() (uint64, error) {
-			return 0, nil
-		},
-		ClosedSCIDs: mockClosedSCIDs,
+		ClosedSCIDs:    mockClosedSCIDs,
 		TrafficShaper: fn.Some[htlcswitch.AuxTrafficShaper](
 			&mockTrafficShaper{},
 		),
@@ -2475,16 +2470,17 @@ func TestSendToRouteTempFailure(t *testing.T) {
 	payer := &mockPaymentAttemptDispatcher{}
 	missionControl := &mockMissionControl{}
 
+	payer.On("NextAttemptID",
+		htlcswitch.DefaultAttemptStoreNamespace,
+	).Return(uint64(0), nil).Once()
+
 	// Create the router.
 	router := &ChannelRouter{cfg: &Config{
 		Control:        controlTower,
 		Payer:          payer,
 		MissionControl: missionControl,
 		Clock:          clock.NewTestClock(time.Unix(1, 0)),
-		NextPaymentID: func() (uint64, error) {
-			return 0, nil
-		},
-		ClosedSCIDs: mockClosedSCIDs,
+		ClosedSCIDs:    mockClosedSCIDs,
 		TrafficShaper: fn.Some[htlcswitch.AuxTrafficShaper](
 			&mockTrafficShaper{},
 		),
