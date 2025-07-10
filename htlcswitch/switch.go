@@ -263,6 +263,13 @@ type Switch struct {
 	// results might be overwritten.
 	networkResults *networkResultStore
 
+	// sequencer equips the Switch to server as a central coordinator of
+	// attempt identifiers. External entities can rely on the Switch to
+	// generate unique IDs for htlc attempts they submit for forwarding
+	// whether they be local subsystems (e.g., ChannelRouter) or remotely
+	// via RPC.
+	sequencer Sequencer
+
 	// circuits is storage for payment circuits which are used to
 	// forward the settle/fail htlc updates back to the add htlc initiator.
 	circuits CircuitMap
@@ -372,6 +379,13 @@ func New(cfg Config, currentHeight uint32) (*Switch, error) {
 		return nil, err
 	}
 
+	// The switch will manage the attempt ID sequencer, such that it can
+	// generate unique attempt IDs.
+	sequencer, err := NewPersistentSequencer(cfg.DB)
+	if err != nil {
+		return nil, err
+	}
+
 	s := &Switch{
 		bestHeight:        currentHeight,
 		cfg:               &cfg,
@@ -382,6 +396,7 @@ func New(cfg Config, currentHeight uint32) (*Switch, error) {
 		pendingLinkIndex:  make(map[lnwire.ChannelID]ChannelLink),
 		linkStopIndex:     make(map[lnwire.ChannelID]chan struct{}),
 		networkResults:    newNetworkResultStore(cfg.DB),
+		sequencer:         sequencer,
 		htlcPlex:          make(chan *plexPacket),
 		chanCloseRequests: make(chan *ChanClose),
 		resolutionMsgs:    make(chan *resolutionMsg),
@@ -625,6 +640,26 @@ func (s *Switch) SendHTLC(firstHop lnwire.ShortChannelID, attemptID uint64,
 	packet.circuit = circuit
 
 	return link.handleSwitchPacket(packet)
+}
+
+// NextAttemptID returns a globally or namespace-scoped unique attempt ID,
+// used to identify each HTLC dispatched via the Switch.
+//
+// Centralizing ID generation in the Switch enables:
+//   - Guaranteed uniqueness across all clients (local or remote).
+//   - Safe tracking and deletion of attempts by namespace.
+//   - Compatibility with both monolithic and modular deployments.
+//
+// The default (empty) namespace preserves legacy behavior in monolithic setups.
+// The caller may optionally specify a namespace to ensure non-colliding
+// IDs in multi-client scenarios. Remote clients using switchrpc should specify
+// a unique namespace, though sharing a namespace across clients is safe if all
+// IDs are issued via the Switch.
+func (s *Switch) NextAttemptID(namespace []byte) (uint64, error) {
+	// TODO(calvin): allow separation of ID space. Multiple independent
+	// payment life-cycle managing or HTLC dispatching entities calling
+	// CleanStore without coordination requires ID space separation.
+	return s.sequencer.NextID()
 }
 
 // UpdateForwardingPolicies sends a message to the switch to update the

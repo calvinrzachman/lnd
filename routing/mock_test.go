@@ -23,6 +23,7 @@ import (
 type mockPaymentAttemptDispatcherOld struct {
 	onPayment func(firstHop lnwire.ShortChannelID) ([32]byte, error)
 	results   map[uint64]*htlcswitch.PaymentResult
+	nextID    uint64
 
 	sync.Mutex
 }
@@ -60,6 +61,18 @@ func (m *mockPaymentAttemptDispatcherOld) SendHTLC(
 	m.Unlock()
 
 	return nil
+}
+
+func (m *mockPaymentAttemptDispatcherOld) NextAttemptID(
+	namespace []byte) (uint64, error) {
+
+	m.Lock()
+	defer m.Unlock()
+
+	id := m.nextID
+	m.nextID++
+
+	return id, nil
 }
 
 func (m *mockPaymentAttemptDispatcherOld) HasAttemptResult(
@@ -217,6 +230,10 @@ func (m *mockPayerOld) SendHTLC(_ lnwire.ShortChannelID,
 		return fmt.Errorf("test quitting")
 	}
 
+}
+
+func (m *mockPayerOld) NextAttemptID(namespace []byte) (uint64, error) {
+	return 0, nil
 }
 
 func (m *mockPayerOld) HasAttemptResult(attemptID uint64) (bool, error) {
@@ -597,6 +614,13 @@ func (m *mockPaymentAttemptDispatcher) SendHTLC(firstHop lnwire.ShortChannelID,
 
 	args := m.Called(firstHop, pid, htlcAdd)
 	return args.Error(0)
+}
+
+func (m *mockPaymentAttemptDispatcher) NextAttemptID(
+	namespace []byte) (uint64, error) {
+
+	args := m.Called(namespace)
+	return args.Get(0).(uint64), args.Error(1)
 }
 
 func (m *mockPaymentAttemptDispatcher) HasAttemptResult(

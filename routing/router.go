@@ -127,6 +127,17 @@ type PaymentAttemptDispatcher interface {
 		deobfuscator htlcswitch.ErrorDecrypter) (
 		<-chan *htlcswitch.PaymentResult, error)
 
+	// NextAttemptID returns a globally unique or namespace-scoped ID, used
+	// to identify each HTLC the Router attempts to dispatch via the Switch.
+	//
+	// The default (empty) namespace preserves legacy behavior in monolithic
+	// setups. Callers may optionally specify a namespace to separate the ID
+	// space and ensure non-colliding IDs in multi-client scenarios.
+	//
+	// NOTE: The underlying implementation MUST guarantee uniqueness across
+	// all callers, local (e.g., ChannelRouter) or remote.
+	NextAttemptID(namespace []byte) (attemptID uint64, err error)
+
 	// CleanStore calls the underlying result store, telling it is safe to
 	// delete all entries except the ones in the keepPids map. This should
 	// be called periodically to let the switch clean up payment results
