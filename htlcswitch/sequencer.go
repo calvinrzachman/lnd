@@ -4,7 +4,6 @@ import (
 	"sync"
 
 	"github.com/go-errors/errors"
-	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/kvdb"
 )
 
@@ -34,7 +33,7 @@ var (
 // persistentSequencer is a concrete implementation of IDGenerator, that uses
 // channeldb to allocate sequence numbers.
 type persistentSequencer struct {
-	db *channeldb.DB
+	db kvdb.Backend
 
 	mu sync.Mutex
 
@@ -43,7 +42,7 @@ type persistentSequencer struct {
 }
 
 // NewPersistentSequencer initializes a new sequencer using a channeldb backend.
-func NewPersistentSequencer(db *channeldb.DB) (Sequencer, error) {
+func NewPersistentSequencer(db kvdb.Backend) (Sequencer, error) {
 	g := &persistentSequencer{
 		db: db,
 	}
