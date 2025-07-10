@@ -613,7 +613,9 @@ func (p *paymentLifecycle) createNewPaymentAttempt(rt *route.Route,
 
 	// We generate a new, unique payment ID that we will use for
 	// this HTLC.
-	attemptID, err := p.router.cfg.NextPaymentID()
+	attemptID, err := p.router.cfg.Payer.NextAttemptID(
+		htlcswitch.DefaultAttemptStoreNamespace,
+	)
 	if err != nil {
 		return nil, err
 	}
