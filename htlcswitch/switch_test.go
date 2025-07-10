@@ -5555,3 +5555,42 @@ func testSwitchAliasInterceptFail(t *testing.T, zeroConf bool) {
 
 	require.NoError(t, interceptSwitch.Stop())
 }
+
+// TestSwitchAttemptIDGeneration verifies that the Switch's NextAttemptID
+// method returns globally unique, monotonically increasing identifiers.
+func TestSwitchAttemptIDGeneration(t *testing.T) {
+	t.Parallel()
+
+	alicePeer, err := newMockServer(t, "alice", testStartingHeight,
+		nil, testDefaultDelta)
+	require.NoError(t, err)
+
+	s, err := initSwitchWithTempDB(t, testStartingHeight)
+	require.NoError(t, err)
+	require.NoError(t, s.Start())
+	defer s.Stop()
+
+	chanID, _, aliceChanID, _ := genIDs()
+
+	aliceLink := newMockChannelLink(
+		s, chanID, aliceChanID, emptyScid,
+		alicePeer, true, false, false, false,
+	)
+	require.NoError(t, s.AddLink(aliceLink))
+
+	// Define some namespace constants.
+	const (
+		nsLegacy = byte(0x00) // DefaultAttemptIDNamespace
+	)
+
+	// Grab IDs from the default namespace (legacy behavior).
+	id1, err := s.NextAttemptID([]byte{})
+	require.NoError(t, err)
+
+	id2, err := s.NextAttemptID([]byte{})
+	require.NoError(t, err)
+
+	require.Greater(t, id2, id1, "IDs must increase")
+
+	// TODO(calvin): add full ID space separation.
+}
