@@ -99,6 +99,12 @@ func testSendOnion(ht *lntest.HarnessTest) {
 	}
 	onionResp := alice.RPC.BuildOnion(onionReq)
 
+	// Obtain an indentifier to use for the onion/htlc attempt from the
+	// switchrpc server.
+	id := alice.RPC.NextAttemptID(&switchrpc.NextAttemptIDRequest{
+		// Namespace: htlcswitch.DefaultAttemptStoreNamespace,
+	})
+
 	// Dispatch a payment via the SendOnion RPC.
 	aliceBobChannel := ht.AssertChannelExists(alice, chanPointAliceBob)
 	sendReq := &switchrpc.SendOnionRequest{
@@ -107,7 +113,7 @@ func testSendOnion(ht *lntest.HarnessTest) {
 		Timelock:       route.TotalTimeLock,
 		PaymentHash:    paymentHash,
 		OnionBlob:      onionResp.OnionBlob,
-		AttemptId:      1,
+		AttemptId:      id.AttemptId,
 	}
 
 	// NOTE(calvin): We may want our wrapper RPC client to allow errors

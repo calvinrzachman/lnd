@@ -54,3 +54,18 @@ func (h *HarnessRPC) BuildOnion(
 
 	return resp
 }
+
+// NextAttemptID makes a RPC call to NextAttemptID and asserts.
+//
+//nolint:lll
+func (h *HarnessRPC) NextAttemptID(
+	req *switchrpc.NextAttemptIDRequest) *switchrpc.NextAttemptIDResponse {
+
+	ctxt, cancel := context.WithTimeout(h.runCtx, DefaultTimeout)
+	defer cancel()
+
+	resp, err := h.Switch.NextAttemptID(ctxt, req)
+	h.NoError(err, "NextAttemptID")
+
+	return resp
+}
