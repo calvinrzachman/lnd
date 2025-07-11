@@ -31,6 +31,35 @@
 # Improvements
 ## Functional Updates
 
+* Graph Store SQL implementation and migration project:
+  * Introduce an [abstract graph 
+    store](https://github.com/lightningnetwork/lnd/pull/9791) interface. 
+  * Start [validating](https://github.com/lightningnetwork/lnd/pull/9787) that 
+    byte blobs at the end of gossip messages are valid TLV streams.
+  * Various [preparations](https://github.com/lightningnetwork/lnd/pull/9692) 
+    of the graph code before the SQL implementation is added.
+  * Only [fetch required 
+    fields](https://github.com/lightningnetwork/lnd/pull/9923) during graph 
+    cache population. 
+  * Add graph schemas, queries and CRUD:
+    * [1](https://github.com/lightningnetwork/lnd/pull/9866)
+    * [2](https://github.com/lightningnetwork/lnd/pull/9869)
+    * [3](https://github.com/lightningnetwork/lnd/pull/9887)
+    * [4](https://github.com/lightningnetwork/lnd/pull/9931)
+    * [5](https://github.com/lightningnetwork/lnd/pull/9935)
+    * [6](https://github.com/lightningnetwork/lnd/pull/9936)
+    * [7](https://github.com/lightningnetwork/lnd/pull/9937)
+    * [8](https://github.com/lightningnetwork/lnd/pull/9938)
+    * [9](https://github.com/lightningnetwork/lnd/pull/9939)
+    * [10](https://github.com/lightningnetwork/lnd/pull/9971)
+    * [11](https://github.com/lightningnetwork/lnd/pull/9972)
+
+* Move htlc attempt ID generation (`NextAttemptID`) method to the
+ `PaymentAttemptDispatcher` interface. This shifts the responsibility of
+  generating unique htlc attempt IDs from the ChannelRouter (payement life-cycle
+  manager) to the HTLCSwitch (switchrpc server). Allocating IDs centrally from
+  within the Switch prepares the daemon for multi-router support.
+
 ## RPC Updates
 
 ## lncli Updates
