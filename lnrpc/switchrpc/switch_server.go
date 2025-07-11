@@ -70,6 +70,10 @@ var (
 			Entity: "offchain",
 			Action: "read",
 		}},
+		"/switchrpc.Switch/NextAttemptID": {{
+			Entity: "offchain",
+			Action: "read",
+		}},
 	}
 
 	// DefaultSwitchMacFilename is the default name of the switch macaroon
@@ -666,6 +670,49 @@ func (s *Server) BuildOnion(_ context.Context,
 		SessionKey: sessionKey.Serialize(),
 		HopPubkeys: hopPubKeys,
 	}, nil
+}
+
+// NextAttemptID returns a globally or namespace-scoped unique attempt ID,
+// used to identify an HTLC dispatched via the Switch.
+//
+// In monolithic setups, the default (empty) namespace preserves legacy
+// behavior. In modular deployments, where multiple Routers (i.e., payment
+// life-cycle managers or HTLC dispatching entities) interact with the Switch,
+// callers should specify a unique 1-byte namespace to ensure isolated ID spaces
+// and avoid collisions.
+//
+// Centralizing ID generation in the Switch provides:
+//   - Consistent and collision-free ID assignment across both monolithic and
+//     modular deployments.
+//   - Support for multiple Routers (i.e., payment life-cycle managers or HTLC
+//     dispatching entities) interacting with a shared Switch via RPC.
+//   - Optional namespacing to isolate attempt ID spaces for different clients,
+//     simplifying state cleanup and reducing coordination requirements.
+//
+// NOTE: This RPC must be called prior to SendOnion to obtain a unique attempt
+// ID for the HTLC being dispatched. Each call to SendOnion must use a fresh ID
+// returned from this endpoint.
+func (s *Server) NextAttemptID(_ context.Context,
+	req *NextAttemptIDRequest) (*NextAttemptIDResponse, error) {
+
+	// Optional: validate namespace format if you're enforcing length or
+	// content.
+	ns := req.Namespace
+	if len(ns) > 0 && len(ns) != 1 {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"namespace must be exactly 1 byte")
+	}
+
+	id, err := s.cfg.Switch.NextAttemptID(ns)
+	if err != nil {
+		log.Errorf("NextAttemptID failed: %v", err)
+
+		return nil, status.Errorf(codes.Internal, "id generation error")
+	}
+
+	log.Debugf("Allocated new attempt_id=%d in namespace=%v", id, ns)
+
+	return &NextAttemptIDResponse{AttemptId: id}, nil
 }
 
 // TranslateErrorForRPC converts an error from the underlying HTLC switch to
