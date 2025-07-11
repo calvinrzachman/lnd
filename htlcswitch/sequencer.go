@@ -11,10 +11,10 @@ import (
 // allocated for each write to disk made by the sequencer.
 const defaultSequenceBatchSize = 1000
 
-// DefaultAttemptStoreNamespace is the name of the default attempt ID namespace.
+// DefaultAttemptIDNamespace is the name of the default attempt ID namespace.
 // This is used as the sub-bucket key within the top level DB bucket to store
 // mission control results.
-var DefaultAttemptStoreNamespace = []byte{}
+var DefaultAttemptIDNamespace = []byte{}
 
 // Sequencer emits sequence numbers for locally initiated HTLCs. These are
 // only used internally for tracking pending payments, however they must be
