@@ -705,3 +705,47 @@ func ParseForwardingError(errStr string) (*htlcswitch.ForwardingError, error) {
 
 	return htlcswitch.NewForwardingError(wireMsg, idx), nil
 }
+
+// CleanStore deletes all attempt results except those specified in request as
+// to be kept. This allows for remote maintainence of HTLC attempt data in the
+// Switch's underlying attempt store and should be used by routers to
+// periodically clean up results for completed attempts.
+
+// TODO: Support namespace-aware deletion by propagating the namespace to the
+// Switch layer and filtering attempt results accordingly. This will be required
+// once multiple clients are concurrently using the Switch.
+func (s *Server) CleanStore(_ context.Context,
+	req *CleanStoreRequest) (*CleanStoreResponse, error) {
+
+	// Validate namespace if provided.
+	if len(req.Namespace) > 0 {
+		if len(req.Namespace) != 1 {
+			return nil, status.Errorf(codes.InvalidArgument,
+				"namespace must be exactly 1 byte")
+		}
+
+		// TODO: Add namespace-aware cleanup logic.
+		return nil, status.Errorf(codes.Unimplemented,
+			"namespace-aware cleanup not yet supported")
+	}
+
+	// Construct keep set from provided IDs.
+	keepSet := make(map[uint64]struct{}, len(req.KeepAttemptIds))
+	for _, id := range req.KeepAttemptIds {
+		keepSet[id] = struct{}{}
+	}
+
+	// Clean Switch's attempt store.
+	// TODO: The store will filter based on namespace. Update the function
+	// signature for CleanStore in the PaymentAttemptDispatcher interface.
+	// The local on-board ChannelRouter can use a default namespace.
+	// err := s.cfg.Switch.CleanStore(namespace, keepSet)
+	err := s.cfg.Switch.CleanStore(keepSet)
+	if err != nil {
+		log.Errorf("Cleanup of Switch attempt store failed: %v", err)
+
+		return nil, status.Errorf(codes.Internal, "store cleanup error")
+	}
+
+	return &CleanStoreResponse{}, nil
+}
