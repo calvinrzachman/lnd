@@ -68,6 +68,10 @@ var (
 			Entity: "offchain",
 			Action: "read",
 		}},
+		"/switchrpc.Switch/CleanStore": {{
+			Entity: "offchain",
+			Action: "write",
+		}},
 	}
 
 	// DefaultSwitchMacFilename is the default name of the switch macaroon
@@ -711,67 +715,49 @@ func ParseForwardingError(errStr string) (*htlcswitch.ForwardingError, error) {
 	return htlcswitch.NewForwardingError(wireMsg, idx), nil
 }
 
-// NextAttemptID...
-func (s *Server) NextAttemptID(_ context.Context,
-	req *NextAttemptIDRequest) (*NextAttemptIDResponse, error) {
+// CleanStore deletes all attempt results except those specified in request as
+// to be kept. This allows for remote maintainence of HTLC attempt data in the
+// Switch's underlying attempt store and should be used by routers to
+// periodically clean up results for completed attempts.
 
-	var namespace [33]byte
-	if len(req.Namespace) > 0 {
-		if len(req.Namespace) != 33 {
-			return nil, status.Errorf(codes.InvalidArgument,
-				"namespace must be 33 bytes (compressed pubkey)")
-		}
-		copy(namespace[:], req.Namespace)
-	}
-
-	id, err := s.cfg.HtlcDispatcher.NextPaymentID(namespace)
-	if err != nil {
-		log.Errorf("NextAttemptID failed: %v", err)
-		return nil, status.Errorf(codes.Internal, "id generation error")
-	}
-
-	return &NextAttemptIDResponse{AttemptId: id}, nil
-}
-
-// CleanStore ...
+// TODO: Support namespace-aware deletion by propagating the namespace to the
+// Switch layer and filtering attempt results accordingly. This will be required
+// once multiple clients are concurrently using the Switch.
 func (s *Server) CleanStore(_ context.Context,
 	req *CleanStoreRequest) (*CleanStoreResponse, error) {
 
-	var namespace [33]byte
+	// Validate namespace if provided.
 	if len(req.Namespace) > 0 {
-		if len(req.Namespace) != 33 {
+		if len(req.Namespace) != 1 {
 			return nil, status.Errorf(codes.InvalidArgument,
-				"namespace must be 33 bytes")
+				"namespace must be exactly 1 byte")
 		}
-		copy(namespace[:], req.Namespace)
+
+		// TODO: Add namespace-aware cleanup logic.
+		return nil, status.Errorf(codes.Unimplemented,
+			"namespace-aware cleanup not yet supported")
 	}
 
-	// Deduplicate keep set.
+	// Construct keep set from provided IDs.
 	keepSet := make(map[uint64]struct{}, len(req.KeepAttemptIds))
 	for _, id := range req.KeepAttemptIds {
 		keepSet[id] = struct{}{}
 	}
 
-	// TODO: Update the function signature for CleanStore in the
-	// PaymentAttemptDispatcher interface. The local on-board ChannelRouter
-	// can use a default namespace.
-	numDeleted, err := s.cfg.Switch.CleanStore(namespace, keepSet)
-	err = s.cfg.Switch.CleanStore(keepSet)
+	log.Debugf("Cleaning attempt %d results from store for namespace=%s",
+		len(keepSet), req.Namespace)
+
+	// Clean Switch's attempt store.
+	// TODO: The store will filter based on namespace. Update the function
+	// signature for CleanStore in the PaymentAttemptDispatcher interface.
+	// The local on-board ChannelRouter can use a default namespace.
+	// err := s.cfg.Switch.CleanStore(namespace, keepSet)
+	err := s.cfg.Switch.CleanStore(keepSet)
 	if err != nil {
-		log.Errorf("CleanStore failed: %v", err)
+		log.Errorf("Cleanup of Switch attempt store failed: %v", err)
+
 		return nil, status.Errorf(codes.Internal, "store cleanup error")
 	}
 
-	return &CleanStoreResponse{
-		DeletedAttempts: uint32(numDeleted),
-	}, nil
-}
-
-// DeleteAttempts...
-func (s *Server) DeleteAttempts(_ context.Context,
-	req *DeleteAttemptsRequest) (*DeleteAttemptsResponse, error) {
-
-	// TODO: implement.
-
-	return nil, nil
+	return &CleanStoreResponse{}, nil
 }
