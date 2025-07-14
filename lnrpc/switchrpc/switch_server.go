@@ -65,6 +65,10 @@ var (
 			Entity: "offchain",
 			Action: "read",
 		}},
+		"/switchrpc.Switch/CleanStore": {{
+			Entity: "offchain",
+			Action: "write",
+		}},
 		"/switchrpc.Switch/DisableRemoteRouter": {{
 			Entity: "offchain",
 			Action: "write",
@@ -1022,4 +1026,33 @@ func UnmarshallFailureMessage(wireMsg []byte) (lnwire.FailureMessage, error) {
 	r := bytes.NewReader(wireMsg)
 
 	return lnwire.DecodeFailure(r, 0)
+}
+
+// CleanStore deletes all attempt results except those specified in request as
+// to be kept. This allows for remote maintenance of HTLC attempt data in the
+// Switch's underlying attempt store and should be used by routers to
+// periodically clean up results for completed attempts.
+func (s *Server) CleanStore(_ context.Context,
+	req *CleanStoreRequest) (*CleanStoreResponse, error) {
+
+	// Construct keep set from provided IDs.
+	keepSet := make(map[uint64]struct{}, len(req.KeepAttemptIds))
+	for _, id := range req.KeepAttemptIds {
+		keepSet[id] = struct{}{}
+	}
+
+	// Clean Switch's attempt store.
+	// TODO(calvin): Support namespace-aware deletion. This will be required
+	// once multiple clients are concurrently using the Switch.
+	err := s.cfg.HtlcDispatcher.CleanStore(keepSet)
+	if err != nil {
+		log.Errorf("Unable to cleanup Switch attempt store: %v", err)
+
+		return nil, status.Errorf(codes.Internal, "unable to cleanup "+
+			"Switch attempt store: %v", err)
+	}
+
+	log.Debugf("Successfully cleaned Switch attempt store.")
+
+	return &CleanStoreResponse{}, nil
 }
