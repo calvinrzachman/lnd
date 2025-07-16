@@ -86,6 +86,7 @@ func newTestPaymentLifecycle(t *testing.T) (*paymentLifecycle, *mockers) {
 			TrafficShaper: fn.Some[htlcswitch.AuxTrafficShaper](
 				&mockTrafficShaper{},
 			),
+			Resumer: NoOpResumer,
 		},
 		quit: quitChan,
 	}
