@@ -656,10 +656,41 @@ func (s *Switch) SendHTLC(firstHop lnwire.ShortChannelID, attemptID uint64,
 // a unique namespace, though sharing a namespace across clients is safe if all
 // IDs are issued via the Switch.
 func (s *Switch) NextAttemptID(namespace []byte) (uint64, error) {
-	// TODO(calvin): allow separation of ID space. Multiple independent
+
+	// Get the next raw ID from the shared flat sequencer.
+	//
+	// TODO(calvin): allow full separation of ID space. Multiple independent
 	// payment life-cycle managing or HTLC dispatching entities calling
 	// CleanStore without coordination requires ID space separation.
-	return s.sequencer.NextID()
+	id, err := s.sequencer.NextID()
+	if err != nil {
+		return 0, err
+	}
+
+	// If the namespace is empty, preserve legacy behavior.
+	if len(namespace) == 0 {
+		log.Debugf("Allocated attemptID=%d in default namespace", id)
+
+		return id, nil
+	}
+
+	// Enforce 56-bit maximum for raw ID to prevent namespace overlap.
+	if id > maxRawAttemptID {
+		return 0, fmt.Errorf("attempt ID exceeds 56-bit max: %d", id)
+	}
+
+	// Encode and validate namespace safety. For non-empty namespace, encode
+	// namespace index in the MSB. For now, only support 1-byte namespaces
+	// (e.g., index or client ID).
+	scopedID, err := EncodeNamespacedID(namespace[0], id)
+	if err != nil {
+		return 0, err
+	}
+
+	log.Debugf("Allocated new attemptID=%d in namespace=%v", scopedID,
+		namespace[0])
+
+	return scopedID, nil
 }
 
 // UpdateForwardingPolicies sends a message to the switch to update the
