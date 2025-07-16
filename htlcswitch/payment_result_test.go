@@ -201,3 +201,59 @@ func TestNetworkResultStore(t *testing.T) {
 		}
 	}
 }
+
+func TestNamespacedIDEncoding(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name       string
+		namespace  byte
+		rawID      uint64
+		expectFail bool
+	}{
+		{
+			name:      "zero namespace, small raw ID",
+			namespace: 0x00,
+			rawID:     42,
+		},
+		{
+			name:      "non-zero namespace, small raw ID",
+			namespace: 0x1A,
+			rawID:     12345,
+		},
+		{
+			name:      "max raw ID, namespace 0xFF",
+			namespace: 0xFF,
+			rawID:     maxRawAttemptID,
+		},
+		{
+			name:       "raw ID exceeds 56-bit max",
+			namespace:  0x01,
+			rawID:      maxRawAttemptID + 1,
+			expectFail: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc // capture range variable
+		t.Run(tc.name, func(t *testing.T) {
+			namespacedID, err := EncodeNamespacedID(tc.namespace, tc.rawID)
+
+			if tc.expectFail {
+				require.ErrorIs(t, err, ErrMaxIDSizeExceeded)
+				return
+			}
+
+			require.NoError(t, err, "unexpected failure encoding ID")
+
+			ns := DecodeNamespace(namespacedID)
+			require.Equal(t, tc.namespace, ns, "namespace mismatch")
+
+			raw := DecodeRawID(namespacedID)
+			require.Equal(t, tc.rawID, raw, "raw ID mismatch")
+
+			// Ensure the ID does not exceed 64 bits.
+			require.LessOrEqual(t, namespacedID, uint64(^uint64(0)))
+		})
+	}
+}
