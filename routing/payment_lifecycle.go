@@ -1105,6 +1105,24 @@ func (p *paymentLifecycle) patchLegacyPaymentHash(
 // reloadInflightAttempts is called when the payment lifecycle is resumed after
 // a restart. It reloads all inflight attempts from the control tower and
 // collects the results of the attempts that have been sent before.
+//
+// For each in-flight attempt, we defensively try to dispatch the attempt. This
+// serves to reassert delivery of the HTLC to the Switch, resolving any
+// ambiguity about whether the original dispatch succeeded.
+//
+// In monolithic deployments (Router and Switch in the same process), this is
+// mostly harmless. If the attempt was already handed off to the Switch before
+// shutdown, the Switch will return ErrDuplicateAdd and we proceed to track
+// the result as normal. If the attempt was not yet sent, this ensures it
+// is delivered now.
+//
+// In remote or modular deployments, this retry becomes essential. The Router
+// (i.e., the HTLC lifecycle manager) and Switch may run in separate processes,
+// possibly on different machines. If the Router crashed or lost connectivity
+// after registering the attempt locally but before the HTLC was acknowledged
+// by the Switch, we may not know whether the attempt was successfully sent.
+// Because SendHTLC is now duplicate-safe, we can retry safely until we receive
+// a definitive response.
 func (p *paymentLifecycle) reloadInflightAttempts() (DBMPPayment, error) {
 	payment, err := p.router.cfg.Control.FetchPayment(p.identifier)
 	if err != nil {
@@ -1121,10 +1139,103 @@ func (p *paymentLifecycle) reloadInflightAttempts() (DBMPPayment, error) {
 		// it's a legacy payment.
 		a = p.patchLegacyPaymentHash(a)
 
+		// Re-dispatch the HTLC to resolve any ambiguity about delivery
+		// status. This is safe to do whether router and htlc dispatcher
+		// run together or separately due to duplicate protection in
+		// SendHTLC.
+		err := p.retrySendHTLC(&a)
+		if err != nil {
+			log.Warnf("Retrying HTLC %v for payment %v failed: %v",
+				a.AttemptID, p.identifier, err)
+		}
+
+		// Always track the result regardless of send error.
 		p.resultCollector(&a)
 	}
 
 	return payment, nil
+}
+
+// retrySendHTLC attempts to (re)dispatch an HTLC for a previously registered
+// attempt. This is typically invoked when resuming the payment lifecycle after
+// a restart.
+//
+// In monolithic deployments (Router and Switch in the same process), this call
+// is mostly defensive. Either the HTLC was already sent before shutdown and
+// will result in ErrDuplicateAdd, or it was never sent and will now be
+// successfully dispatched.
+//
+// In remote Router deployments (Router and Switch in separate processes),
+// this call becomes essential for resolving ambiguity. The Router may have
+// crashed or lost connectivity after registering the attempt locally but before
+// confirming that the Switch received and persisted it. Since SendHTLC is
+// now duplicate-safe (via InitAttempt), it's safe to retry until a definitive
+// acknowledgment is returned.
+//
+// Dispatching may succeed here even though the attempt was previously marked
+// in-flight. This occurs if the Router registered the attempt in the control
+// tower, but the daemon exited or crashed before the HTLC was successfully
+// handed off to and persisted by the Switch.
+func (p *paymentLifecycle) retrySendHTLC(attempt *channeldb.HTLCAttempt) error {
+	log.Infof("Retrying HTLC attempt %v for payment %v",
+		attempt.AttemptID, p.identifier)
+
+	rt := attempt.Route
+	firstHop := lnwire.NewShortChanIDFromInt(rt.Hops[0].ChannelID)
+
+	htlcAdd := &lnwire.UpdateAddHTLC{
+		Amount:        rt.FirstHopAmount.Val.Int(),
+		Expiry:        rt.TotalTimeLock,
+		PaymentHash:   *attempt.Hash,
+		CustomRecords: rt.FirstHopWireCustomRecords,
+	}
+
+	onionBlob, err := attempt.OnionBlob()
+	if err != nil {
+		log.Errorf("Failed to retrieve onion blob: attempt=%d in "+
+			"payment=%v, err=%v", attempt.AttemptID, p.identifier,
+			err)
+
+		return err
+	}
+	htlcAdd.OnionBlob = onionBlob
+
+	err = p.router.cfg.Payer.SendHTLC(firstHop, attempt.AttemptID, htlcAdd)
+
+	switch {
+	case err == nil:
+		// This can occur if the attempt was marked in-flight by the
+		// router's payment life-cycle manager, but the process exited
+		// before the Switch persisted the HTLC.
+		log.Debug("Dispatched HTLC for previously initiated butunsent "+
+			"attemptID=%v", attempt.AttemptID)
+
+	case errors.Is(err, htlcswitch.ErrDuplicateAdd):
+		// This is the expected case for the vast majority of attempts
+		// when the router and Switch run in the same process. Since
+		// HTLC dispatch and persistence are tightly coupled in that
+		// model, an attempt marked as in-flight in the control tower
+		// was almost certainly handed off to the Switch before shutdown.
+		//
+		// In remote router deployments, this case indicates that the
+		// HTLC was already delivered to the Switch during a prior
+		// invocation of SendHTLC, but the router crashed or disconnected
+		// before receiving confirmation. Because SendHTLC is now
+		// duplicate-safe, we can safely retry until we receive a
+		// definitive response. The duplicate error here tells us that
+		// the HTLC is already tracked by the Switch and we should
+		// proceed to wait for its result.
+		log.Infof("An HTLC for attemptID=%v was already dispatched, "+
+			"tracking result...", attempt.AttemptID)
+
+		return nil
+
+	default:
+		log.Warnf("Unexpected dispatch error for attemptID=%v: %v",
+			attempt.AttemptID, err)
+	}
+
+	return err
 }
 
 // reloadPayment returns the latest payment found in the db (control tower).
