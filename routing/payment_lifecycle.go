@@ -1134,6 +1134,24 @@ func (p *paymentLifecycle) reloadInflightAttempts() (paymentsdb.DBMPPayment,
 		// it's a legacy payment.
 		a = p.patchLegacyPaymentHash(a)
 
+		// Execute the configured resumption strategy. For a local router,
+		// this will be a no-op, preserving the existing read-first recovery.
+		// For a remote router, this will perform write-first recovery.
+		err := p.router.cfg.Resumer(&a)
+
+		if err != nil {
+			// If the resumption strategy failed definitively, we log the error
+			// and do NOT proceed to track the result, as the HTLC is confirmed
+			// NOT in-flight (or is in an unrecoverable state).
+			log.Errorf("Resumption strategy for attempt %v on payment %v failed: %v."+
+				"HTLC confirmed NOT in-flight.",
+				a.AttemptID, p.identifier, err)
+
+			continue
+		}
+
+		// If the resumer succeeded (or was a no-op), we are safe to start
+		// collecting the result.
 		p.resultCollector(&a)
 	}
 

@@ -185,6 +185,19 @@ type MissionControlQuerier interface {
 		amt lnwire.MilliSatoshi, capacity btcutil.Amount) float64
 }
 
+// AttemptResumer defines the functional interface for a strategy that is
+// executed upon resuming an in-flight HTLC. This allows the router to adopt
+// different recovery behaviors depending on its deployment context (local vs.
+// remote).
+type AttemptResumer func(attempt *paymentsdb.HTLCAttempt) error
+
+// NoOpResumer is an AttemptResumer that performs no action. It is the
+// default strategy for the local router, which relies on its existing
+// read-first recovery mechanism.
+func NoOpResumer(_ *paymentsdb.HTLCAttempt) error {
+	return nil
+}
+
 // FeeSchema is the set fee configuration for a Lightning Node on the network.
 // Using the coefficients described within the schema, the required fee to
 // forward outgoing payments can be derived.
@@ -307,6 +320,9 @@ type Config struct {
 	// switch's) payment store is being managed by an external entity, and
 	// should not be cleaned on startup.
 	DispatcherManagedExternally bool
+
+	// Resumer ...
+	Resumer AttemptResumer
 }
 
 // EdgeLocator is a struct used to identify a specific edge.
@@ -350,6 +366,11 @@ type ChannelRouter struct {
 // channel graph is a subset of the UTXO set) set, then the router will proceed
 // to fully sync to the latest state of the UTXO set.
 func New(cfg Config) (*ChannelRouter, error) {
+	// If no resumer is provided, use the default NoOpResumer.
+	if cfg.Resumer == nil {
+		cfg.Resumer = NoOpResumer
+	}
+
 	return &ChannelRouter{
 		cfg:  &cfg,
 		quit: make(chan struct{}),
