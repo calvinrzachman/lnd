@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 
@@ -26,6 +27,9 @@ var (
 	// ErrPaymentIDAlreadyExists is returned if we try to write a pending
 	// payment whose paymentID already exists.
 	ErrPaymentIDAlreadyExists = errors.New("paymentID already exists")
+
+	ErrMaxIDSizeExceeded = errors.New("id must be <= 56 bits to preserve " +
+		"namespace encoding")
 )
 
 // PaymentResult wraps a decoded result received from the network after a
@@ -296,4 +300,36 @@ func (store *networkResultStore) cleanStore(keep map[uint64]struct{}) error {
 
 		return nil
 	}, func() {})
+}
+
+const namespaceShift = 56
+const namespaceMask = uint64(0xFF) << namespaceShift
+const rawIDMask = ^namespaceMask // 0x00FFFFFFFFFFFFFF
+
+// maxRawAttemptID defines the maximum value a raw attempt ID can be
+// when encoded with a namespace in the most significant byte.
+// This ensures that the namespace and raw ID do not overlap.
+const maxRawAttemptID = uint64(1<<56 - 1) // 0x00FFFFFFFFFFFFFF
+
+// EncodeNamespacedID embeds the namespace index (0-255) into the most
+// significant byte of the given raw ID. It returns an error if rawID
+// exceeds 56 bits, which would overlap with the namespace.
+func EncodeNamespacedID(namespace byte, rawID uint64) (uint64, error) {
+	if rawID > maxRawAttemptID {
+		return 0, fmt.Errorf("%w: raw ID %d", ErrMaxIDSizeExceeded,
+			rawID)
+	}
+
+	return (uint64(namespace) << namespaceShift) | rawID, nil
+}
+
+// DecodeNamespace extracts the namespace index (0-255) from a namespaced ID.
+func DecodeNamespace(id uint64) byte {
+	return byte(id >> namespaceShift)
+}
+
+// DecodeRawID extracts the underlying raw ID (without the MSB namespace) from
+// a namespaced ID.
+func DecodeRawID(id uint64) uint64 {
+	return id & rawIDMask
 }
