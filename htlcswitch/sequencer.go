@@ -4,13 +4,17 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/kvdb"
 )
 
 // defaultSequenceBatchSize specifies the window of sequence numbers that are
 // allocated for each write to disk made by the sequencer.
 const defaultSequenceBatchSize = 1000
+
+// DefaultAttemptIDNamespace is the name of the default attempt ID namespace.
+// This is used as the sub-bucket key within the top level DB bucket to store
+// mission control results.
+var DefaultAttemptIDNamespace = []byte{}
 
 // Sequencer emits sequence numbers for locally initiated HTLCs. These are
 // only used internally for tracking pending payments, however they must be
@@ -34,7 +38,7 @@ var (
 // persistentSequencer is a concrete implementation of IDGenerator, that uses
 // channeldb to allocate sequence numbers.
 type persistentSequencer struct {
-	db *channeldb.DB
+	db kvdb.Backend
 
 	mu sync.Mutex
 
@@ -43,7 +47,7 @@ type persistentSequencer struct {
 }
 
 // NewPersistentSequencer initializes a new sequencer using a channeldb backend.
-func NewPersistentSequencer(db *channeldb.DB) (Sequencer, error) {
+func NewPersistentSequencer(db kvdb.Backend) (Sequencer, error) {
 	g := &persistentSequencer{
 		db: db,
 	}

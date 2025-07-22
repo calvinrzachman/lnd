@@ -93,6 +93,12 @@ circuit. The indices are only available for forwarding events saved after v0.20.
     * [10](https://github.com/lightningnetwork/lnd/pull/9971)
     * [11](https://github.com/lightningnetwork/lnd/pull/9972)
 
+* Move htlc attempt ID generation (`NextAttemptID`) method to the
+ `PaymentAttemptDispatcher` interface. This shifts the responsibility of
+  generating unique htlc attempt IDs from the ChannelRouter (payement life-cycle
+  manager) to the HTLCSwitch (switchrpc server). Allocating IDs centrally from
+  within the Switch prepares the daemon for multi-router support.
+
 ## RPC Updates
 * Previously the `RoutingPolicy` would return the inbound fee record in its
   `CustomRecords` field, which is duplicated info as it's already presented in
