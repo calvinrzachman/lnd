@@ -37,6 +37,9 @@ type SwitchClient interface {
 	TrackOnion(ctx context.Context, in *TrackOnionRequest, opts ...grpc.CallOption) (*TrackOnionResponse, error)
 	// BuildOnion attempts to build an onion packet for the specified route.
 	BuildOnion(ctx context.Context, in *BuildOnionRequest, opts ...grpc.CallOption) (*BuildOnionResponse, error)
+	// CleanStore deletes all attempt results except those specified in
+	// keep_attempt_ids.
+	CleanStore(ctx context.Context, in *CleanStoreRequest, opts ...grpc.CallOption) (*CleanStoreResponse, error)
 	// DisableRemoteRouter marks the database as no longer being used by a remote
 	// router. This is useful for migrating from a remote router setup back to the
 	// default embedded router. This RPC will fail if there are any active,
@@ -79,6 +82,15 @@ func (c *switchClient) BuildOnion(ctx context.Context, in *BuildOnionRequest, op
 	return out, nil
 }
 
+func (c *switchClient) CleanStore(ctx context.Context, in *CleanStoreRequest, opts ...grpc.CallOption) (*CleanStoreResponse, error) {
+	out := new(CleanStoreResponse)
+	err := c.cc.Invoke(ctx, "/switchrpc.Switch/CleanStore", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *switchClient) DisableRemoteRouter(ctx context.Context, in *DisableRemoteRouterRequest, opts ...grpc.CallOption) (*DisableRemoteRouterResponse, error) {
 	out := new(DisableRemoteRouterResponse)
 	err := c.cc.Invoke(ctx, "/switchrpc.Switch/DisableRemoteRouter", in, out, opts...)
@@ -111,6 +123,9 @@ type SwitchServer interface {
 	TrackOnion(context.Context, *TrackOnionRequest) (*TrackOnionResponse, error)
 	// BuildOnion attempts to build an onion packet for the specified route.
 	BuildOnion(context.Context, *BuildOnionRequest) (*BuildOnionResponse, error)
+	// CleanStore deletes all attempt results except those specified in
+	// keep_attempt_ids.
+	CleanStore(context.Context, *CleanStoreRequest) (*CleanStoreResponse, error)
 	// DisableRemoteRouter marks the database as no longer being used by a remote
 	// router. This is useful for migrating from a remote router setup back to the
 	// default embedded router. This RPC will fail if there are any active,
@@ -131,6 +146,9 @@ func (UnimplementedSwitchServer) TrackOnion(context.Context, *TrackOnionRequest)
 }
 func (UnimplementedSwitchServer) BuildOnion(context.Context, *BuildOnionRequest) (*BuildOnionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method BuildOnion not implemented")
+}
+func (UnimplementedSwitchServer) CleanStore(context.Context, *CleanStoreRequest) (*CleanStoreResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CleanStore not implemented")
 }
 func (UnimplementedSwitchServer) DisableRemoteRouter(context.Context, *DisableRemoteRouterRequest) (*DisableRemoteRouterResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DisableRemoteRouter not implemented")
@@ -202,6 +220,24 @@ func _Switch_BuildOnion_Handler(srv interface{}, ctx context.Context, dec func(i
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Switch_CleanStore_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CleanStoreRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SwitchServer).CleanStore(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/switchrpc.Switch/CleanStore",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SwitchServer).CleanStore(ctx, req.(*CleanStoreRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Switch_DisableRemoteRouter_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(DisableRemoteRouterRequest)
 	if err := dec(in); err != nil {
@@ -238,6 +274,10 @@ var Switch_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "BuildOnion",
 			Handler:    _Switch_BuildOnion_Handler,
+		},
+		{
+			MethodName: "CleanStore",
+			Handler:    _Switch_CleanStore_Handler,
 		},
 		{
 			MethodName: "DisableRemoteRouter",
