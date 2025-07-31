@@ -217,11 +217,6 @@ type Config struct {
 	// a mailbox via AddPacket.
 	MailboxDeliveryTimeout time.Duration
 
-	// RemoteTracking determines whether all HTLC attempts should be marked
-	// as tracked remotely. If true, the switch will treat all attempts as
-	// if they are managed by a remote controller.
-	RemoteTracking bool
-
 	// MaxFeeExposure is the threshold in milli-satoshis after which we'll
 	// fail incoming or outgoing payments for a particular channel.
 	MaxFeeExposure lnwire.MilliSatoshi
@@ -543,11 +538,6 @@ func (s *Switch) GetAttemptResult(attemptID uint64, paymentHash lntypes.Hash,
 // preiodically to let the switch clean up payment results that we have
 // handled.
 func (s *Switch) CleanStore(keepPids map[uint64]struct{}) error {
-	if s.cfg.RemoteTracking {
-		log.Infof("Switch store automatic cleaning disabled.")
-		return nil
-	}
-
 	return s.attemptStore.CleanStore(keepPids)
 }
 

@@ -303,6 +303,10 @@ type Config struct {
 	// TrafficShaper is an optional traffic shaper that can be used to
 	// control the outgoing channel of a payment.
 	TrafficShaper fn.Option[htlcswitch.AuxTrafficShaper]
+
+	// RemoteTracking indicates that the lifecycle of *all* HTLC attempts
+	// should be considered as if they are managed by a remote controller.
+	RemoteTracking bool
 }
 
 // EdgeLocator is a struct used to identify a specific edge.
@@ -1439,9 +1443,16 @@ func (r *ChannelRouter) resumePayments() error {
 		}
 	}
 
-	log.Debugf("Cleaning network result store.")
-	if err := r.cfg.Payer.CleanStore(toKeep); err != nil {
-		return err
+	// NOTE: Consider disabling the switch cleanup from the router rather
+	// than the Switch so that the switchrpc CleanStore method still works.
+	if !r.cfg.RemoteTracking {
+		log.Debugf("Cleaning network result store.")
+		if err := r.cfg.Payer.CleanStore(toKeep); err != nil {
+			return err
+		}
+	} else {
+		log.Infof("Dispatcher attempt store cleanup disabled. " +
+			"Attempt information must be cleaned remotely")
 	}
 
 	// launchPayment is a helper closure that handles resuming the payment.

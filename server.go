@@ -806,7 +806,6 @@ func newServer(_ context.Context, cfg *Config, listenAddrs []net.Addr,
 		RejectHTLC:             cfg.RejectHTLC,
 		Clock:                  clock.NewDefaultClock(),
 		MailboxDeliveryTimeout: cfg.Htlcswitch.MailboxDeliveryTimeout,
-		RemoteTracking:         cfg.Htlcswitch.RemoteTracking,
 		MaxFeeExposure:         thresholdMSats,
 		SignAliasUpdate:        s.signAliasUpdate,
 		IsAlias:                aliasmgr.IsAlias,
@@ -1167,6 +1166,7 @@ func newServer(_ context.Context, cfg *Config, listenAddrs []net.Addr,
 		ApplyChannelUpdate: s.graphBuilder.ApplyChannelUpdate,
 		ClosedSCIDs:        s.fetchClosedChannelSCIDs(),
 		TrafficShaper:      implCfg.TrafficShaper,
+		RemoteTracking:     cfg.Routing.RemoteTracking,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("can't create router: %w", err)

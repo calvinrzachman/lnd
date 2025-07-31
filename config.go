@@ -724,6 +724,7 @@ func DefaultConfig() Config {
 			HoldExpiryDelta: lncfg.DefaultHoldInvoiceExpiryDelta,
 		},
 		Routing: &lncfg.Routing{
+			RemoteTracking: false,
 			BlindedPaths: lncfg.BlindedPaths{
 				MinNumRealHops:           lncfg.DefaultMinNumRealBlindedPathHops,
 				NumHops:                  lncfg.DefaultNumBlindedPathHops,
@@ -751,7 +752,6 @@ func DefaultConfig() Config {
 		Sweeper: lncfg.DefaultSweeperConfig(),
 		Htlcswitch: &lncfg.Htlcswitch{
 			MailboxDeliveryTimeout: htlcswitch.DefaultMailboxDeliveryTimeout,
-			RemoteTracking:         false,
 		},
 		GRPC: &GRPCConfig{
 			ServerPingTime:    defaultGrpcServerPingTime,
