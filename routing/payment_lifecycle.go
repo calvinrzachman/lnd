@@ -1144,12 +1144,13 @@ func (p *paymentLifecycle) reloadInflightAttempts() (DBMPPayment, error) {
 		// run together or separately due to duplicate protection in
 		// SendHTLC.
 		err := p.retrySendHTLC(&a)
-		if err != nil {
+		if err != nil && !errors.Is(err, htlcswitch.ErrDuplicateAdd) {
 			log.Warnf("Retrying HTLC %v for payment %v failed: %v",
 				a.AttemptID, p.identifier, err)
+			continue
 		}
 
-		// Always track the result regardless of send error.
+		// Only track the result if the HTLC is confirmed in-flight.
 		p.resultCollector(&a)
 	}
 
@@ -1207,8 +1208,8 @@ func (p *paymentLifecycle) retrySendHTLC(attempt *channeldb.HTLCAttempt) error {
 		// This can occur if the attempt was marked in-flight by the
 		// router's payment life-cycle manager, but the process exited
 		// before the Switch persisted the HTLC.
-		log.Debug("Dispatched HTLC for previously initiated butunsent "+
-			"attemptID=%v", attempt.AttemptID)
+		log.Debug("Dispatched HTLC for previously initiated but unsent "+
+			"attemptID=%d", attempt.AttemptID)
 
 	case errors.Is(err, htlcswitch.ErrDuplicateAdd):
 		// This is the expected case for the vast majority of attempts
@@ -1228,13 +1229,12 @@ func (p *paymentLifecycle) retrySendHTLC(attempt *channeldb.HTLCAttempt) error {
 		log.Infof("An HTLC for attemptID=%v was already dispatched, "+
 			"tracking result...", attempt.AttemptID)
 
-		return nil
-
 	default:
 		log.Warnf("Unexpected dispatch error for attemptID=%v: %v",
 			attempt.AttemptID, err)
 	}
 
+	// Return the actual error (nil, ErrDuplicateAdd, or other).
 	return err
 }
 
