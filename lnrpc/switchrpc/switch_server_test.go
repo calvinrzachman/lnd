@@ -15,7 +15,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestTranslateErrorForRPC tests the TranslateErrorForRPC function.
 func TestTranslateErrorForRPC(t *testing.T) {
+	t.Parallel()
+
 	failureIndex := 1
 	mockWireMsg := lnwire.NewTemporaryChannelFailure(nil)
 	mockForwardingErr := htlcswitch.NewForwardingError(mockWireMsg, failureIndex)
@@ -78,7 +81,10 @@ func TestTranslateErrorForRPC(t *testing.T) {
 	}
 }
 
+// TestParseForwardingError tests the ParseForwardingError function.
 func TestParseForwardingError(t *testing.T) {
+	t.Parallel()
+
 	mockWireMsg := lnwire.NewTemporaryChannelFailure(nil)
 
 	var buf bytes.Buffer
@@ -132,7 +138,11 @@ func TestParseForwardingError(t *testing.T) {
 	}
 }
 
+// TestForwardingErrorEncodeDecode tests the encoding and decoding of a
+// forwarding error.
 func TestForwardingErrorEncodeDecode(t *testing.T) {
+	t.Parallel()
+
 	mockWireMsg := lnwire.NewTemporaryChannelFailure(nil)
 	mockForwardingErr := htlcswitch.NewForwardingError(mockWireMsg, 1)
 
