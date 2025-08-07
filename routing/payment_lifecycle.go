@@ -23,7 +23,10 @@ import (
 
 // ErrPaymentLifecycleExiting is used when waiting for htlc attempt result, but
 // the payment lifecycle is exiting .
-var ErrPaymentLifecycleExiting = errors.New("payment lifecycle exiting")
+var (
+	ErrPaymentLifecycleExiting   = errors.New("payment lifecycle exiting")
+	ErrContextCanceledWaitResult = errors.New("context canceled, wait for results")
+)
 
 // switchResult is the result sent back from the switch after processing the
 // HTLC.
@@ -194,6 +197,14 @@ func (p *paymentLifecycle) resumePayment(ctx context.Context) ([32]byte,
 	// When the payment lifecycle loop exits, we make sure to signal any
 	// sub goroutine of the HTLC attempt to exit, then wait for them to
 	// return.
+	//
+	// NOTE: If we exit the life-cycle for any reason, we clean up the
+	// async result collection go routine which means that the router will
+	// no longer be in a position to update the payment status within its
+	// payments DB (ControlTower). This can mean that the router and switch
+	// will differ in their perspectives on payment status. This should be
+	// resolved after a restart when the router resumes in-flight payments,
+	// but can we do better?
 	defer p.stop()
 
 	// If we had any existing attempts outstanding, we'll start by spinning
@@ -224,6 +235,7 @@ func (p *paymentLifecycle) resumePayment(ctx context.Context) ([32]byte,
 
 	// We'll continue until either our payment succeeds, or we encounter a
 	// critical error during path finding.
+	var contextCanceledHandled bool
 lifecycle:
 	for {
 		// We update the payment state on every iteration.
@@ -251,8 +263,19 @@ lifecycle:
 		// gone past the payment attempt timeout, or if the context was
 		// cancelled, or the router is exiting. In any of these cases,
 		// we'll stop this payment attempt short.
-		if err := p.checkContext(ctx); err != nil {
-			return exitWithErr(err)
+		if !contextCanceledHandled {
+			if err := p.checkContext(ctx, payment); err != nil {
+				// If the context was canceled, we'll continue
+				// the loop. The payment has been marked as
+				// failed, so the next iteration will enter
+				// the result collection phase.
+				if errors.Is(err, ErrContextCanceledWaitResult) {
+					contextCanceledHandled = true
+					continue lifecycle
+				}
+
+				return exitWithErr(err)
+			}
 		}
 
 		// Now decide the next step of the current lifecycle.
@@ -339,7 +362,9 @@ lifecycle:
 
 // checkContext checks whether the payment context has been canceled.
 // Cancellation occurs manually or if the context times out.
-func (p *paymentLifecycle) checkContext(ctx context.Context) error {
+func (p *paymentLifecycle) checkContext(ctx context.Context,
+	payment DBMPPayment) error {
+
 	select {
 	case <-ctx.Done():
 		// If the context was canceled, we'll mark the payment as
@@ -365,6 +390,18 @@ func (p *paymentLifecycle) checkContext(ctx context.Context) error {
 		err := p.router.cfg.Control.FailPayment(p.identifier, reason)
 		if err != nil {
 			return fmt.Errorf("FailPayment got %w", err)
+		}
+
+		// If the cancellation of the context occurs while we have
+		// in-flight HTLCs, then we can return early and wait for the
+		// results to be collected in the main payment loop.
+		wait, err := payment.NeedWaitAttempts()
+		if err != nil {
+			return err
+		}
+
+		if wait {
+			return ErrContextCanceledWaitResult
 		}
 
 	case <-p.router.quit:
