@@ -158,7 +158,10 @@ func TestForwardingErrorEncodeDecode(t *testing.T) {
 	require.Equal(t, mockForwardingErr.WireMessage(), decodedError.WireMessage())
 }
 
+// TestBuildErrorDecryptor tests the buildErrorDecryptor function.
 func TestBuildErrorDecryptor(t *testing.T) {
+	t.Parallel()
+
 	validSessionKey := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32}
 	validPubKey := []byte{2, 153, 44, 150, 184, 220, 236, 177, 70, 240, 51, 88, 154, 232, 72, 158, 23, 39, 58, 18, 201, 79, 200, 164, 48, 103, 208, 148, 27, 216, 153, 206, 77}
 	invalidSessionKey := []byte{1, 2, 3}
