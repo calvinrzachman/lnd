@@ -21,32 +21,32 @@ message SendOnionRequest {
     // The raw onion packet to be sent across the network.
     bytes onion_blob = 1;
 
+    // The attempt ID uniquely identifying this payment attempt. The caller can
+    // expect to track results for the payment via this attempt ID.
+    uint64 attempt_id = 2;
+
     // The first hop's public key where the onion will be sent.
     // The first hop must be specified either by channel ID or public key.
-    bytes first_hop_pubkey = 2;
+    bytes first_hop_pubkey = 3;
 
     // The channel id of the channel that must be taken to the first hop.
     // The first hop must be specified either by channel ID or public key.
-    uint64 first_hop_chan_id = 3;
+    uint64 first_hop_chan_id = 4;
 
     // The total amount in millisatoshis required to complete a payment over
     // this route. This value includes the cumulative fees at each hop. The HTLC
     // extended to the first-hop in the route will need to have at least this
     // many (milli)satoshis.
-    int64 amount = 4;
+    int64 amount = 5;
 
     // The absolute timelock or CLTV value that should be extended to the first
     // hop in the route. All other hops will decrement the time-lock as
     // described by the onion.
-    uint32 timelock = 5;
+    uint32 timelock = 6;
 
     // The payment hash associated with the HTLC. This is needed for tracking
     // and debugging purposes.
-    bytes payment_hash = 6;
-
-    // The attempt ID uniquely identifying this payment attempt. The caller can
-    // expect to track results for the payment via this attempt ID.
-    uint64 attempt_id = 7;
+    bytes payment_hash = 7;
 
     // The optional blinding point to use when constructing the HTLC.
     // If set, this will be used to blind the next hop in the route.
