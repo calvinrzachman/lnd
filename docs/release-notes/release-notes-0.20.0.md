@@ -84,6 +84,14 @@ circuit. The indices are only available for forwarding events saved after v0.20.
   a canceled invoice. Supports deleting a canceled invoice by providing its
   payment hash.
 
+* Added a new [switchrpc RPC sub-system](https://github.com/lightningnetwork/lnd/pull/9489)
+  with `SendOnion`, `BuildOnion`, and `TrackOnion` endpoints. This allows the
+  daemon to offload path-finding, onion construction and payment life-cycle
+  management to an external entity and instead accept onion payments for direct
+  delivery to the network. The new gRPC server should be used with caution. The
+  compilation of the server is hidden behind the non-default `switchrpc` build 
+  tag.
+
 ## lncli Additions
 
 * [`lncli sendpayment` and `lncli queryroutes` now support the
