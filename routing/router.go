@@ -279,6 +279,10 @@ type Config struct {
 	// returned.
 	GetLink getLinkQuery
 
+	// LiquiditySource is an interface that can be used to obtain the
+	// available bandwidth of a channel.
+	LiquiditySource LiquiditySource
+
 	// NextPaymentID is a method that guarantees to return a new, unique ID
 	// each time it is called. This is used by the router to generate a
 	// unique payment ID for each payment it attempts to send, such that
@@ -538,13 +542,8 @@ func (r *ChannelRouter) FindRoute(req *RouteRequest) (*route.Route, float64,
 
 	// We'll attempt to obtain a set of bandwidth hints that can help us
 	// eliminate certain routes early on in the path finding process.
-	bandwidthHints, err := newBandwidthManager(
-		r.cfg.RoutingGraph, r.cfg.SelfNode, r.cfg.GetLink,
-		fn.None[tlv.Blob](), r.cfg.TrafficShaper,
-	)
-	if err != nil {
-		return nil, 0, err
-	}
+	bandwidthHints := newBandwidthManager(r.cfg.LiquiditySource,
+		fn.None[tlv.Blob]())
 
 	// We'll fetch the current block height, so we can properly calculate
 	// the required HTLC time locks within the route.
@@ -1345,13 +1344,9 @@ func (r *ChannelRouter) BuildRoute(sourceNode route.Vertex,
 
 	// We'll attempt to obtain a set of bandwidth hints that helps us select
 	// the best outgoing channel to use in case no outgoing channel is set.
-	bandwidthHints, err := newBandwidthManager(
-		r.cfg.RoutingGraph, r.cfg.SelfNode, r.cfg.GetLink, firstHopBlob,
-		r.cfg.TrafficShaper,
+	bandwidthHints := newBandwidthManager(
+		r.cfg.LiquiditySource, firstHopBlob,
 	)
-	if err != nil {
-		return nil, err
-	}
 
 	// We check that each node in the route has a connection to others that
 	// can forward in principle.

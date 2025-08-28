@@ -75,6 +75,7 @@ import (
 	"github.com/lightningnetwork/lnd/subscribe"
 	"github.com/lightningnetwork/lnd/sweep"
 	"github.com/lightningnetwork/lnd/ticker"
+	"github.com/lightningnetwork/lnd/tlv"
 	"github.com/lightningnetwork/lnd/tor"
 	"github.com/lightningnetwork/lnd/walletunlocker"
 	"github.com/lightningnetwork/lnd/watchtower/blob"
@@ -1119,11 +1120,18 @@ func newServer(_ context.Context, cfg *Config, listenAddrs []net.Addr,
 	if err != nil {
 		return nil, fmt.Errorf("error getting source node: %w", err)
 	}
+
+	liquiditySource := routing.NewLocalSwitchLiquiditySource(
+		s.htlcSwitch.GetLinkByShortID, selfNode.PubKeyBytes,
+		implCfg.TrafficShaper, fn.None[tlv.Blob](),
+	)
+
 	paymentSessionSource := &routing.SessionSource{
 		GraphSessionFactory: dbs.GraphDB,
 		SourceNode:          sourceNode,
 		MissionControl:      s.defaultMC,
 		GetLink:             s.htlcSwitch.GetLinkByShortID,
+		LiquiditySource:     liquiditySource,
 		PathFindingConfig:   pathFindingConfig,
 	}
 
@@ -1160,6 +1168,7 @@ func newServer(_ context.Context, cfg *Config, listenAddrs []net.Addr,
 		MissionControl:     s.defaultMC,
 		SessionSource:      paymentSessionSource,
 		GetLink:            s.htlcSwitch.GetLinkByShortID,
+		LiquiditySource:    liquiditySource,
 		NextPaymentID:      sequencer.NextID,
 		PathFindingConfig:  pathFindingConfig,
 		Clock:              clock.NewDefaultClock(),

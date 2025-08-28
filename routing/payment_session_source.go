@@ -33,6 +33,10 @@ type SessionSource struct {
 	// the available bandwidth of the link should be returned.
 	GetLink getLinkQuery
 
+	// LiquiditySource is an interface that can be used to obtain the
+	// available bandwidth of a channel.
+	LiquiditySource LiquiditySource
+
 	// MissionControl is a shared memory of sorts that executions of payment
 	// path finding use in order to remember which vertexes/edges were
 	// pruned from prior attempts. During payment execution, errors sent by
@@ -62,9 +66,8 @@ func (m *SessionSource) NewPaymentSession(p *LightningPayment,
 
 	getBandwidthHints := func(graph Graph) (bandwidthHints, error) {
 		return newBandwidthManager(
-			graph, m.SourceNode.PubKeyBytes, m.GetLink,
-			firstHopBlob, trafficShaper,
-		)
+			m.LiquiditySource, firstHopBlob,
+		), nil
 	}
 
 	options := []option{}
