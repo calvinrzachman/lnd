@@ -33,6 +33,7 @@ import (
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/record"
 	"github.com/lightningnetwork/lnd/routing/route"
+	"github.com/lightningnetwork/lnd/tlv"
 	"github.com/lightningnetwork/lnd/zpay32"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -55,6 +56,27 @@ var (
 	priv2, _    = btcec.NewPrivateKey()
 	bitcoinKey2 = priv2.PubKey()
 )
+
+// capacityLiquiditySource is a mock liquidity source used in tests that
+// returns the channel capacity as the available bandwidth.
+type capacityLiquiditySource struct {
+	graph *graphdb.ChannelGraph
+}
+
+// GetAvailableBandwidth returns the channel capacity as the available bandwidth.
+func (s *capacityLiquiditySource) GetAvailableBandwidth(scid lnwire.ShortChannelID,
+	_ lnwire.MilliSatoshi) KnownLiquidity {
+
+	info, _, _, err := s.graph.FetchChannelEdgesByID(scid.ToUint64())
+	if err != nil {
+		return KnownLiquidity{IsKnown: false}
+	}
+
+	return KnownLiquidity{
+		Amount:  lnwire.NewMSatFromSatoshis(info.Capacity),
+		IsKnown: true,
+	}
+}
 
 type testCtx struct {
 	router *ChannelRouter
@@ -133,12 +155,18 @@ func createTestCtxFromGraphInstanceAssumeValid(t *testing.T,
 
 	sourceNode, err := graphInstance.graph.SourceNode()
 	require.NoError(t, err)
+
+	liquiditySource := &capacityLiquiditySource{
+		graph: graphInstance.graph,
+	}
+
 	sessionSource := &SessionSource{
 		GraphSessionFactory: graphInstance.graph,
 		SourceNode:          sourceNode,
 		GetLink:             graphInstance.getLink,
 		PathFindingConfig:   pathFindingConfig,
 		MissionControl:      mc,
+		LiquiditySource:     liquiditySource,
 	}
 
 	graphBuilder := newMockGraphBuilder(graphInstance.graph)
@@ -163,6 +191,7 @@ func createTestCtxFromGraphInstanceAssumeValid(t *testing.T,
 		TrafficShaper: fn.Some[htlcswitch.AuxTrafficShaper](
 			&mockTrafficShaper{},
 		),
+		LiquiditySource: liquiditySource,
 	})
 	require.NoError(t, router.Start(), "unable to start router")
 
@@ -1212,7 +1241,10 @@ func TestFindPathFeeWeighting(t *testing.T) {
 	// the edge weighting, we should select the direct path over the 2 hop
 	// path even though the direct path has a higher potential time lock.
 	path, err := dbFindPath(
-		ctx.graph, nil, &mockBandwidthHints{},
+		ctx.graph, nil, newBandwidthManager(
+			&capacityLiquiditySource{graph: ctx.graph},
+			fn.None[tlv.Blob](),
+		),
 		noRestrictions,
 		testPathFindingConfig,
 		sourceNode.PubKeyBytes, target, amt, 0, 0,
@@ -1890,14 +1922,9 @@ func TestReceiverAmtForwardPass(t *testing.T) {
 // TestSenderAmtBackwardPass tests that the computation of the sender amount is
 // done correctly for route building.
 func TestSenderAmtBackwardPass(t *testing.T) {
-	bandwidthHints := bandwidthManager{
-		getLink: func(chanId lnwire.ShortChannelID) (
-			htlcswitch.ChannelLink, error) {
-
-			return nil, nil
-		},
-		localChans: make(map[lnwire.ShortChannelID]struct{}),
-	}
+	bandwidthHints := newBandwidthManager(
+		&mockLiquiditySource{}, fn.None[tlv.Blob](),
+	)
 
 	var (
 		capacity        btcutil.Amount      = 1_000_000
@@ -1956,20 +1983,20 @@ func TestSenderAmtBackwardPass(t *testing.T) {
 	// A search for an amount that is below the minimum HTLC amount should
 	// fail.
 	_, _, err := senderAmtBackwardPass(
-		edgeUnifiers, fn.Some(minHTLC-1), &bandwidthHints,
+		edgeUnifiers, fn.Some(minHTLC-1), bandwidthHints,
 	)
 	require.Error(t, err)
 
 	// Do a min amount search.
 	_, senderAmount, err := senderAmtBackwardPass(
-		edgeUnifiers, fn.None[lnwire.MilliSatoshi](), &bandwidthHints,
+		edgeUnifiers, fn.None[lnwire.MilliSatoshi](), bandwidthHints,
 	)
 	require.NoError(t, err)
 	require.Equal(t, minHTLC+333+222+222+111, senderAmount)
 
 	// Do a search for a specific amount.
 	unifiedEdges, senderAmount, err := senderAmtBackwardPass(
-		edgeUnifiers, fn.Some(testReceiverAmt), &bandwidthHints,
+		edgeUnifiers, fn.Some(testReceiverAmt), bandwidthHints,
 	)
 	require.NoError(t, err)
 	require.Equal(t, testReceiverAmt+333+222+222+111, senderAmount)
@@ -1998,7 +2025,7 @@ func TestSenderAmtBackwardPass(t *testing.T) {
 	}
 
 	unifiedEdges, senderAmount, err = senderAmtBackwardPass(
-		edgeUnifiers, fn.Some(testReceiverAmt), &bandwidthHints,
+		edgeUnifiers, fn.Some(testReceiverAmt), bandwidthHints,
 	)
 	require.NoError(t, err)
 

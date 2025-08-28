@@ -1,12 +1,9 @@
 package routing
 
 import (
-	"errors"
 	"testing"
 
-	"github.com/btcsuite/btcd/btcutil"
 	"github.com/lightningnetwork/lnd/fn/v2"
-	"github.com/lightningnetwork/lnd/htlcswitch"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/routing/route"
@@ -18,83 +15,54 @@ import (
 // manager.
 func TestBandwidthManager(t *testing.T) {
 	var (
-		chan1ID      uint64         = 101
-		chan2ID      uint64         = 102
-		chanCapacity btcutil.Amount = 100000
+		chan1ID = lnwire.NewShortChanIDFromInt(101)
+		chan2ID = lnwire.NewShortChanIDFromInt(102)
 	)
 
 	testCases := []struct {
 		name              string
-		channelID         uint64
-		linkQuery         getLinkQuery
+		channelID         lnwire.ShortChannelID
+		liquiditySource   LiquiditySource
 		expectedBandwidth lnwire.MilliSatoshi
 		expectFound       bool
 	}{
 		{
-			name:      "channel not ours",
+			name:      "channel not known",
 			channelID: chan2ID,
-			// Set a link query that will fail our test since we
-			// don't expect to query the switch for a channel that
-			// is not ours.
-			linkQuery: func(id lnwire.ShortChannelID) (
-				htlcswitch.ChannelLink, error) {
-
-				require.Fail(t, "link query unexpected for: "+
-					"%v", id)
-
-				return nil, nil
+			liquiditySource: &mockLiquiditySource{
+				channelLiquidity: map[lnwire.ShortChannelID]KnownLiquidity{
+					chan1ID: {
+						IsKnown: true,
+					},
+				},
 			},
 			expectedBandwidth: 0,
 			expectFound:       false,
 		},
 		{
-			name:      "channel ours, link not online",
+			name:      "channel known, no bandwidth",
 			channelID: chan1ID,
-			linkQuery: func(lnwire.ShortChannelID) (
-				htlcswitch.ChannelLink, error) {
-
-				return nil, htlcswitch.ErrChannelLinkNotFound
+			liquiditySource: &mockLiquiditySource{
+				channelLiquidity: map[lnwire.ShortChannelID]KnownLiquidity{
+					chan1ID: {
+						IsKnown: true,
+						Amount:  0,
+					},
+				},
 			},
 			expectedBandwidth: 0,
 			expectFound:       true,
 		},
 		{
-			name:      "channel ours, link not eligible",
+			name:      "channel known, bandwidth available",
 			channelID: chan1ID,
-			linkQuery: func(lnwire.ShortChannelID) (
-				htlcswitch.ChannelLink, error) {
-
-				return &mockLink{
-					ineligible: true,
-				}, nil
-			},
-			expectedBandwidth: 0,
-			expectFound:       true,
-		},
-		{
-			name:      "channel ours, link can't add htlc",
-			channelID: chan1ID,
-			linkQuery: func(lnwire.ShortChannelID) (
-				htlcswitch.ChannelLink, error) {
-
-				return &mockLink{
-					mayAddOutgoingErr: errors.New(
-						"can't add htlc",
-					),
-				}, nil
-			},
-			expectedBandwidth: 0,
-			expectFound:       true,
-		},
-		{
-			name:      "channel ours, bandwidth available",
-			channelID: chan1ID,
-			linkQuery: func(lnwire.ShortChannelID) (
-				htlcswitch.ChannelLink, error) {
-
-				return &mockLink{
-					bandwidth: 321,
-				}, nil
+			liquiditySource: &mockLiquiditySource{
+				channelLiquidity: map[lnwire.ShortChannelID]KnownLiquidity{
+					chan1ID: {
+						IsKnown: true,
+						Amount:  321,
+					},
+				},
 			},
 			expectedBandwidth: 321,
 			expectFound:       true,
@@ -105,29 +73,13 @@ func TestBandwidthManager(t *testing.T) {
 		testCase := testCase
 
 		t.Run(testCase.name, func(t *testing.T) {
-			g := newMockGraph(t)
-
-			sourceNode := newMockNode(sourceNodeID)
-			targetNode := newMockNode(targetNodeID)
-
-			g.addNode(sourceNode)
-			g.addNode(targetNode)
-			g.addChannel(
-				chan1ID, sourceNodeID, targetNodeID,
-				chanCapacity,
+			m := newBandwidthManager(
+				testCase.liquiditySource,
+				fn.None[tlv.Blob](),
 			)
-
-			m, err := newBandwidthManager(
-				g, sourceNode.pubkey, testCase.linkQuery,
-				fn.None[[]byte](),
-				fn.Some[htlcswitch.AuxTrafficShaper](
-					&mockTrafficShaper{},
-				),
-			)
-			require.NoError(t, err)
 
 			bandwidth, found := m.availableChanBandwidth(
-				testCase.channelID, 10,
+				testCase.channelID.ToUint64(), 10,
 			)
 			require.Equal(t, testCase.expectedBandwidth, bandwidth)
 			require.Equal(t, testCase.expectFound, found)

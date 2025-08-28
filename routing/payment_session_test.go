@@ -4,11 +4,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lightningnetwork/lnd/fn/v2"
 	graphdb "github.com/lightningnetwork/lnd/graph/db"
 	"github.com/lightningnetwork/lnd/graph/db/models"
 	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/routing/route"
+	"github.com/lightningnetwork/lnd/tlv"
 	"github.com/lightningnetwork/lnd/zpay32"
 	"github.com/stretchr/testify/require"
 )
@@ -117,7 +119,10 @@ func TestUpdateAdditionalEdge(t *testing.T) {
 	session, err := newPaymentSession(
 		payment, route.Vertex{},
 		func(Graph) (bandwidthHints, error) {
-			return &mockBandwidthHints{}, nil
+			liquiditySource := &mockLiquiditySource{}
+			return newBandwidthManager(
+				liquiditySource, fn.None[tlv.Blob](),
+			), nil
 		},
 		&sessionGraph{},
 		&MissionControl{},
@@ -195,7 +200,10 @@ func TestRequestRoute(t *testing.T) {
 	session, err := newPaymentSession(
 		payment, route.Vertex{},
 		func(Graph) (bandwidthHints, error) {
-			return &mockBandwidthHints{}, nil
+			liquiditySource := &mockLiquiditySource{}
+			return newBandwidthManager(
+				liquiditySource, fn.None[tlv.Blob](),
+			), nil
 		},
 		&sessionGraph{},
 		&MissionControl{},
@@ -310,9 +318,12 @@ func TestRouteTransformFunc(t *testing.T) {
 	session, err := newPaymentSession(
 		payment, route.Vertex{1},
 		func(Graph) (bandwidthHints, error) {
-			return &mockBandwidthHints{}, nil
+			liquiditySource := &mockLiquiditySource{}
+			return newBandwidthManager(
+				liquiditySource, fn.None[tlv.Blob](),
+			), nil
 		},
-		newMockGraphSessionFactory(&sessionGraph{}),
+		&sessionGraph{},
 		&MissionControl{},
 		PathFindingConfig{},
 		withRouteTransform(trimFirstHop),
