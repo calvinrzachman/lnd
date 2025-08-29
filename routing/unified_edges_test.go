@@ -4,9 +4,11 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/graph/db/models"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/routing/route"
+	"github.com/lightningnetwork/lnd/tlv"
 	"github.com/stretchr/testify/require"
 )
 
@@ -18,11 +20,29 @@ func TestNodeEdgeUnifier(t *testing.T) {
 	source := route.Vertex{1}
 	toNode := route.Vertex{2}
 	fromNode := route.Vertex{3}
-	bandwidthHints := &mockBandwidthHints{
-		hints: map[uint64]lnwire.MilliSatoshi{
-			100: 150,
-		},
-	}
+
+	// bandwidthHintsUnknown is a bandwidth hints instance that returns unknown
+	// liquidity for all channels. This forces the edge selection
+	// logic to fall back to the fee-based network selection.
+	bandwidthHintsUnknown := newBandwidthManager(
+		&mockLiquiditySource{
+			channelLiquidity: make(map[lnwire.ShortChannelID]KnownLiquidity),
+		}, fn.None[tlv.Blob](),
+	)
+
+	// bandwidthHintsKnown is a bandwidth hints instance that returns a
+	// specific, known liquidity for a channel. This is used to test the
+	// liquidity-aware "local" channel selection logic.
+	bandwidthHintsKnown := newBandwidthManager(
+		&mockLiquiditySource{
+			channelLiquidity: map[lnwire.ShortChannelID]KnownLiquidity{
+				lnwire.NewShortChanIDFromInt(100): {
+					Amount:  150,
+					IsKnown: true,
+				},
+			},
+		}, fn.None[tlv.Blob](),
+	)
 
 	// Add two channels between the pair of nodes.
 	p1 := models.CachedEdgePolicy{
@@ -116,18 +136,21 @@ func TestNodeEdgeUnifier(t *testing.T) {
 		expectNoPolicy     bool
 		expectedCapacity   btcutil.Amount
 		nextOutFee         lnwire.MilliSatoshi
+		bandwidthHints     bandwidthHints
 	}{
 		{
 			name:           "amount below min htlc",
 			unifier:        unifierFilled,
 			amount:         50,
 			expectNoPolicy: true,
+			bandwidthHints: bandwidthHintsUnknown,
 		},
 		{
 			name:           "amount above max htlc",
 			unifier:        unifierFilled,
 			amount:         5500,
 			expectNoPolicy: true,
+			bandwidthHints: bandwidthHintsUnknown,
 		},
 		// For 200 msat, p1 yields the highest fee. Use that policy to
 		// forward, because it will also match p2 in case p1 does not
@@ -140,6 +163,7 @@ func TestNodeEdgeUnifier(t *testing.T) {
 			expectedFeeRate:  p1.FeeProportionalMillionths,
 			expectedTimeLock: p1.TimeLockDelta,
 			expectedCapacity: c2,
+			bandwidthHints:   bandwidthHintsUnknown,
 		},
 		// For 400 sat, p2 yields the highest fee. Use that policy to
 		// forward, because it will also match p1 in case p2 does not
@@ -153,6 +177,7 @@ func TestNodeEdgeUnifier(t *testing.T) {
 			expectedFeeRate:  p2.FeeProportionalMillionths,
 			expectedTimeLock: p1.TimeLockDelta,
 			expectedCapacity: c2,
+			bandwidthHints:   bandwidthHintsUnknown,
 		},
 		// If there's no capacity info present, we fall back to the max
 		// maxHTLC value.
@@ -164,17 +189,20 @@ func TestNodeEdgeUnifier(t *testing.T) {
 			expectedFeeRate:  p2.FeeProportionalMillionths,
 			expectedTimeLock: p1.TimeLockDelta,
 			expectedCapacity: p1.MaxHTLC.ToSatoshis(),
+			bandwidthHints:   bandwidthHintsUnknown,
 		},
 		{
 			name:             "no info",
 			unifier:          unifierNoInfo,
 			expectedCapacity: 0,
+			bandwidthHints:   bandwidthHintsUnknown,
 		},
 		{
 			name:           "local insufficient bandwidth",
 			unifier:        unifierLocal,
 			amount:         200,
 			expectNoPolicy: true,
+			bandwidthHints: bandwidthHintsKnown,
 		},
 		{
 			name:               "local",
@@ -185,6 +213,7 @@ func TestNodeEdgeUnifier(t *testing.T) {
 			expectedTimeLock:   p1.TimeLockDelta,
 			expectedCapacity:   c1,
 			expectedInboundFee: inboundFee1,
+			bandwidthHints:     bandwidthHintsKnown,
 		},
 		{
 			name: "use p2 with highest fee " +
@@ -196,6 +225,7 @@ func TestNodeEdgeUnifier(t *testing.T) {
 			expectedInboundFee: inboundFee2,
 			expectedTimeLock:   p1.TimeLockDelta,
 			expectedCapacity:   c2,
+			bandwidthHints:     bandwidthHintsUnknown,
 		},
 		// Choose inbound fee exactly so that max htlc is just exceeded.
 		// In this test, the amount that must be sent is 5001 msat.
@@ -204,6 +234,7 @@ func TestNodeEdgeUnifier(t *testing.T) {
 			unifier:        unifierInboundFee,
 			amount:         4947,
 			expectNoPolicy: true,
+			bandwidthHints: bandwidthHintsUnknown,
 		},
 		// The outbound fee of p2 is higher than p1, but because of the
 		// inbound fee on p2 it is brought down to 0. Purely based on
@@ -220,6 +251,7 @@ func TestNodeEdgeUnifier(t *testing.T) {
 			expectedInboundFee: inboundFeeNegative,
 			expectedTimeLock:   p1.TimeLockDelta,
 			expectedCapacity:   c2,
+			bandwidthHints:     bandwidthHintsUnknown,
 		},
 	}
 
@@ -230,7 +262,7 @@ func TestNodeEdgeUnifier(t *testing.T) {
 			t.Parallel()
 
 			edge := test.unifier.edgeUnifiers[fromNode].getEdge(
-				test.amount, bandwidthHints, test.nextOutFee,
+				test.amount, test.bandwidthHints, test.nextOutFee,
 			)
 
 			if test.expectNoPolicy {
