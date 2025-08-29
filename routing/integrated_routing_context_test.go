@@ -21,25 +21,6 @@ const (
 	targetNodeID = 2
 )
 
-type mockBandwidthHints struct {
-	hints map[uint64]lnwire.MilliSatoshi
-}
-
-func (m *mockBandwidthHints) availableChanBandwidth(channelID uint64,
-	_ lnwire.MilliSatoshi) (lnwire.MilliSatoshi, bool) {
-
-	if m.hints == nil {
-		return 0, false
-	}
-
-	balance, ok := m.hints[channelID]
-	return balance, ok
-}
-
-func (m *mockBandwidthHints) firstHopCustomBlob() fn.Option[tlv.Blob] {
-	return fn.None[tlv.Blob]()
-}
-
 // integratedRoutingContext defines the context in which integrated routing
 // tests run.
 type integratedRoutingContext struct {
@@ -174,15 +155,21 @@ func (c *integratedRoutingContext) testPayment(maxParts uint32,
 	require.NoError(c.t, err)
 
 	getBandwidthHints := func(_ Graph) (bandwidthHints, error) {
-		// Create bandwidth hints based on local channel balances.
-		bandwidthHints := map[uint64]lnwire.MilliSatoshi{}
+		liquiditySource := &mockLiquiditySource{
+			channelLiquidity: make(
+				map[lnwire.ShortChannelID]KnownLiquidity,
+			),
+		}
 		for _, ch := range c.graph.nodes[c.source.pubkey].channels {
-			bandwidthHints[ch.id] = ch.balance
+			scid := lnwire.NewShortChanIDFromInt(ch.id)
+			liquiditySource.channelLiquidity[scid] = KnownLiquidity{
+				Amount:  ch.balance,
+				IsKnown: true,
+			}
 		}
 
-		return &mockBandwidthHints{
-			hints: bandwidthHints,
-		}, nil
+		return newBandwidthManager(liquiditySource,
+			fn.None[tlv.Blob]()), nil
 	}
 
 	var paymentAddr [32]byte

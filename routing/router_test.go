@@ -2786,6 +2786,7 @@ func TestAddEdgeUnknownVertexes(t *testing.T) {
 		NodeKey2Bytes:    pub2,
 		BitcoinKey1Bytes: pub1,
 		BitcoinKey2Bytes: pub2,
+		Capacity:         10000,
 		AuthProof:        nil,
 	}
 	require.NoError(t, ctx.graph.AddChannelEdge(edge))
@@ -2861,6 +2862,7 @@ func TestAddEdgeUnknownVertexes(t *testing.T) {
 
 	edge = &models.ChannelEdgeInfo{
 		ChannelID: chanID.ToUint64(),
+		Capacity:  10000,
 		AuthProof: nil,
 	}
 	copy(edge.NodeKey1Bytes[:], node1Bytes)

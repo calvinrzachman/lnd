@@ -30,6 +30,7 @@ import (
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/record"
 	"github.com/lightningnetwork/lnd/routing/route"
+	"github.com/lightningnetwork/lnd/tlv"
 	"github.com/stretchr/testify/require"
 )
 
@@ -2184,8 +2185,24 @@ func runRouteFailDisabledEdge(t *testing.T, useCache bool) {
 		t.Fatalf("unable to update edge: %v", err)
 	}
 
+	// We'll now create a bandwidth manager that has a mock liquidity
+	// source. We'll use this to signal that we have ample liquidity on the
+	// local channel. This should make the path finding ignore the
+	// disabled flag.
+	roasToPhamSCID := lnwire.NewShortChanIDFromInt(roasToPham)
+	bandwidthHints := newBandwidthManager(
+		&mockLiquiditySource{
+			channelLiquidity: map[lnwire.ShortChannelID]KnownLiquidity{
+				roasToPhamSCID: {
+					Amount:  payAmt * 2,
+					IsKnown: true,
+				},
+			},
+		}, fn.None[tlv.Blob](),
+	)
+
 	_, err = dbFindPath(
-		graph.graph, nil, &mockBandwidthHints{},
+		graph.graph, nil, bandwidthHints,
 		noRestrictions, testPathFindingConfig,
 		sourceNode.PubKeyBytes, target, payAmt, 0, 0,
 	)
@@ -2240,12 +2257,22 @@ func runPathSourceEdgesBandwidth(t *testing.T, useCache bool) {
 	// roasbeef->phamnuwen to 0.
 	roasToSongoku := uint64(12345)
 	roasToPham := uint64(999991)
-	bandwidths := &mockBandwidthHints{
-		hints: map[uint64]lnwire.MilliSatoshi{
-			roasToSongoku: 0,
-			roasToPham:    0,
+
+	roasToSongokuSCID := lnwire.NewShortChanIDFromInt(roasToSongoku)
+	roasToPhamSCID := lnwire.NewShortChanIDFromInt(roasToPham)
+	liquiditySource := &mockLiquiditySource{
+		channelLiquidity: map[lnwire.ShortChannelID]KnownLiquidity{
+			roasToSongokuSCID: {
+				Amount:  0,
+				IsKnown: true,
+			},
+			roasToPhamSCID: {
+				Amount:  0,
+				IsKnown: true,
+			},
 		},
 	}
+	bandwidths := newBandwidthManager(liquiditySource, fn.None[tlv.Blob]())
 
 	// Since both these edges has a bandwidth of zero, no path should be
 	// found.
@@ -2260,7 +2287,10 @@ func runPathSourceEdgesBandwidth(t *testing.T, useCache bool) {
 
 	// Set the bandwidth of roasbeef->phamnuwen high enough to carry the
 	// payment.
-	bandwidths.hints[roasToPham] = 2 * payAmt
+	liquiditySource.channelLiquidity[roasToPhamSCID] = KnownLiquidity{
+		Amount:  payAmt * 2,
+		IsKnown: true,
+	}
 
 	// Now, if we attempt to route again, we should find the path via
 	// phamnuven, as the other source edge won't be considered.
@@ -2274,7 +2304,10 @@ func runPathSourceEdgesBandwidth(t *testing.T, useCache bool) {
 
 	// Finally, set the roasbeef->songoku bandwidth, but also set its
 	// disable flag.
-	bandwidths.hints[roasToSongoku] = 2 * payAmt
+	liquiditySource.channelLiquidity[roasToSongokuSCID] = KnownLiquidity{
+		Amount:  payAmt * 2,
+		IsKnown: true,
+	}
 	_, e1, e2, err := graph.graph.FetchChannelEdgesByID(roasToSongoku)
 	require.NoError(t, err, "unable to fetch edge")
 	e1.ChannelFlags |= lnwire.ChanUpdateDisabled
