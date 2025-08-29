@@ -72,6 +72,10 @@ var (
 			Entity: "offchain",
 			Action: "write",
 		}},
+		"/switchrpc.Switch/QueryChannelLink": {{
+			Entity: "offchain",
+			Action: "read",
+		}},
 	}
 
 	// DefaultSwitchMacFilename is the default name of the switch macaroon
@@ -760,4 +764,37 @@ func (s *Server) CleanStore(_ context.Context,
 	}
 
 	return &CleanStoreResponse{}, nil
+}
+
+// QueryChannelLink allows callers to query the status of a particular channel
+// link. This can be used to obtain the current available bandwidth of a
+// channel.
+func (s *Server) QueryChannelLink(_ context.Context,
+	req *QueryChannelLinkRequest) (*QueryChannelLinkResponse, error) {
+
+	links := make([]*ChannelLinkInfo, 0, len(req.ShortChannelIds))
+	for _, scid := range req.ShortChannelIds {
+		linkInfo := &ChannelLinkInfo{
+			ShortChannelId: scid,
+		}
+
+		link, err := s.cfg.Switch.GetLinkByShortID(
+			lnwire.NewShortChanIDFromInt(scid),
+		)
+		if err != nil {
+			// linkInfo.Error = &lnrpc.RPCError{
+			// 	Error: err.Error(),
+			// }
+			links = append(links, linkInfo)
+			continue
+		}
+
+		linkInfo.Active = link.EligibleToForward()
+		linkInfo.AvailableBalanceMsat = int64(link.Bandwidth())
+		links = append(links, linkInfo)
+	}
+
+	return &QueryChannelLinkResponse{
+		Links: links,
+	}, nil
 }

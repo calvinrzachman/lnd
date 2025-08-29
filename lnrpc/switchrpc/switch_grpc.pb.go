@@ -32,6 +32,10 @@ type SwitchClient interface {
 	// namespace. This allows for remote maintainence of HTLC attempt data in the
 	// Switch's underlying attempt store.
 	CleanStore(ctx context.Context, in *CleanStoreRequest, opts ...grpc.CallOption) (*CleanStoreResponse, error)
+	// QueryChannelLink allows callers to query the status of a particular
+	// channel link. This can be used to obtain the current available bandwidth of
+	// a channel.
+	QueryChannelLink(ctx context.Context, in *QueryChannelLinkRequest, opts ...grpc.CallOption) (*QueryChannelLinkResponse, error)
 }
 
 type switchClient struct {
@@ -78,6 +82,15 @@ func (c *switchClient) CleanStore(ctx context.Context, in *CleanStoreRequest, op
 	return out, nil
 }
 
+func (c *switchClient) QueryChannelLink(ctx context.Context, in *QueryChannelLinkRequest, opts ...grpc.CallOption) (*QueryChannelLinkResponse, error) {
+	out := new(QueryChannelLinkResponse)
+	err := c.cc.Invoke(ctx, "/switchrpc.Switch/QueryChannelLink", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SwitchServer is the server API for Switch service.
 // All implementations must embed UnimplementedSwitchServer
 // for forward compatibility
@@ -96,6 +109,10 @@ type SwitchServer interface {
 	// namespace. This allows for remote maintainence of HTLC attempt data in the
 	// Switch's underlying attempt store.
 	CleanStore(context.Context, *CleanStoreRequest) (*CleanStoreResponse, error)
+	// QueryChannelLink allows callers to query the status of a particular
+	// channel link. This can be used to obtain the current available bandwidth of
+	// a channel.
+	QueryChannelLink(context.Context, *QueryChannelLinkRequest) (*QueryChannelLinkResponse, error)
 	mustEmbedUnimplementedSwitchServer()
 }
 
@@ -114,6 +131,9 @@ func (UnimplementedSwitchServer) BuildOnion(context.Context, *BuildOnionRequest)
 }
 func (UnimplementedSwitchServer) CleanStore(context.Context, *CleanStoreRequest) (*CleanStoreResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CleanStore not implemented")
+}
+func (UnimplementedSwitchServer) QueryChannelLink(context.Context, *QueryChannelLinkRequest) (*QueryChannelLinkResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method QueryChannelLink not implemented")
 }
 func (UnimplementedSwitchServer) mustEmbedUnimplementedSwitchServer() {}
 
@@ -200,6 +220,24 @@ func _Switch_CleanStore_Handler(srv interface{}, ctx context.Context, dec func(i
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Switch_QueryChannelLink_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(QueryChannelLinkRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SwitchServer).QueryChannelLink(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/switchrpc.Switch/QueryChannelLink",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SwitchServer).QueryChannelLink(ctx, req.(*QueryChannelLinkRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Switch_ServiceDesc is the grpc.ServiceDesc for Switch service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -222,6 +260,10 @@ var Switch_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CleanStore",
 			Handler:    _Switch_CleanStore_Handler,
+		},
+		{
+			MethodName: "QueryChannelLink",
+			Handler:    _Switch_QueryChannelLink_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
