@@ -34,6 +34,14 @@ service Switch {
     Switch's underlying attempt store.
     */
     rpc CleanStore (CleanStoreRequest) returns (CleanStoreResponse);
+
+    /*
+    QueryChannelLink allows callers to query the status of a particular
+    channel link. This can be used to obtain the current available bandwidth of
+    a channel.
+    */
+    rpc QueryChannelLink (QueryChannelLinkRequest)
+        returns (QueryChannelLinkResponse);
 }
 
 message SendOnionRequest {
@@ -183,4 +191,25 @@ message CleanStoreRequest {
 message CleanStoreResponse {
     // The number of entries removed from the result store.
     uint32 deleted_attempts = 1;
+}
+
+message QueryChannelLinkRequest {
+    // The short channel IDs of the links to query.
+    repeated uint64 short_channel_ids = 1;
+}
+
+message ChannelLinkInfo {
+    // The short channel ID of the link.
+    uint64 short_channel_id = 1;
+
+    // Whether the link is currently active and eligible to forward HTLCs.
+    bool active = 2;
+
+    // The available bandwidth of the channel link in millisatoshis.
+    int64 available_balance_msat = 3;
+}
+
+message QueryChannelLinkResponse {
+    // A list of channel link information.
+    repeated ChannelLinkInfo links = 1;
 }
