@@ -57,7 +57,10 @@ func TestSwitchAddDuplicateLink(t *testing.T) {
 	if err := s.Start(); err != nil {
 		t.Fatalf("unable to start switch: %v", err)
 	}
-	defer s.Stop()
+	defer func() {
+		err := s.Stop()
+		require.NoError(t, err)
+	}()
 
 	chanID1, aliceScid := genID()
 
@@ -100,7 +103,10 @@ func TestSwitchHasActiveLink(t *testing.T) {
 	if err := s.Start(); err != nil {
 		t.Fatalf("unable to start switch: %v", err)
 	}
-	defer s.Stop()
+	defer func() {
+		err := s.Stop()
+		require.NoError(t, err)
+	}()
 
 	chanID1, aliceScid := genID()
 
@@ -150,7 +156,10 @@ func TestSwitchSendPending(t *testing.T) {
 	if err := s.Start(); err != nil {
 		t.Fatalf("unable to start switch: %v", err)
 	}
-	defer s.Stop()
+	defer func() {
+		err := s.Stop()
+		require.NoError(t, err)
+	}()
 
 	chanID1, chanID2, aliceChanID, bobChanID := genIDs()
 
@@ -894,7 +903,10 @@ func TestSwitchForward(t *testing.T) {
 	if err := s.Start(); err != nil {
 		t.Fatalf("unable to start switch: %v", err)
 	}
-	defer s.Stop()
+	defer func() {
+		err := s.Stop()
+		require.NoError(t, err)
+	}()
 
 	chanID1, chanID2, aliceChanID, bobChanID := genIDs()
 
@@ -1013,7 +1025,10 @@ func TestSwitchForwardFailAfterFullAdd(t *testing.T) {
 	// Even though we intend to Stop s later in the test, it is safe to
 	// defer this Stop since its execution it is protected by an atomic
 	// guard, guaranteeing it executes at most once.
-	defer s.Stop()
+	defer func() {
+		err := s.Stop()
+		require.NoError(t, err)
+	}()
 
 	aliceChannelLink := newMockChannelLink(
 		s, chanID1, aliceChanID, emptyScid, alicePeer, true, false,
@@ -1199,7 +1214,10 @@ func TestSwitchForwardSettleAfterFullAdd(t *testing.T) {
 	// Even though we intend to Stop s later in the test, it is safe to
 	// defer this Stop since its execution it is protected by an atomic
 	// guard, guaranteeing it executes at most once.
-	defer s.Stop()
+	defer func() {
+		err := s.Stop()
+		require.NoError(t, err)
+	}()
 
 	aliceChannelLink := newMockChannelLink(
 		s, chanID1, aliceChanID, emptyScid, alicePeer, true, false,
@@ -1388,7 +1406,10 @@ func TestSwitchForwardDropAfterFullAdd(t *testing.T) {
 	// Even though we intend to Stop s later in the test, it is safe to
 	// defer this Stop since its execution it is protected by an atomic
 	// guard, guaranteeing it executes at most once.
-	defer s.Stop()
+	defer func() {
+		err := s.Stop()
+		require.NoError(t, err)
+	}()
 
 	aliceChannelLink := newMockChannelLink(
 		s, chanID1, aliceChanID, emptyScid, alicePeer, true, false,
@@ -1540,7 +1561,10 @@ func TestSwitchForwardFailAfterHalfAdd(t *testing.T) {
 	// Even though we intend to Stop s later in the test, it is safe to
 	// defer this Stop since its execution it is protected by an atomic
 	// guard, guaranteeing it executes at most once.
-	defer s.Stop()
+	defer func() {
+		err := s.Stop()
+		require.NoError(t, err)
+	}()
 
 	aliceChannelLink := newMockChannelLink(
 		s, chanID1, aliceChanID, emptyScid, alicePeer, true, false,
@@ -1693,7 +1717,10 @@ func TestSwitchForwardCircuitPersistence(t *testing.T) {
 	// Even though we intend to Stop s later in the test, it is safe to
 	// defer this Stop since its execution it is protected by an atomic
 	// guard, guaranteeing it executes at most once.
-	defer s.Stop()
+	defer func() {
+		err := s.Stop()
+		require.NoError(t, err)
+	}()
 
 	aliceChannelLink := newMockChannelLink(
 		s, chanID1, aliceChanID, emptyScid, alicePeer, true, false,
@@ -2215,7 +2242,10 @@ func testSkipIneligibleLinksMultiHopForward(t *testing.T,
 	if err := s.Start(); err != nil {
 		t.Fatalf("unable to start switch: %v", err)
 	}
-	defer s.Stop()
+	defer func() {
+		err := s.Stop()
+		require.NoError(t, err)
+	}()
 
 	chanID1, aliceChanID := genID()
 	aliceChannelLink := newMockChannelLink(
@@ -2338,7 +2368,10 @@ func testSkipLinkLocalForward(t *testing.T, eligible bool,
 	if err := s.Start(); err != nil {
 		t.Fatalf("unable to start switch: %v", err)
 	}
-	defer s.Stop()
+	defer func() {
+		err := s.Stop()
+		require.NoError(t, err)
+	}()
 
 	chanID1, _, aliceChanID, _ := genIDs()
 
@@ -2393,7 +2426,10 @@ func TestSwitchCancel(t *testing.T) {
 	if err := s.Start(); err != nil {
 		t.Fatalf("unable to start switch: %v", err)
 	}
-	defer s.Stop()
+	defer func() {
+		err := s.Stop()
+		require.NoError(t, err)
+	}()
 
 	chanID1, chanID2, aliceChanID, bobChanID := genIDs()
 
@@ -2504,7 +2540,10 @@ func TestSwitchAddSamePayment(t *testing.T) {
 	if err := s.Start(); err != nil {
 		t.Fatalf("unable to start switch: %v", err)
 	}
-	defer s.Stop()
+	defer func() {
+		err := s.Stop()
+		require.NoError(t, err)
+	}()
 
 	aliceChannelLink := newMockChannelLink(
 		s, chanID1, aliceChanID, emptyScid, alicePeer, true, false,
@@ -2657,7 +2696,10 @@ func TestSwitchSendPayment(t *testing.T) {
 	if err := s.Start(); err != nil {
 		t.Fatalf("unable to start switch: %v", err)
 	}
-	defer s.Stop()
+	defer func() {
+		err := s.Stop()
+		require.NoError(t, err)
+	}()
 
 	chanID1, _, aliceChanID, _ := genIDs()
 
@@ -3071,7 +3113,10 @@ func TestSwitchGetAttemptResult(t *testing.T) {
 	if err := s.Start(); err != nil {
 		t.Fatalf("unable to start switch: %v", err)
 	}
-	defer s.Stop()
+	defer func() {
+		err := s.Stop()
+		require.NoError(t, err)
+	}()
 
 	lookup := make(chan *PaymentCircuit, 1)
 	s.circuits = &mockCircuitMap{
@@ -3174,7 +3219,10 @@ func TestInvalidFailure(t *testing.T) {
 	if err := s.Start(); err != nil {
 		t.Fatalf("unable to start switch: %v", err)
 	}
-	defer s.Stop()
+	defer func() {
+		err := s.Stop()
+		require.NoError(t, err)
+	}()
 
 	chanID1, _, aliceChanID, _ := genIDs()
 
