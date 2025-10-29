@@ -361,6 +361,9 @@
       },
       "description": "ClearTextFailure is included when the failure originates locally or is a\nfully decrypted, known failure from an upstream node. It contains the raw\nlnwire.FailureMessage."
     },
+    "switchrpcDisableRemoteRouterResponse": {
+      "type": "object"
+    },
     "switchrpcErrorCode": {
       "type": "string",
       "enum": [

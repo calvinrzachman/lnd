@@ -694,8 +694,8 @@ func (store *networkResultStore) DisableRemoteRouter() error {
 			cursor := pendingBucket.ReadCursor()
 			k, _ := cursor.First()
 			if k != nil {
-				return fmt.Errorf("cannot disable remote router: " +
-					"in-flight payments exist")
+				return fmt.Errorf("cannot disable remote " +
+					"router: in-flight attempts exist")
 			}
 		}
 

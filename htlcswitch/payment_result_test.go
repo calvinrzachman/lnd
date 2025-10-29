@@ -423,11 +423,13 @@ func TestDisableRemoteRouter(t *testing.T) {
 
 				marked = true
 			}
+
 			return nil
 		}, func() {
 			marked = false
 		})
 		require.NoError(t, err)
+
 		return marked
 	}
 
