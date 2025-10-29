@@ -50,6 +50,40 @@
         ]
       }
     },
+    "/v2/switch/deleteattempts": {
+      "post": {
+        "summary": "DeleteAttempts removes terminal (settled or failed) payment attempt records\nfrom the server's attempt store. This enables remote clients to perform\nonline garbage collection of completed attempt data without requiring a\ndisruptive \"stop-the-world\" quiescent state.",
+        "description": "This RPC uses \"positive space\" deletion semantics: the client explicitly\nnames the finished attempts to delete. This is fundamentally safer than a\n\"delete everything except\" model for distributed systems, as it is immune\nto stale-snapshot race conditions.\n\nThe server processes each attempt ID independently and reports per-ID\nresults. Pending (in-flight) attempts are never deleted; they are reported\nwith a DELETION_PENDING status. Unknown attempt IDs are reported with\nDELETION_NOT_FOUND. The overall RPC succeeds (gRPC OK) as long as the\nrequest could be processed, even if individual attempts were not deleted.\n\nClients MUST only request deletion of attempts they have durably finalized\nin their own state and will never reuse. This is a contractual obligation;\ndeleting an attempt removes the server's idempotency protection for that\nattempt ID.",
+        "operationId": "Switch_DeleteAttempts",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/switchrpcDeleteAttemptsResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/switchrpcDeleteAttemptsRequest"
+            }
+          }
+        ],
+        "tags": [
+          "Switch"
+        ]
+      }
+    },
     "/v2/switch/onion": {
       "post": {
         "summary": "SendOnion provides an idempotent API for dispatching a pre-formed onion\npacket, which is the primary entry point for a remote router.",
@@ -387,6 +421,19 @@
       },
       "description": "ClearTextFailure is included when the failure originates locally or is a\nfully decrypted, known failure from an upstream node. It contains the raw\nlnwire.FailureMessage."
     },
+    "switchrpcDeleteAttemptsRequest": {
+      "type": "object",
+      "properties": {
+        "attempt_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uint64"
+          },
+          "description": "The attempt IDs to delete from the server's attempt store. Only terminal\n(settled or failed) attempts will be deleted. Pending (in-flight)\nattempts are skipped and reported with a DELETION_PENDING status."
+        }
+      }
+    },
     "switchrpcDeleteAttemptsResponse": {
       "type": "object",
       "properties": {
@@ -399,6 +446,9 @@
           "description": "Per-attempt deletion outcomes. The order corresponds to the order of\nattempt_ids in the request."
         }
       }
+    },
+    "switchrpcDisableRemoteRouterResponse": {
+      "type": "object"
     },
     "switchrpcFailureDetails": {
       "type": "object",

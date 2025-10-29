@@ -108,6 +108,11 @@ type SwitchClient interface {
 	// deleting an attempt removes the server's idempotency protection for that
 	// attempt ID.
 	DeleteAttempts(ctx context.Context, in *DeleteAttemptsRequest, opts ...grpc.CallOption) (*DeleteAttemptsResponse, error)
+	// DisableRemoteRouter marks the database as no longer being used by a remote
+	// router. This is useful for migrating from a remote router setup back to the
+	// default embedded router. This RPC will fail if there are any active,
+	// in-flight HTLCs.
+	DisableRemoteRouter(ctx context.Context, in *DisableRemoteRouterRequest, opts ...grpc.CallOption) (*DisableRemoteRouterResponse, error)
 }
 
 type switchClient struct {
@@ -148,6 +153,15 @@ func (c *switchClient) BuildOnion(ctx context.Context, in *BuildOnionRequest, op
 func (c *switchClient) DeleteAttempts(ctx context.Context, in *DeleteAttemptsRequest, opts ...grpc.CallOption) (*DeleteAttemptsResponse, error) {
 	out := new(DeleteAttemptsResponse)
 	err := c.cc.Invoke(ctx, "/switchrpc.Switch/DeleteAttempts", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *switchClient) DisableRemoteRouter(ctx context.Context, in *DisableRemoteRouterRequest, opts ...grpc.CallOption) (*DisableRemoteRouterResponse, error) {
+	out := new(DisableRemoteRouterResponse)
+	err := c.cc.Invoke(ctx, "/switchrpc.Switch/DisableRemoteRouter", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -248,6 +262,11 @@ type SwitchServer interface {
 	// deleting an attempt removes the server's idempotency protection for that
 	// attempt ID.
 	DeleteAttempts(context.Context, *DeleteAttemptsRequest) (*DeleteAttemptsResponse, error)
+	// DisableRemoteRouter marks the database as no longer being used by a remote
+	// router. This is useful for migrating from a remote router setup back to the
+	// default embedded router. This RPC will fail if there are any active,
+	// in-flight HTLCs.
+	DisableRemoteRouter(context.Context, *DisableRemoteRouterRequest) (*DisableRemoteRouterResponse, error)
 	mustEmbedUnimplementedSwitchServer()
 }
 
@@ -266,6 +285,9 @@ func (UnimplementedSwitchServer) BuildOnion(context.Context, *BuildOnionRequest)
 }
 func (UnimplementedSwitchServer) DeleteAttempts(context.Context, *DeleteAttemptsRequest) (*DeleteAttemptsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DeleteAttempts not implemented")
+}
+func (UnimplementedSwitchServer) DisableRemoteRouter(context.Context, *DisableRemoteRouterRequest) (*DisableRemoteRouterResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DisableRemoteRouter not implemented")
 }
 func (UnimplementedSwitchServer) mustEmbedUnimplementedSwitchServer() {}
 
@@ -352,6 +374,24 @@ func _Switch_DeleteAttempts_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Switch_DisableRemoteRouter_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DisableRemoteRouterRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SwitchServer).DisableRemoteRouter(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/switchrpc.Switch/DisableRemoteRouter",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SwitchServer).DisableRemoteRouter(ctx, req.(*DisableRemoteRouterRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Switch_ServiceDesc is the grpc.ServiceDesc for Switch service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -374,6 +414,10 @@ var Switch_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteAttempts",
 			Handler:    _Switch_DeleteAttempts_Handler,
+		},
+		{
+			MethodName: "DisableRemoteRouter",
+			Handler:    _Switch_DisableRemoteRouter_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

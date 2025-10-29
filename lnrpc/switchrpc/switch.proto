@@ -110,6 +110,15 @@ service Switch {
     attempt ID.
     */
     rpc DeleteAttempts (DeleteAttemptsRequest) returns (DeleteAttemptsResponse);
+
+    /*
+    DisableRemoteRouter marks the database as no longer being used by a remote
+    router. This is useful for migrating from a remote router setup back to the
+    default embedded router. This RPC will fail if there are any active,
+    in-flight HTLCs.
+    */
+    rpc DisableRemoteRouter (DisableRemoteRouterRequest)
+        returns (DisableRemoteRouterResponse);
 }
 
 message SendOnionRequest {
@@ -362,4 +371,10 @@ enum AttemptDeletionStatus {
     // The attempt ID was not found in the store. This can occur if the attempt
     // was already deleted or was never initialized.
     DELETION_NOT_FOUND = 2;
+}
+
+message DisableRemoteRouterRequest {
+}
+
+message DisableRemoteRouterResponse {
 }
