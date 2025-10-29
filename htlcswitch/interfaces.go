@@ -612,4 +612,8 @@ type AttemptStore interface {
 	// use in distributed systems where a client explicitly names the
 	// finished attempts to delete.
 	DeleteAttempts(attemptIDs []uint64) (map[uint64]DeletionStatus, error)
+
+	// DisableRemoteRouter checks for in-flight payments and, if none are
+	// found, deletes the remote router marker from the database.
+	DisableRemoteRouter() error
 }
