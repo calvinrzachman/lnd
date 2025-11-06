@@ -330,8 +330,6 @@ func (store *networkResultStore) SubscribeResult(attemptID uint64) (
 // entry is an initialization placeholder (e.g. created via InitAttempt),
 // ErrPaymentIDNotFound is returned to signal that the result is not yet
 // available.
-//
-// NOTE: This method does not currently acquire the result subscription mutex.
 func (store *networkResultStore) GetResult(pid uint64) (
 	*networkResult, error) {
 
