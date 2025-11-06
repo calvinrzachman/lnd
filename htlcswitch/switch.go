@@ -585,6 +585,14 @@ func (s *Switch) SendHTLC(firstHop lnwire.ShortChannelID, attemptID uint64,
 	// require the circuit variable to be set on the *htlcPacket.
 	link, linkErr := s.getLocalLink(packet, htlc)
 	if linkErr != nil {
+		// The attempt to send the htlc failed after we initialized it
+		// but before it was committed to a circuit. We must
+		// synchronously roll back the state by storing a final failure
+		// result. This prevents the attempt ID from being stuck in a
+		// pending state, which would cause callers to GetAttemptResult
+		// (like TrackOnion) to hang indefinitely.
+		s.failAttempt(attemptID, linkErr)
+
 		// Notify the htlc notifier of a link failure on our outgoing
 		// link. Incoming timelock/amount values are not set because
 		// they are not present for local sends.
@@ -611,6 +619,12 @@ func (s *Switch) SendHTLC(firstHop lnwire.ShortChannelID, attemptID uint64,
 		linkErr := NewLinkError(
 			&lnwire.FailTemporaryChannelFailure{},
 		)
+
+		// The attempt to send the htlc failed after we initialized
+		// it. We must synchronously roll back the state by storing a
+		// final failure result.
+		s.failAttempt(attemptID, linkErr)
+
 		s.cfg.HtlcNotifier.NotifyLinkFailEvent(
 			newHtlcKey(packet),
 			HtlcInfo{
@@ -629,15 +643,32 @@ func (s *Switch) SendHTLC(firstHop lnwire.ShortChannelID, attemptID uint64,
 	actions, err := s.circuits.CommitCircuits(circuit)
 	if err != nil {
 		log.Errorf("unable to commit circuit in switch: %v", err)
+
+		// The attempt to send the htlc failed after we initialized it
+		// but before it was committed to a circuit. We must
+		// synchronously roll back the state by storing a final failure
+		// result.
+		s.failAttempt(attemptID, NewLinkError(
+			&lnwire.FailTemporaryNodeFailure{},
+		))
+
 		return err
 	}
 
 	// Drop duplicate packet if it has already been seen.
 	switch {
 	case len(actions.Drops) == 1:
+		s.failAttempt(attemptID, NewLinkError(
+			&lnwire.FailTemporaryNodeFailure{},
+		))
+
 		return ErrDuplicateAdd
 
 	case len(actions.Fails) == 1:
+		s.failAttempt(attemptID, NewLinkError(
+			&lnwire.FailTemporaryNodeFailure{},
+		))
+
 		return ErrLocalAddFailed
 	}
 
@@ -1793,6 +1824,13 @@ func (s *Switch) Start() error {
 
 	log.Infof("HTLC Switch starting")
 
+	// Before starting the main event loop, we'll check for any orphaned
+	// HTLC attempts that may have been left behind by a previous crash.
+	if err := s.cleanupOrphanedAttempts(); err != nil {
+		return fmt.Errorf("failed to cleanup orphaned attempts: %w",
+			err)
+	}
+
 	blockEpochStream, err := s.cfg.Notifier.RegisterBlockEpochNtfn(nil)
 	if err != nil {
 		return err
@@ -1816,6 +1854,89 @@ func (s *Switch) Start() error {
 	}
 
 	return nil
+}
+
+// cleanupOrphanedAttempts is a helper function that is called on startup to
+// clean up any orphaned HTLC attempts. An orphaned attempt is one that has
+// been initialized in the attempt store but for which no corresponding circuit
+// exists in the circuit map. This can happen if the node crashes after
+// initializing an attempt but before committing the circuit.
+func (s *Switch) cleanupOrphanedAttempts() error {
+	pending, err := s.attemptStore.FetchPendingAttempts()
+	if err != nil {
+		return fmt.Errorf("failed to fetch pending attempts: %w", err)
+	}
+
+	if len(pending) == 0 {
+		return nil
+	}
+
+	log.Infof("Found %d pending HTLC attempts, checking for orphans",
+		len(pending))
+
+	for _, attemptID := range pending {
+		// For each pending attempt, we check if a corresponding circuit
+		// exists.
+		inKey := CircuitKey{
+			ChanID: hop.Source,
+			HtlcID: attemptID,
+		}
+		if s.circuits.LookupCircuit(inKey) != nil {
+			// This is a legitimate in-flight HTLC, so we can
+			// ignore it.
+			continue
+		}
+
+		// If no circuit exists, this is an orphaned attempt. We'll
+		// fail it with a temporary node failure.
+		log.Warnf("Found orphaned HTLC attempt with id %d, failing",
+			attemptID)
+
+		s.failAttempt(attemptID, NewLinkError(
+			&lnwire.FailTemporaryNodeFailure{},
+		))
+	}
+
+	return nil
+}
+
+// failAttempt is a helper function that is used to fail a pending HTLC attempt
+// that has not yet been forwarded. It stores a failure result in the
+// attemptStore to unblock any potential callers to GetAttemptResult.
+func (s *Switch) failAttempt(attemptID uint64, linkErr *LinkError) {
+	// The attempt to send the htlc failed before it was ever dispatched.
+	// We will write a failure result to the store to unblock any
+	// potential callers to GetAttemptResult.
+
+	// First, we need to serialize the wire message from our link error
+	// into a byte slice. This is what the downstream parsers expect.
+	var reasonBytes bytes.Buffer
+	wireMsg := linkErr.WireMessage()
+	if err := lnwire.EncodeFailure(&reasonBytes, wireMsg, 0); err != nil {
+		log.Errorf("Failed to encode failure for attempt %d: %v. "+
+			"Orphaned pending attempt may exist until next restart",
+			attemptID, err)
+		return
+	}
+
+	// We'll create a synthetic UpdateFailHTLC to represent this internal
+	// failure, following the pattern used by the contract resolver.
+	failMsg := &lnwire.UpdateFailHTLC{
+		Reason: lnwire.OpaqueReason(reasonBytes.Bytes()),
+	}
+
+	failureResult := &networkResult{
+		msg:         failMsg,
+		unencrypted: true, // This is a local failure
+	}
+
+	if err := s.attemptStore.StoreResult(
+		attemptID, failureResult,
+	); err != nil {
+		log.Errorf("Failed to store failure result for attempt %d: "+
+			"%v. Orphaned pending attempt may exist until next "+
+			"restart", attemptID, err)
+	}
 }
 
 // reforwardResolutions fetches the set of resolution messages stored on-disk
