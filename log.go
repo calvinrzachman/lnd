@@ -36,6 +36,7 @@ import (
 	"github.com/lightningnetwork/lnd/lnrpc/peersrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/routerrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/signrpc"
+	"github.com/lightningnetwork/lnd/lnrpc/switchrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/verrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/walletrpc"
 	"github.com/lightningnetwork/lnd/lnwallet"
@@ -46,6 +47,7 @@ import (
 	"github.com/lightningnetwork/lnd/monitoring"
 	"github.com/lightningnetwork/lnd/msgmux"
 	"github.com/lightningnetwork/lnd/netann"
+	"github.com/lightningnetwork/lnd/onionmessage"
 	paymentsdb "github.com/lightningnetwork/lnd/payments/db"
 	"github.com/lightningnetwork/lnd/peer"
 	"github.com/lightningnetwork/lnd/peernotifier"
@@ -187,6 +189,7 @@ func SetupLoggers(root *build.SubLoggerManager, interceptor signal.Interceptor) 
 
 	AddSubLogger(root, routing.Subsystem, interceptor, routing.UseLogger)
 	AddSubLogger(root, routerrpc.Subsystem, interceptor, routerrpc.UseLogger)
+	AddSubLogger(root, switchrpc.Subsystem, interceptor, switchrpc.UseLogger)
 	AddSubLogger(root, chanfitness.Subsystem, interceptor, chanfitness.UseLogger)
 	AddSubLogger(root, verrpc.Subsystem, interceptor, verrpc.UseLogger)
 	AddSubLogger(root, healthcheck.Subsystem, interceptor, healthcheck.UseLogger)
@@ -212,6 +215,7 @@ func SetupLoggers(root *build.SubLoggerManager, interceptor signal.Interceptor) 
 		root, paymentsdb.Subsystem, interceptor, paymentsdb.UseLogger,
 	)
 
+	AddSubLogger(root, onionmessage.Subsystem, interceptor, onionmessage.UseLogger)
 }
 
 // AddSubLogger is a helper method to conveniently create and register the

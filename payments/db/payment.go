@@ -90,7 +90,8 @@ type PaymentCreationInfo struct {
 
 	// FirstHopCustomRecords are the TLV records that are to be sent to the
 	// first hop of this payment. These records will be transmitted via the
-	// wire message only and therefore do not affect the onion payload size.
+	// wire message (UpdateAddHTLC) only and therefore do not affect the
+	// onion payload size.
 	FirstHopCustomRecords lnwire.CustomRecords
 }
 
@@ -215,7 +216,7 @@ func (h *HTLCAttemptInfo) Circuit() (*sphinx.Circuit, error) {
 // attachOnionBlobAndCircuit creates a sphinx packet and caches the onion blob
 // and circuit for this attempt.
 func (h *HTLCAttemptInfo) attachOnionBlobAndCircuit() error {
-	onionBlob, circuit, err := generateSphinxPacket(
+	onionBlob, circuit, err := GenerateSphinxPacket(
 		&h.Route, h.Hash[:], h.SessionKey(),
 	)
 	if err != nil {
@@ -661,11 +662,11 @@ func (m *MPPayment) AllowMoreAttempts() (bool, error) {
 	return true, nil
 }
 
-// generateSphinxPacket generates then encodes a sphinx packet which encodes
+// GenerateSphinxPacket generates then encodes a sphinx packet which encodes
 // the onion route specified by the passed layer 3 route. The blob returned
 // from this function can immediately be included within an HTLC add packet to
 // be sent to the first hop within the route.
-func generateSphinxPacket(rt *route.Route, paymentHash []byte,
+func GenerateSphinxPacket(rt *route.Route, paymentHash []byte,
 	sessionKey *btcec.PrivateKey) ([]byte, *sphinx.Circuit, error) {
 
 	// Now that we know we have an actual route, we'll map the route into a
@@ -754,11 +755,19 @@ func verifyAttempt(payment *MPPayment, attempt *HTLCAttemptInfo) error {
 
 	for _, h := range payment.InFlightHTLCs() {
 		hMpp := h.Route.FinalHop().MPP
+		hBlinded := len(h.Route.FinalHop().EncryptedData) != 0
 
 		// If this is a blinded payment, then no existing HTLCs
 		// should have MPP records.
 		if isBlinded && hMpp != nil {
 			return ErrMPPRecordInBlindedPayment
+		}
+
+		// If the payment is blinded (previous attempts used blinded
+		// paths) and the attempt is not, or vice versa, return an
+		// error.
+		if isBlinded != hBlinded {
+			return ErrMixedBlindedAndNonBlindedPayments
 		}
 
 		// If this is a blinded payment, then we just need to
