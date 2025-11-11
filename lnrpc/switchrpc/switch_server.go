@@ -809,7 +809,7 @@ func (s *Server) CleanStore(_ context.Context,
 	// signature for CleanStore in the PaymentAttemptDispatcher interface.
 	// The local on-board ChannelRouter can use a default namespace.
 	// err := s.cfg.Switch.CleanStore(namespace, keepSet)
-	err := s.cfg.Switch.CleanStore(keepSet)
+	err := s.cfg.HtlcDispatcher.CleanStore(keepSet)
 	if err != nil {
 		log.Errorf("Cleanup of Switch attempt store failed: %v", err)
 
