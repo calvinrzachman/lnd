@@ -335,6 +335,10 @@ func (s *subRPCServerConfigs) PopulateDependencies(cfg *Config,
 				reflect.ValueOf(htlcSwitch),
 			)
 
+			subCfgValue.FieldByName("AttemptStore").Set(
+				reflect.ValueOf(htlcSwitch.AttemptStore()),
+			)
+
 		case *watchtowerrpc.Config:
 			subCfgValue := extractReflectValue(subCfg)
 
