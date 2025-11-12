@@ -443,7 +443,7 @@ func TestDisableRemoteRouter(t *testing.T) {
 		require.True(t, checkMarker(t, db))
 
 		// Add a payment result to simulate an in-flight payment.
-		err = store.storeResult(0, &networkResult{
+		err = store.StoreResult(0, &networkResult{
 			msg: &lnwire.UpdateAddHTLC{},
 		})
 		require.NoError(t, err)
