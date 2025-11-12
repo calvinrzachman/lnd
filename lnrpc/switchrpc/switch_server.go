@@ -249,19 +249,95 @@ func (r *ServerShell) CreateSubServer(
 func (s *Server) SendOnion(_ context.Context,
 	req *SendOnionRequest) (*SendOnionResponse, error) {
 
+	// 1. REGISTER: Call InitAttempt as the very first action. This serves
+	// as the idempotency anchor for the entire operation.
+	err := s.cfg.AttemptStore.InitAttempt(req.AttemptId)
+	if err != nil {
+		// If the attempt ID already exists, it means this is a replay
+		// from the client. We'll return a specific error code to
+		// signal that the request has already been accepted and is in
+		// progress.
+		if errors.Is(err, htlcswitch.ErrPaymentIDAlreadyExists) {
+			return &SendOnionResponse{
+				Success: false,
+				ErrorMessage: htlcswitch.ErrDuplicateAdd.
+					Error(),
+				ErrorCode: ErrorCode_DUPLICATE_HTLC,
+			}, nil
+		}
+
+		// A different error from InitAttempt is a server problem.
+		return nil, status.Errorf(codes.Internal,
+			"InitAttempt failed: %v", err)
+	}
+
+	// 2. VALIDATE: Perform all RPC-level pre-checks.
+	chanID, htlcAdd, validationErr := s.validateAndPrepareOnion(req)
+
+	// 3. ROLLBACK: If validation fails, we MUST synchronously roll back
+	// the PENDING state to FAILED.
+	if validationErr != nil {
+		// We'll create a generic LinkError for the rollback, as the
+		// specific validation error is returned to the client.
+		rollbackErr := s.cfg.AttemptStore.FailAttempt(
+			req.AttemptId,
+			htlcswitch.NewLinkError(
+				&lnwire.FailTemporaryNodeFailure{},
+			),
+		)
+		if rollbackErr != nil {
+			// Log this critical "error in the error handler".
+			log.Errorf("Unable to roll back attempt %d after "+
+				"validation failure: %v", req.AttemptId,
+				rollbackErr)
+		}
+
+		// Return the original, more specific validation error to the
+		// client.
+		return nil, validationErr
+	}
+
+	log.Debugf("Dispatching HTLC attempt(id=%v, amt=%v) for payment=%v "+
+		"via channel=%s", req.AttemptId, req.Amount,
+		htlcAdd.PaymentHash, chanID)
+
+	// 4. ACT: Call the core dispatch logic.
+	err = s.cfg.HtlcDispatcher.SendHTLC(chanID, req.AttemptId, htlcAdd)
+	if err != nil {
+		// NOTE: Because SendHTLC now also contains its own rollback,
+		// we don't need to call FailAttempt here. SendHTLC guarantees
+		// that any error it returns is final.
+		message, code := translateErrorForRPC(err)
+		return &SendOnionResponse{
+			Success:      false,
+			ErrorMessage: message,
+			ErrorCode:    code,
+		}, nil
+	}
+
+	// 5. ACKNOWLEDGE: Return success.
+	return &SendOnionResponse{Success: true}, nil
+}
+
+// validateAndPrepareOnion performs the pre-checks and preparation for a
+// SendOnion request. It returns the channel ID, the HTLC to be sent, and any
+// validation error.
+func (s *Server) validateAndPrepareOnion(req *SendOnionRequest) (
+	lnwire.ShortChannelID, *lnwire.UpdateAddHTLC, error) {
+
 	if len(req.OnionBlob) != lnwire.OnionPacketSize {
-		return nil, status.Errorf(codes.InvalidArgument,
+		return 0, nil, status.Errorf(codes.InvalidArgument,
 			"onion blob size=%d does not match expected %d bytes",
 			len(req.OnionBlob), lnwire.OnionPacketSize)
 	}
 
 	if len(req.PaymentHash) == 0 {
-		return nil, status.Error(codes.InvalidArgument,
+		return 0, nil, status.Error(codes.InvalidArgument,
 			"payment hash is required")
 	}
 
 	if req.Amount <= 0 {
-		return nil, status.Error(codes.InvalidArgument,
+		return 0, nil, status.Error(codes.InvalidArgument,
 			"amount must be greater than zero")
 	}
 
@@ -274,7 +350,7 @@ func (s *Server) SendOnion(_ context.Context,
 
 	switch {
 	case pubkeySet == channelIDSet:
-		return nil, status.Error(codes.InvalidArgument,
+		return 0, nil, status.Error(codes.InvalidArgument,
 			"must specify exactly one of first_hop_pubkey or "+
 				"first_hop_chan_id")
 
@@ -287,7 +363,7 @@ func (s *Server) SendOnion(_ context.Context,
 		// the forwarding subsystem.
 		firstHop, err := btcec.ParsePubKey(req.FirstHopPubkey)
 		if err != nil {
-			return nil, status.Errorf(codes.InvalidArgument,
+			return 0, nil, status.Errorf(codes.InvalidArgument,
 				"invalid first hop pubkey=%x: %v",
 				req.FirstHopPubkey, err)
 		}
@@ -295,7 +371,7 @@ func (s *Server) SendOnion(_ context.Context,
 		// Find an eligible channel ID for the given first-hop pubkey.
 		chanID, err = s.findEligibleChannelID(firstHop, amount)
 		if err != nil {
-			return nil, status.Errorf(codes.Internal,
+			return 0, nil, status.Errorf(codes.Internal,
 				"unable to find eligible channel for "+
 					"pubkey=%x: %v",
 				firstHop.SerializeCompressed(), err)
@@ -304,7 +380,7 @@ func (s *Server) SendOnion(_ context.Context,
 
 	hash, err := lntypes.MakeHash(req.PaymentHash)
 	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument,
+		return 0, nil, status.Errorf(codes.InvalidArgument,
 			"invalid payment_hash=%x: %v", req.PaymentHash, err)
 	}
 
@@ -312,7 +388,7 @@ func (s *Server) SendOnion(_ context.Context,
 	if len(req.BlindingPoint) > 0 {
 		pubkey, err := btcec.ParsePubKey(req.BlindingPoint)
 		if err != nil {
-			return nil, status.Errorf(codes.InvalidArgument,
+			return 0, nil, status.Errorf(codes.InvalidArgument,
 				"invalid blinding point: %v", err)
 		}
 
@@ -336,21 +412,7 @@ func (s *Server) SendOnion(_ context.Context,
 		ExtraData:     lnwire.ExtraOpaqueData(req.ExtraData),
 	}
 
-	log.Debugf("Dispatching HTLC attempt(id=%v, amt=%v) for payment=%v "+
-		"via channel=%s", req.AttemptId, req.Amount, hash, chanID)
-
-	// Send the HTLC to the first hop directly by way of the HTLCSwitch.
-	err = s.cfg.HtlcDispatcher.SendHTLC(chanID, req.AttemptId, htlcAdd)
-	if err != nil {
-		message, code := translateErrorForRPC(err)
-		return &SendOnionResponse{
-			Success:      false,
-			ErrorMessage: message,
-			ErrorCode:    code,
-		}, nil
-	}
-
-	return &SendOnionResponse{Success: true}, nil
+	return chanID, htlcAdd, nil
 }
 
 // findEligibleChannelID attempts to find an eligible channel based on the
