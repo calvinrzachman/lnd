@@ -209,8 +209,11 @@ func testSendOnionTwice(ht *lntest.HarnessTest) {
 	// duplicate safe, this should be updated to assert an error is
 	// returned.
 	resp = alice.RPC.SendOnion(sendReq)
-	require.True(ht, resp.Success, "expected successful onion send")
-	require.Empty(ht, resp.ErrorMessage, "unexpected failure to send onion")
+	require.False(ht, resp.Success, "expected failure on onion send")
+	require.Equal(ht, resp.ErrorCode,
+		switchrpc.ErrorCode_DUPLICATE_HTLC,
+		"unexpected error code")
+	require.Equal(ht, resp.ErrorMessage, htlcswitch.ErrDuplicateAdd.Error())
 }
 
 // testTrackOnion exercises the SwitchRPC server's TrackOnion endpoint,
