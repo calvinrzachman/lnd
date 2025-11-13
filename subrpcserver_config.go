@@ -331,6 +331,10 @@ func (s *subRPCServerConfigs) PopulateDependencies(cfg *Config,
 				reflect.ValueOf(routerBackend),
 			)
 
+			subCfgValue.FieldByName("RemoteRouterController").Set(
+				reflect.ValueOf(htlcSwitch),
+			)
+
 		case *watchtowerrpc.Config:
 			subCfgValue := extractReflectValue(subCfg)
 
