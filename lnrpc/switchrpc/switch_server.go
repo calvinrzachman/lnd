@@ -323,36 +323,48 @@ func (s *Server) SendOnion(_ context.Context,
 // SendOnion request. It returns the channel ID, the HTLC to be sent, and any
 // validation error.
 func (s *Server) validateAndPrepareOnion(req *SendOnionRequest) (
-	lnwire.ShortChannelID, *lnwire.UpdateAddHTLC, error) {
+	chanID lnwire.ShortChannelID, htlcAdd *lnwire.UpdateAddHTLC, err error) {
 
 	if len(req.OnionBlob) != lnwire.OnionPacketSize {
-		return 0, nil, status.Errorf(codes.InvalidArgument,
+		err = status.Errorf(
+			codes.InvalidArgument,
 			"onion blob size=%d does not match expected %d bytes",
-			len(req.OnionBlob), lnwire.OnionPacketSize)
+			len(req.OnionBlob), lnwire.OnionPacketSize,
+		)
+
+		return
 	}
 
 	if len(req.PaymentHash) == 0 {
-		return 0, nil, status.Error(codes.InvalidArgument,
-			"payment hash is required")
+		err = status.Error(
+			codes.InvalidArgument, "payment hash is required")
+
+		return
 	}
 
 	if req.Amount <= 0 {
-		return 0, nil, status.Error(codes.InvalidArgument,
-			"amount must be greater than zero")
+		err = status.Error(codes.InvalidArgument,
+			"amount must be greater than zero",
+		)
+
+		return
 	}
 
 	var (
 		amount       = lnwire.MilliSatoshi(req.Amount)
 		pubkeySet    = len(req.FirstHopPubkey) != 0
 		channelIDSet = req.FirstHopChanId != 0
-		chanID       lnwire.ShortChannelID
 	)
 
 	switch {
 	case pubkeySet == channelIDSet:
-		return 0, nil, status.Error(codes.InvalidArgument,
+		err = status.Error(
+			codes.InvalidArgument,
 			"must specify exactly one of first_hop_pubkey or "+
-				"first_hop_chan_id")
+				"first_hop_chan_id",
+		)
+
+		return
 
 	case channelIDSet:
 		// Case 1: The caller provided the first hop chan id directly.
@@ -361,35 +373,42 @@ func (s *Server) validateAndPrepareOnion(req *SendOnionRequest) (
 	case pubkeySet:
 		// Case 2: Convert the first hop pubkey into a format usable by
 		// the forwarding subsystem.
-		firstHop, err := btcec.ParsePubKey(req.FirstHopPubkey)
-		if err != nil {
-			return 0, nil, status.Errorf(codes.InvalidArgument,
+		firstHop, parseErr := btcec.ParsePubKey(req.FirstHopPubkey)
+		if parseErr != nil {
+			err = status.Errorf(codes.InvalidArgument,
 				"invalid first hop pubkey=%x: %v",
-				req.FirstHopPubkey, err)
+				req.FirstHopPubkey, parseErr)
+
+			return
 		}
 
 		// Find an eligible channel ID for the given first-hop pubkey.
 		chanID, err = s.findEligibleChannelID(firstHop, amount)
 		if err != nil {
-			return 0, nil, status.Errorf(codes.Internal,
+			err = status.Errorf(codes.Internal,
 				"unable to find eligible channel for "+
 					"pubkey=%x: %v",
 				firstHop.SerializeCompressed(), err)
+			return
 		}
 	}
 
-	hash, err := lntypes.MakeHash(req.PaymentHash)
-	if err != nil {
-		return 0, nil, status.Errorf(codes.InvalidArgument,
-			"invalid payment_hash=%x: %v", req.PaymentHash, err)
+	hash, parseErr := lntypes.MakeHash(req.PaymentHash)
+	if parseErr != nil {
+		err = status.Errorf(codes.InvalidArgument,
+			"invalid payment_hash=%x: %v", req.PaymentHash,
+			parseErr)
+
+		return
 	}
 
 	var blindingPoint lnwire.BlindingPointRecord
 	if len(req.BlindingPoint) > 0 {
-		pubkey, err := btcec.ParsePubKey(req.BlindingPoint)
-		if err != nil {
-			return 0, nil, status.Errorf(codes.InvalidArgument,
-				"invalid blinding point: %v", err)
+		pubkey, parseErr := btcec.ParsePubKey(req.BlindingPoint)
+		if parseErr != nil {
+			err = status.Errorf(codes.InvalidArgument,
+				"invalid blinding point: %v", parseErr)
+			return
 		}
 
 		blindingPoint = tlv.SomeRecordT(
@@ -402,7 +421,7 @@ func (s *Server) validateAndPrepareOnion(req *SendOnionRequest) (
 	// Craft an HTLC packet to send to the htlcswitch. The metadata within
 	// this packet will be used to route the payment through the network,
 	// starting with the first-hop.
-	htlcAdd := &lnwire.UpdateAddHTLC{
+	htlcAdd = &lnwire.UpdateAddHTLC{
 		Amount:        amount,
 		Expiry:        req.Timelock,
 		PaymentHash:   hash,
@@ -412,7 +431,7 @@ func (s *Server) validateAndPrepareOnion(req *SendOnionRequest) (
 		ExtraData:     lnwire.ExtraOpaqueData(req.ExtraData),
 	}
 
-	return chanID, htlcAdd, nil
+	return
 }
 
 // findEligibleChannelID attempts to find an eligible channel based on the
