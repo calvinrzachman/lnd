@@ -1137,6 +1137,10 @@ func (m *mockCircuitMap) NumOpen() int {
 	return 0
 }
 
+func (m *mockCircuitMap) FetchPendingCircuits() ([]*PaymentCircuit, error) {
+	return nil, nil
+}
+
 type mockOnionErrorDecryptor struct {
 	sourceIdx int
 	message   []byte

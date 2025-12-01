@@ -1846,6 +1846,14 @@ func (s *Switch) Start() error {
 
 	log.Infof("HTLC Switch starting")
 
+	// In the CommitCircuits-only model, we need to clean up any circuits
+	// that were committed but never fully dispatched before a crash.
+	if err := s.cleanupOrphanedCircuits(); err != nil {
+		_ = s.Stop()
+		log.Errorf("unable to cleanup orphaned circuits: %v", err)
+		return err
+	}
+
 	blockEpochStream, err := s.cfg.Notifier.RegisterBlockEpochNtfn(nil)
 	if err != nil {
 		return err
@@ -1867,6 +1875,90 @@ func (s *Switch) Start() error {
 		log.Errorf("unable to reforward resolutions: %v", err)
 		return err
 	}
+
+	return nil
+}
+
+// cleanupOrphanedCircuits identifies and cleans up any "zombie" circuits
+// that were committed to the CircuitMap but never fully dispatched to an
+// outgoing link (e.g., due to a crash during dynamic validation). For locally-
+// initiated payments, it stores a final failure result and then deletes the
+// circuit from the CircuitMap.
+func (s *Switch) cleanupOrphanedCircuits() error {
+	log.Infof("Cleaning up orphaned circuits on startup")
+
+	// Fetch all circuits that have been committed but not yet opened.
+	circuits, err := s.circuits.FetchPendingCircuits()
+	if err != nil {
+		return fmt.Errorf("unable to fetch pending circuits: %w", err)
+	}
+
+	if len(circuits) == 0 {
+		log.Debugf("No orphaned circuits found to clean up.")
+		return nil
+	}
+
+	log.Infof("Found %d orphaned circuits. Attempting to clean up.",
+		len(circuits))
+
+	var inKeysToDelete []CircuitKey
+	for _, circuit := range circuits {
+		// We only handle locally-initiated payments as orphans in this
+		// cleanup. Forwarded payments will naturally time out or be failed
+		// back by their upstream peers.
+		if circuit.Incoming.ChanID != hop.Source {
+			log.Debugf("Skipping cleanup for non-local orphaned circuit: %v",
+				circuit.InKey())
+			continue
+		}
+
+		// For local payments, we need to provide a definitive result to
+		// unblock any callers waiting via GetAttemptResult.
+		log.Warnf("Cleaning up local orphaned circuit %v (payment_hash=%x). "+
+			"Storing a temporary node failure result.", circuit.InKey(),
+			circuit.PaymentHash)
+
+		// Create a synthetic failure message.
+		var reasonBuf bytes.Buffer
+		failure := &lnwire.FailTemporaryNodeFailure{}
+		if err := lnwire.EncodeFailure(&reasonBuf, failure, 0); err != nil {
+			log.Errorf("CRITICAL: Unable to encode failure for orphaned "+
+				"circuit %v: %v. Callers may hang.", circuit.InKey(), err)
+			continue
+		}
+		failMsg := &lnwire.UpdateFailHTLC{
+			Reason: lnwire.OpaqueReason(reasonBuf.Bytes()),
+		}
+		failureResult := &networkResult{
+			msg:         failMsg,
+			unencrypted: true,
+		}
+
+		// Store the failure result. This will unblock any subscribers.
+		if err := s.attemptStore.StoreResult(
+			circuit.Incoming.HtlcID, failureResult,
+		); err != nil {
+			log.Errorf("CRITICAL: Unable to store failure result for orphaned "+
+				"circuit %v: %v. Callers may hang.", circuit.InKey(), err)
+			// We still try to delete the circuit, even if storing the
+			// result failed.
+		}
+
+		// Mark the circuit for deletion from the CircuitMap.
+		inKeysToDelete = append(inKeysToDelete, circuit.InKey())
+	}
+
+	// Delete all identified zombie circuits from the CircuitMap.
+	if len(inKeysToDelete) > 0 {
+		log.Infof("Deleting %d orphaned circuits from CircuitMap.",
+			len(inKeysToDelete))
+
+		if err := s.circuits.DeleteCircuits(inKeysToDelete...); err != nil {
+			return fmt.Errorf("unable to delete orphaned circuits: %w", err)
+		}
+	}
+
+	log.Infof("Finished cleaning up orphaned circuits.")
 
 	return nil
 }

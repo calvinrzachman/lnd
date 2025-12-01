@@ -136,6 +136,10 @@ type CircuitMap interface {
 	// NumOpen returns the number of circuits with HTLCs that have been
 	// forwarded via an outgoing link.
 	NumOpen() int
+
+	// FetchPendingCircuits returns all circuits that have been committed,
+	// but not yet been opened. These are candidates for zombie circuits.
+	FetchPendingCircuits() ([]*PaymentCircuit, error)
 }
 
 var (
@@ -200,6 +204,24 @@ type circuitMap struct {
 	// reconstructed entirely from the set of persisted full circuits on
 	// startup.
 	hashIndex map[[32]byte]map[CircuitKey]struct{}
+}
+
+// FetchPendingCircuits returns all circuits that have been committed, but not
+// yet been opened. These are candidates for zombie circuits.
+func (cm *circuitMap) FetchPendingCircuits() ([]*PaymentCircuit, error) {
+	cm.mtx.RLock()
+	defer cm.mtx.RUnlock()
+
+	var pendingCircuits []*PaymentCircuit
+	for inKey, circuit := range cm.pending {
+		// A circuit is pending if it has been committed (is in the
+		// pending map) but has not yet been opened (no keystone).
+		if !circuit.HasKeystone() {
+			pendingCircuits = append(pendingCircuits, cm.pending[inKey])
+		}
+	}
+
+	return pendingCircuits, nil
 }
 
 // CircuitMapConfig houses the critical interfaces and references necessary to
