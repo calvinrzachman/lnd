@@ -561,12 +561,109 @@ func (s *Switch) CleanStore(keepPids map[uint64]struct{}) error {
 	return s.attemptStore.CleanStore(keepPids)
 }
 
-// SendHTLC is used by other subsystems which aren't belong to htlc switch
-// package in order to send the htlc update. The attemptID used MUST be unique
-// for this HTLC, and MUST be used only once, otherwise the switch might reject
-// it.
+// SendHTLC attempts to forward an HTLC to the given first hop using the
+// specified attempt ID. This is used by other subsystems to dispatch
+// a payment attempt.
+//
+// The Switch guarantees that only one HTLC will be forwarded for a given
+// attemptID, and will return ErrDuplicateAdd for subsequent uses until the ID
+// is explicitly cleaned from the underlying attempt store.
+//
+// This method is safe to call from remote clients (via SendOnion) or by local
+// subsystems such as the ChannelRouter.
 func (s *Switch) SendHTLC(firstHop lnwire.ShortChannelID, attemptID uint64,
 	htlc *lnwire.UpdateAddHTLC) error {
+
+	// First, we initialize the attempt in our persistent store. This serves
+	// as a durable record of our intent to send, allowing clients to
+	// safely retry.
+	err := s.attemptStore.InitAttempt(attemptID)
+	if err != nil {
+		if errors.Is(err, ErrPaymentIDAlreadyExists) {
+			log.Debugf("Attempt id=%v already exists", attemptID)
+
+			return ErrDuplicateAdd
+		}
+
+		log.Errorf("unable to initialize attempt id=%d: %v",
+			attemptID, err)
+
+		return err
+	}
+
+	// With the attempt initialized, we now dispatch the HTLC.
+	dispatchErr := s.DispatchHTLC(firstHop, attemptID, htlc)
+
+	// If the dispatch failed, it means the HTLC was either never committed
+	// to the circuit map, or the handoff to the outgoing link failed. In
+	// either case, the payment is not yet considered irrevocably in-flight,
+	// and therefore requires a synchronous rollback of its pending state to
+	// "failed" to close this atomicity gap. This ensures that any error
+	// returned from this function is terminal, preventing a caller from
+	// getting stuck waiting for an initialized but un-dispatched attempt.
+	if dispatchErr != nil {
+		// For plain errors (fee exceeded, duplicate, etc.), we create a
+		// generic LinkError for the internal rollback.
+		var linkErrForRollback *LinkError
+		if !errors.As(dispatchErr, &linkErrForRollback) {
+			linkErrForRollback = NewLinkError(
+				&lnwire.FailTemporaryNodeFailure{},
+			)
+		}
+
+		if err := s.attemptStore.FailAttempt(
+			attemptID, linkErrForRollback,
+		); err != nil {
+			log.Errorf("Unable to store failure result for attempt"+
+				" %d: %v. Orphaned pending attempt may exist "+
+				"until next restart", attemptID, err)
+		}
+
+		// Return the original, more specific error to the caller.
+		return dispatchErr
+	}
+
+	return nil
+}
+
+// DispatchHTLC attempts to forward an HTLC to the given first hop using the
+// specified attempt ID. This method contains the core, non-idempotent
+// dispatch logic.
+//
+// NOTE: This method is "unsafe" from a lifecycle idempotency perspective and
+// should only be called by a wrapper that provides its own duplicate attempt
+// protection (such as SendHTLC or the SendOnion RPC handler). While the
+// underlying CircuitMap provides strong protection against in-flight
+// duplicates, this method does NOT protect against the re-use of an attempt ID
+// after a payment has already been resolved (settled or failed).
+func (s *Switch) DispatchHTLC(firstHop lnwire.ShortChannelID, attemptID uint64,
+	htlc *lnwire.UpdateAddHTLC) error {
+
+	// With the attempt initialized, we now prepare the HTLC dispatch. This
+	// function will perform all validation and commit the payment circuit
+	// to the database.
+	link, packet, err := s.prepareHTLCDispatch(
+		firstHop, attemptID, htlc,
+	)
+	if err != nil {
+		return err
+	}
+
+	// The circuit has now been committed. From this point on, any failures
+	// (e.g., a link error below, or a crash) are handled by the switch's
+	// asynchronous resolution mechanisms (live timeout or deferred cleanup
+	// on restart). Deliver the packet to the outgoing link.
+	return link.handleSwitchPacket(packet)
+}
+
+// prepareHTLCDispatch contains the core logic for preparing an HTLC for
+// forwarding. It performs all necessary validation and commits the HTLC to the
+// circuit map. If this function returns without error, the HTLC is considered
+// durably committed to the switch's circuit map and is ready for dispatch to
+// the outgoing link.
+func (s *Switch) prepareHTLCDispatch(firstHop lnwire.ShortChannelID,
+	attemptID uint64, htlc *lnwire.UpdateAddHTLC) (ChannelLink,
+	*htlcPacket, error) {
 
 	// Generate and send new update packet, if error will be received on
 	// this stage it means that packet haven't left boundaries of our
@@ -598,7 +695,7 @@ func (s *Switch) SendHTLC(firstHop lnwire.ShortChannelID, attemptID uint64,
 			false,
 		)
 
-		return linkErr
+		return nil, nil, linkErr
 	}
 
 	// Evaluate whether this HTLC would bypass our fee exposure. If it
@@ -621,30 +718,31 @@ func (s *Switch) SendHTLC(firstHop lnwire.ShortChannelID, attemptID uint64,
 			false,
 		)
 
-		return errFeeExposureExceeded
+		return nil, nil, errFeeExposureExceeded
 	}
 
 	circuit := newPaymentCircuit(&htlc.PaymentHash, packet)
 	actions, err := s.circuits.CommitCircuits(circuit)
 	if err != nil {
 		log.Errorf("unable to commit circuit in switch: %v", err)
-		return err
+
+		return nil, nil, err
 	}
 
 	// Drop duplicate packet if it has already been seen.
 	switch {
 	case len(actions.Drops) == 1:
-		return ErrDuplicateAdd
+		return nil, nil, ErrDuplicateAdd
 
 	case len(actions.Fails) == 1:
-		return ErrLocalAddFailed
+		return nil, nil, ErrLocalAddFailed
 	}
 
 	// Give the packet to the link's mailbox so that HTLC's are properly
 	// canceled back if the mailbox timeout elapses.
 	packet.circuit = circuit
 
-	return link.handleSwitchPacket(packet)
+	return link, packet, nil
 }
 
 // UpdateForwardingPolicies sends a message to the switch to update the
