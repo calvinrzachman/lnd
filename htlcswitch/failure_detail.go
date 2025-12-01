@@ -54,6 +54,10 @@ const (
 	// OutgoingFailureForwardsDisabled is returned when the switch is
 	// configured to disallow forwards.
 	OutgoingFailureForwardsDisabled
+
+	// OutgoingFailureFeeExposure is returned when an outgoing HTLC would
+	// increase the node's fee exposure beyond a configured threshold.
+	OutgoingFailureFeeExposure
 )
 
 // FailureString returns the string representation of a failure detail.
@@ -90,6 +94,9 @@ func (fd OutgoingFailure) FailureString() string {
 
 	case OutgoingFailureForwardsDisabled:
 		return "node configured to disallow forwards"
+
+	case OutgoingFailureFeeExposure:
+		return "fee exposure exceeded"
 
 	default:
 		return "unknown failure detail"

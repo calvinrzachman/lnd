@@ -113,6 +113,13 @@ type CircuitMap interface {
 	// open circuit twice.
 	CloseCircuit(outKey CircuitKey) (*PaymentCircuit, error)
 
+	// RollbackCircuit is the synchronous mechanism used to cancel a
+	// circuit that has been committed to the map, but failed before being
+	// handed off to the outgoing link. This has the effect of deleting
+	// the circuit from persistent storage, and making it as if the circuit
+	// was never committed.
+	RollbackCircuit(circuit *PaymentCircuit) error
+
 	// FailCircuit is used by locally failed HTLCs to mark the circuit
 	// identified by `inKey` as closing in-memory, which prevents duplicate
 	// settles/fails from being accepted for the same circuit.
@@ -1066,6 +1073,32 @@ func (cm *circuitMap) CloseCircuit(outKey CircuitKey) (*PaymentCircuit, error) {
 	cm.closed[circuit.Incoming] = struct{}{}
 
 	return circuit, nil
+}
+
+// RollbackCircuit is the synchronous mechanism used to cancel a circuit that
+// has been committed to the map, but failed before being handed off to the
+// outgoing link. This has the effect of deleting the circuit from persistent
+// storage, and making it as if the circuit was never committed.
+func (cm *circuitMap) RollbackCircuit(circuit *PaymentCircuit) error {
+	inKey := circuit.InKey()
+
+	log.Tracef("Rolling back circuit: %v", inKey)
+
+	// First, we'll remove the circuit from our in-memory state.
+	cm.mtx.Lock()
+	delete(cm.pending, inKey)
+	cm.mtx.Unlock()
+
+	// With the in-memory state reverted, we'll now delete the circuit from
+	// the persistent database.
+	return kvdb.Update(cm.cfg.DB, func(tx kvdb.RwTx) error {
+		circuitBkt := tx.ReadWriteBucket(circuitAddKey)
+		if circuitBkt == nil {
+			return ErrCorruptedCircuitMap
+		}
+
+		return circuitBkt.Delete(inKey.Bytes())
+	}, func() {})
 }
 
 // DeleteCircuits destroys the target circuits by removing them from the circuit

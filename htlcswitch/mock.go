@@ -1108,6 +1108,10 @@ func (m *mockCircuitMap) CloseCircuit(outKey CircuitKey) (*PaymentCircuit,
 	return nil, nil
 }
 
+func (m *mockCircuitMap) RollbackCircuit(circuit *PaymentCircuit) error {
+	return nil
+}
+
 func (m *mockCircuitMap) FailCircuit(inKey CircuitKey) (*PaymentCircuit,
 	error) {
 	return nil, nil
