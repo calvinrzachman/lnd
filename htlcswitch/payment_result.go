@@ -216,6 +216,14 @@ func (store *networkResultStore) StoreResult(attemptID uint64,
 	store.attemptIDMtx.Lock(attemptID)
 	defer store.attemptIDMtx.Unlock(attemptID)
 
+	return store.storeResult(attemptID, result)
+}
+
+// storeResult is the internal version of StoreResult that assumes the caller
+// is holding the attemptIDMtx lock.
+func (store *networkResultStore) storeResult(attemptID uint64,
+	result *networkResult) error {
+
 	log.Debugf("Storing result for attemptID=%v", attemptID)
 
 	// Handle finalized result (success or failure).
@@ -482,6 +490,33 @@ func (store *networkResultStore) FetchPendingAttempts() ([]uint64, error) {
 func (store *networkResultStore) FailAttempt(attemptID uint64,
 	linkErr *LinkError) error {
 
+	// We get a mutex for this attempt ID to ensure consistency between the
+	// database state and the subscribers in case of concurrent calls.
+	store.attemptIDMtx.Lock(attemptID)
+	defer store.attemptIDMtx.Unlock(attemptID)
+
+	// Fetch the existing record to ensure it's in a pending state.
+	var existingResult *networkResult
+	err := kvdb.View(store.backend, func(tx kvdb.RTx) error {
+		var err error
+		existingResult, err = fetchResult(tx, attemptID)
+
+		return err
+	}, func() {
+		existingResult = nil
+	})
+	if err != nil {
+		// This handles ErrPaymentIDNotFound and other DB errors.
+		return fmt.Errorf("cannot fail attempt %d: %w", attemptID, err)
+	}
+
+	// If the result is not a pending placeholder, then we cannot fail it
+	// via this method.
+	if existingResult.msg.MsgType() != pendingHtlcMsgType {
+		return fmt.Errorf("cannot fail attempt %d, not in pending "+
+			"state", attemptID)
+	}
+
 	// The attempt to send the htlc failed before it was ever dispatched.
 	// We will write a failure result to the store to unblock any
 	// potential callers to GetAttemptResult.
@@ -506,5 +541,5 @@ func (store *networkResultStore) FailAttempt(attemptID uint64,
 		unencrypted: true, // This is a local failure
 	}
 
-	return store.StoreResult(attemptID, failureResult)
+	return store.storeResult(attemptID, failureResult)
 }

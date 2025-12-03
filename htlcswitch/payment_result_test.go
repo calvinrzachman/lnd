@@ -329,4 +329,54 @@ func TestNetworkResultStoreFailAndFetch(t *testing.T) {
 
 	_, ok = reason.(*lnwire.FailTemporaryNodeFailure)
 	require.True(t, ok, "expected temporary node failure")
+
+	// Test misuse of FailAttempt.
+	t.Run("FailAttempt misuse", func(t *testing.T) {
+		// Fail a non-existent attempt.
+		err := store.FailAttempt(999,
+			NewLinkError(&lnwire.FailTemporaryNodeFailure{}),
+		)
+		require.Error(t, err,
+			"expected error when failing non-existent attempt")
+		require.Contains(t, err.Error(), "not found",
+			"expected not found error")
+
+		// Initialize and settle an attempt, then confirm that
+		// FailAttempt cannot overwrite the succesful result.
+		var id uint64 = 100
+		require.NoError(t, store.InitAttempt(id), "init attempt failed")
+		settleResult := &networkResult{
+			msg:         &lnwire.UpdateFulfillHTLC{},
+			unencrypted: true,
+		}
+		require.NoError(t, store.StoreResult(id, settleResult),
+			"store settle result failed")
+
+		err = store.FailAttempt(id, NewLinkError(
+			&lnwire.FailTemporaryNodeFailure{}),
+		)
+		require.Error(t, err,
+			"expected error when failing settled attempt")
+
+		// Initialize and then store a HTLC failure result from the
+		// network. FailAttempt should not overwrite the real failure
+		// reason.
+		var id2 uint64 = 101
+		require.NoError(t, store.InitAttempt(id2),
+			"init attempt 2 failed")
+
+		failResult := &networkResult{
+			msg:         &lnwire.UpdateFailHTLC{},
+			unencrypted: true,
+		}
+		require.NoError(t, store.StoreResult(id2, failResult),
+			"store fail result failed")
+
+		err = store.FailAttempt(
+			id2,
+			NewLinkError(&lnwire.FailTemporaryNodeFailure{}),
+		)
+		require.Error(t, err,
+			"expected error when failing already failed attempt")
+	})
 }
