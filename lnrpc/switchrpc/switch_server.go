@@ -297,7 +297,7 @@ func (s *Server) SendOnion(_ context.Context,
 		return nil, validationErr
 	}
 
-	log.Debugf("Dispatching HTLC attempt(id=%v, amt=%v) for payment=%v "+
+	log.Debugf("Dispatching HTLC attempt(id=%v, amt=%v) for payment=%x "+
 		"via channel=%s", req.AttemptId, req.Amount,
 		htlcAdd.PaymentHash, chanID)
 
