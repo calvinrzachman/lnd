@@ -33,6 +33,15 @@ var (
 	ErrAttemptResultPending = errors.New(
 		"attempt result not yet available",
 	)
+
+	// ErrAmbiguousAttemptInit is returned when any internal error (eg:
+	// with db read or write) occurs during an InitAttempt call that
+	// prevents a definitive outcome. This indicates that the state of the
+	// payment attempt's inititialization is unknown. Callers should retry
+	// the operation to resolve the ambiguity.
+	ErrAmbiguousAttemptInit = errors.New(
+		"ambiguous result for payment attempt registration",
+	)
 )
 
 const (
@@ -125,6 +134,11 @@ func newNetworkResultStore(db kvdb.Backend) *networkResultStore {
 // only one HTLC will be initialized and dispatched for a given attempt ID until
 // the ID is explicitly cleaned from attempt store.
 //
+// If any unexpected internal error occurs (such as a database read or write
+// failure), it will be wrapped in ErrAmbiguousAttemptInit. This signals
+// to the caller that the state of the registration is uncertain and that the
+// operation MUST be retried to resolve the ambiguity.
+//
 // NOTE: This is part of the AttemptStore interface. Subscribed clients do not
 // receive notice of this initialization.
 func (store *networkResultStore) InitAttempt(attemptID uint64) error {
@@ -149,7 +163,7 @@ func (store *networkResultStore) InitAttempt(attemptID uint64) error {
 		existingResult = nil
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrAmbiguousAttemptInit, err)
 	}
 
 	// If the result is already in-progress, return an error indicating that
@@ -168,8 +182,10 @@ func (store *networkResultStore) InitAttempt(attemptID uint64) error {
 	// represent the pending state of an attempt.
 	pendingMsg, err := lnwire.NewCustom(pendingHtlcMsgType, nil)
 	if err != nil {
-		// This should not happen with a static message type.
-		return err
+		// This should not happen with a static message type, but if it
+		// does, it's an internal error that prevents a definitive
+		// outcome, so we must treat it as ambiguous.
+		return fmt.Errorf("%w: %w", ErrAmbiguousAttemptInit, err)
 	}
 	inProgressResult := &networkResult{
 		msg:          pendingMsg,
@@ -181,7 +197,7 @@ func (store *networkResultStore) InitAttempt(attemptID uint64) error {
 	// pending placeholder. No network result is available yet, so we do
 	// not notify subscribers.
 	if err := store.storeResult(attemptID, inProgressResult); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrAmbiguousAttemptInit, err)
 	}
 
 	log.Debugf("Initialized attempt for local payment with attemptID=%v",
