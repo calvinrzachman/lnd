@@ -249,15 +249,25 @@ func (r *ServerShell) CreateSubServer(
 func (s *Server) SendOnion(_ context.Context,
 	req *SendOnionRequest) (*SendOnionResponse, error) {
 
-	// 1. REGISTER: Call InitAttempt as the very first action. This serves
-	// as the idempotency anchor for the entire operation.
+	// 1. REGISTER: First, we initialize the attempt in our persistent
+	// store. This serves as a durable record of our intent to send and
+	// gates the attempt id for concurrent callers, allowing them to safely
+	// retry.
+	//
+	// NOTE: This MUST be the first significant action. Any pure static
+	// validation (checks on immutable request data) can happen before
+	// this, but all dynamic validation (checks against the mutable state
+	// of the world like channel capacity or peer connectivity) must
+	// happen *after* this to uphold the idempotency contract.
 	err := s.cfg.AttemptStore.InitAttempt(req.AttemptId)
 	if err != nil {
-		// If the attempt ID already exists, it means this is a replay
-		// from the client. We'll return a specific error code to
-		// signal that the request has already been accepted and is in
-		// progress.
+		// An existing record for this attempt ID was found. This is a
+		// replay from the client. We return a distinct error to signal
+		// that the dispatch request is acknowledged and that the caller
+		// can safely proceed to track the result.
 		if errors.Is(err, htlcswitch.ErrPaymentIDAlreadyExists) {
+			log.Debugf("Attempt id=%v already exists", attemptID)
+
 			return &SendOnionResponse{
 				Success: false,
 				ErrorMessage: htlcswitch.ErrDuplicateAdd.
@@ -266,7 +276,14 @@ func (s *Server) SendOnion(_ context.Context,
 			}, nil
 		}
 
-		// A different error from InitAttempt is a server problem.
+		// If we receive an initialization error, we'll return the error
+		// directly to the caller so they can handle the ambiguity.
+		//
+		// TODO(calvin): actually transport the error signal across the
+		// rpc boundary.
+		log.Errorf("Unable to initialize attempt id=%d: %v", attemptID,
+			err)
+
 		return nil, status.Errorf(codes.Internal,
 			"InitAttempt failed: %v", err)
 	}
@@ -274,11 +291,14 @@ func (s *Server) SendOnion(_ context.Context,
 	// 2. VALIDATE: Perform all RPC-level pre-checks.
 	chanID, htlcAdd, validationErr := s.validateAndPrepareOnion(req)
 
+	// With the attempt initialized, we now dispatch the HTLC.
+	dispatchErr := s.DispatchHTLC(firstHop, attemptID, htlc)
+
 	// 3. ROLLBACK: If validation fails, we MUST synchronously roll back
-	// the PENDING state to FAILED.
+	// the PENDING state to FAILED
 	if validationErr != nil {
-		// We'll create a generic LinkError for the rollback, as the
-		// specific validation error is returned to the client.
+		// For plain errors (fee exceeded, duplicate, etc.), we create a
+		// generic LinkError for the internal rollback.
 		rollbackErr := s.cfg.AttemptStore.FailAttempt(
 			req.AttemptId,
 			htlcswitch.NewLinkError(
@@ -304,9 +324,21 @@ func (s *Server) SendOnion(_ context.Context,
 	// 4. ACT: Call the core dispatch logic.
 	err = s.cfg.HtlcDispatcher.SendHTLC(chanID, req.AttemptId, htlcAdd)
 	if err != nil {
+		// TODO(calvin): Rollback here as well? Or is that the point of
+		// SendHTLC being updated? So that it rolls back itself? Wait,
+		// we won't be using the "safe" but rather the "core" so there
+		// will be no internal rollback.
+		//
+		// If dispatch failed, the HTLC is not in-flight. We must ensure that
+		// the attempt, which was initialized via InitAttempt, does not remain
+		// in a pending state if it was never actually dispatched. To resolve
+		// this ambiguity, we fail the attempt, transitioning it to a terminal
+		// FAILED state. This prevents a caller from hanging on an initialized
+		// but un-dispatched attempt.
+
 		// NOTE: Because SendHTLC now also contains its own rollback,
 		// we don't need to call FailAttempt here. SendHTLC guarantees
-		// that any error it returns is final.
+		// that any error it returns is final. OUTDATED!!
 		message, code := translateErrorForRPC(err)
 		return &SendOnionResponse{
 			Success:      false,
