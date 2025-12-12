@@ -351,6 +351,21 @@ func (s *Server) SendOnion(_ context.Context,
 	return &SendOnionResponse{Success: true}, nil
 }
 
+// rollbackAttempt is a helper to perform a synchronous rollback of a PENDING
+// attempt.
+func (s *Server) rollbackAttempt(attemptID uint64, context string) {
+	// We use a generic failure reason, as this is an internal rollback.
+	// The original, more specific error is returned to the client.
+	failReason := &lnwire.FailTemporaryNodeFailure{}
+	err := s.cfg.AttemptStore.FailAttempt(
+		attemptID, htlcswitch.NewLinkError(failReason),
+	)
+	if err != nil {
+		log.Errorf("CRITICAL: Unable to roll back attempt %d after %s: %v",
+			attemptID, context, err)
+	}
+}
+
 // validateAndPrepareOnion performs the pre-checks and preparation for a
 // SendOnion request. It returns the channel ID, the HTLC to be sent, and any
 // validation error.
