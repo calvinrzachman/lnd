@@ -299,18 +299,11 @@ func (s *Server) SendOnion(_ context.Context,
 	if validationErr != nil {
 		// For plain errors (fee exceeded, duplicate, etc.), we create a
 		// generic LinkError for the internal rollback.
-		rollbackErr := s.cfg.AttemptStore.FailAttempt(
-			req.AttemptId,
-			htlcswitch.NewLinkError(
-				&lnwire.FailTemporaryNodeFailure{},
-			),
-		)
-		if rollbackErr != nil {
-			// Log this critical "error in the error handler".
-			log.Errorf("Unable to roll back attempt %d after "+
-				"validation failure: %v", req.AttemptId,
-				rollbackErr)
-		}
+		// 3A. ROLLBACK (on Validation Error): Validation failed. We own the
+		// PENDING record, so we must roll it back.
+		log.Warnf("Validation failed for attempt %d: %v. Rolling back.",
+			req.AttemptId, validationErr)
+		s.rollbackAttempt(req.AttemptId, "validation failure")
 
 		// Return the original, more specific validation error to the
 		// client.
@@ -336,6 +329,13 @@ func (s *Server) SendOnion(_ context.Context,
 		// FAILED state. This prevents a caller from hanging on an initialized
 		// but un-dispatched attempt.
 
+		// 3B. ROLLBACK (on Dispatch Error): The core dispatch logic failed
+		// definitively. We own the PENDING record, so we must roll it back.
+		log.Warnf("DispatchHTLC failed for attempt %d: %v. Rolling back.",
+			req.AttemptId, dispatchErr)
+
+		s.rollbackAttempt(req.AttemptId, "dispatch failure")
+
 		// NOTE: Because SendHTLC now also contains its own rollback,
 		// we don't need to call FailAttempt here. SendHTLC guarantees
 		// that any error it returns is final. OUTDATED!!
@@ -357,11 +357,12 @@ func (s *Server) rollbackAttempt(attemptID uint64, context string) {
 	// We use a generic failure reason, as this is an internal rollback.
 	// The original, more specific error is returned to the client.
 	failReason := &lnwire.FailTemporaryNodeFailure{}
+
 	err := s.cfg.AttemptStore.FailAttempt(
 		attemptID, htlcswitch.NewLinkError(failReason),
 	)
 	if err != nil {
-		log.Errorf("CRITICAL: Unable to roll back attempt %d after %s: %v",
+		log.Errorf("Unable to roll back attempt %d after %s: %v",
 			attemptID, context, err)
 	}
 }
