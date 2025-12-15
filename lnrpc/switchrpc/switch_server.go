@@ -339,7 +339,7 @@ func (s *Server) SendOnion(_ context.Context,
 		// NOTE: Because SendHTLC now also contains its own rollback,
 		// we don't need to call FailAttempt here. SendHTLC guarantees
 		// that any error it returns is final. OUTDATED!!
-		message, code := translateErrorForRPC(err)
+		message, code := translateErrorForRPC(dispatchErr)
 		return &SendOnionResponse{
 			Success:      false,
 			ErrorMessage: message,
