@@ -26,11 +26,11 @@ import (
 // SendOnion RPC handler in isolation. It ensures that the server correctly
 // implements its side of the RPC contract by sending the correct signals back
 // to the client under various conditions. The test guarantees:
-//  1. Correct translation of internal htlcswitch errors (e.g., ErrDuplicateAdd)
-//     into the specific error codes defined in the protobuf contract.
+//  1. Correct handling of duplicate requests via the AttemptStore.
 //  2. Robust validation of incoming requests, ensuring malformed requests are
 //     rejected with the appropriate gRPC status code.
-//  3. Correct propagation of success signals when the underlying dispatcher
+//  3. Correct rollback of initialized attempts if validation or dispatch fails.
+//  4. Correct propagation of success signals when the underlying dispatcher
 //     succeeds.
 func TestSendOnion(t *testing.T) {
 	t.Parallel()
@@ -50,9 +50,10 @@ func TestSendOnion(t *testing.T) {
 	testCases := []struct {
 		name string
 
-		// setup is a function that modifies the server or request for a
-		// specific test case.
-		setup func(*testing.T, *Server, *SendOnionRequest)
+		// setup is a function that modifies the server, mocks, or the
+		// request for a specific test case.
+		setup func(*testing.T, *mockPayer, *htlcswitch.MockAttemptStore,
+			*SendOnionRequest)
 
 		// expectedErrCode is the gRPC error code we expect from the
 		// call.
@@ -63,67 +64,14 @@ func TestSendOnion(t *testing.T) {
 	}{
 		{
 			name: "valid request",
-			setup: func(t *testing.T, s *Server,
+			setup: func(t *testing.T, payer *mockPayer,
+				store *htlcswitch.MockAttemptStore,
 				req *SendOnionRequest) {
 
-				// Mock a successful dispatch.
-				payer, ok := s.cfg.HtlcDispatcher.(*mockPayer)
-				require.True(t, ok)
+				store.InitErr = nil
 				payer.sendErr = nil
 			},
 			expectedResponse: &SendOnionResponse{Success: true},
-		},
-		{
-			name: "missing onion blob",
-			setup: func(t *testing.T, s *Server,
-				req *SendOnionRequest) {
-
-				req.OnionBlob = nil
-			},
-			expectedErrCode: codes.InvalidArgument,
-		},
-		{
-			name: "invalid onion blob size",
-			setup: func(t *testing.T, s *Server,
-				req *SendOnionRequest) {
-
-				req.OnionBlob = make([]byte, 1)
-			},
-			expectedErrCode: codes.InvalidArgument,
-		},
-		{
-			name: "missing payment hash",
-			setup: func(t *testing.T, s *Server,
-				req *SendOnionRequest) {
-
-				req.PaymentHash = nil
-			},
-			expectedErrCode: codes.InvalidArgument,
-		},
-		{
-			name: "zero amount",
-			setup: func(t *testing.T, s *Server,
-				req *SendOnionRequest) {
-
-				req.Amount = 0
-			},
-			expectedErrCode: codes.InvalidArgument,
-		},
-		{
-			name: "dispatcher internal error",
-			setup: func(t *testing.T, s *Server,
-				req *SendOnionRequest) {
-
-				// Mock a generic error from the dispatcher.
-				payer, ok := s.cfg.HtlcDispatcher.(*mockPayer)
-				require.True(t, ok)
-				payer.sendErr = errors.New("internal error")
-			},
-			expectedResponse: &SendOnionResponse{
-				Success:      false,
-				ErrorMessage: "internal error",
-				ErrorCode:    ErrorCode_INTERNAL,
-			},
 		},
 		{
 			// The ErrDuplicateAdd error is the means by which an
@@ -133,21 +81,88 @@ func TestSendOnion(t *testing.T) {
 			// rely on duplicate prevention is useful under
 			// scenarios where the status of htlc dispatch is
 			// uncertain (eg: network timeout or after restart).
-			name: "dispatcher duplicate htlc error",
-			setup: func(t *testing.T, s *Server,
+			name: "init attempt duplicate",
+			setup: func(t *testing.T, _ *mockPayer,
+				store *htlcswitch.MockAttemptStore,
 				req *SendOnionRequest) {
 
-				// Mock a duplicate error from the dispatcher,
-				// which is the new way to signal a duplicate
-				// attempt for the same ID.
-				payer, ok := s.cfg.HtlcDispatcher.(*mockPayer)
-				require.True(t, ok)
-				payer.sendErr = htlcswitch.ErrDuplicateAdd
+				// Mock a duplicate error from the attempt
+				// initialization process.
+				store.InitErr = htlcswitch.
+					ErrPaymentIDAlreadyExists
+			},
+			expectedResponse: &SendOnionResponse{
+				Success: false,
+				ErrorMessage: htlcswitch.
+					ErrDuplicateAdd.Error(),
+				ErrorCode: ErrorCode_DUPLICATE_HTLC,
+			},
+		},
+		{
+			name: "init attempt internal error",
+			setup: func(t *testing.T, _ *mockPayer,
+				store *htlcswitch.MockAttemptStore,
+				req *SendOnionRequest) {
+
+				store.InitErr = errors.New("internal error")
+			},
+			// TODO(calvin): Determine whether we need to transport
+			// our ErrAmbiguousAttemptInit via the protobuf response
+			// message.
+			expectedErrCode: codes.Internal,
+		},
+		{
+			name: "validation fail (missing onion blob)",
+			setup: func(t *testing.T, _ *mockPayer,
+				_ *htlcswitch.MockAttemptStore,
+				req *SendOnionRequest) {
+
+				req.OnionBlob = nil
+			},
+			expectedErrCode: codes.InvalidArgument,
+		},
+		{
+			name: "validation fail (invalid onion blob size)",
+			setup: func(t *testing.T, _ *mockPayer,
+				_ *htlcswitch.MockAttemptStore,
+				req *SendOnionRequest) {
+
+				req.OnionBlob = make([]byte, 1)
+			},
+			expectedErrCode: codes.InvalidArgument,
+		},
+		{
+			name: "validation fail (zero amount)",
+			setup: func(t *testing.T, _ *mockPayer,
+				_ *htlcswitch.MockAttemptStore,
+				req *SendOnionRequest) {
+
+				req.PaymentHash = nil
+			},
+			expectedErrCode: codes.InvalidArgument,
+		},
+		{
+			name: "validation fail (missing payment hash)",
+			setup: func(t *testing.T, _ *mockPayer,
+				_ *htlcswitch.MockAttemptStore,
+				req *SendOnionRequest) {
+
+				req.Amount = 0
+			},
+			expectedErrCode: codes.InvalidArgument,
+		},
+		{
+			name: "dispatch internal error with rollback",
+			setup: func(t *testing.T, payer *mockPayer,
+				store *htlcswitch.MockAttemptStore,
+				req *SendOnionRequest) {
+
+				payer.sendErr = errors.New("internal error")
 			},
 			expectedResponse: &SendOnionResponse{
 				Success:      false,
-				ErrorMessage: htlcswitch.ErrDuplicateAdd.Error(),
-				ErrorCode:    ErrorCode_DUPLICATE_HTLC,
+				ErrorMessage: "internal error",
+				ErrorCode:    ErrorCode_INTERNAL,
 			},
 		},
 	}
@@ -156,10 +171,15 @@ func TestSendOnion(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
+			// Create mocks for the server's dependencies.
+			mockPayer := &mockPayer{}
+			mockStore := &htlcswitch.MockAttemptStore{}
+
 			// Create a new server for each test case to ensure
 			// isolation.
 			server, _, err := New(&Config{
-				HtlcDispatcher: &mockPayer{},
+				AttemptStore:   mockStore,
+				HtlcDispatcher: mockPayer,
 			})
 			require.NoError(t, err)
 
@@ -167,7 +187,7 @@ func TestSendOnion(t *testing.T) {
 
 			// Apply the test-specific setup.
 			if tc.setup != nil {
-				tc.setup(t, server, req)
+				tc.setup(t, mockPayer, mockStore, req)
 			}
 
 			resp, err := server.SendOnion(t.Context(), req)
@@ -178,7 +198,6 @@ func TestSendOnion(t *testing.T) {
 				s, ok := status.FromError(err)
 				require.True(t, ok)
 				require.Equal(t, tc.expectedErrCode, s.Code())
-
 				return
 			}
 
