@@ -1206,3 +1206,95 @@ func (m *mockErrorDecryptor) DecryptError(reason lnwire.OpaqueReason) (
 
 	return m.result, nil
 }
+
+// MockAttemptStore is a mock implementation of the AttemptStore interface that
+// can be used in tests.
+type MockAttemptStore struct {
+	InitErr    error
+	FailErr    error
+	SettleErr  error
+	StoreErr   error
+	GetErr     error
+	SubErr     error
+	CleanErr   error
+	PendingErr error
+	DisableErr error
+
+	InitCalled    bool
+	FailCalled    bool
+	SettleCalled  bool
+	StoreCalled   bool
+	GetCalled     bool
+	SubCalled     bool
+	CleanCalled   bool
+	PendingCalled bool
+	DisableCalled bool
+}
+
+// A compile-time assertion to ensure that MockAttemptStore fully implements
+// the AttemptStore interface.
+var _ AttemptStore = (*MockAttemptStore)(nil)
+
+// InitAttempt records that the method was called and returns the mock's
+// InitErr.
+func (m *MockAttemptStore) InitAttempt(attemptID uint64) error {
+	m.InitCalled = true
+	return m.InitErr
+}
+
+// FailPendingAttempt records that the method was called and returns the mock's
+// FailErr.
+func (m *MockAttemptStore) FailPendingAttempt(attemptID uint64,
+	reason *LinkError) error {
+
+	m.FailCalled = true
+	return m.FailErr
+}
+
+// StoreResult records that the method was called and returns the mock's
+// StoreErr.
+func (m *MockAttemptStore) StoreResult(attemptID uint64,
+	result *networkResult) error {
+
+	m.StoreCalled = true
+	return m.StoreErr
+}
+
+// GetResult records that the method was called and returns the mock's
+// GetErr.
+func (m *MockAttemptStore) GetResult(
+	attemptID uint64) (*networkResult, error) {
+
+	m.GetCalled = true
+	return nil, m.GetErr
+}
+
+// SubscribeResult records that the method was called and returns the mock's
+// SubErr.
+func (m *MockAttemptStore) SubscribeResult(
+	attemptID uint64) (<-chan *networkResult, error) {
+
+	m.SubCalled = true
+	return nil, m.SubErr
+}
+
+// CleanStore records that the method was called and returns the mock's
+// CleanErr.
+func (m *MockAttemptStore) CleanStore(keepPids map[uint64]struct{}) error {
+	m.CleanCalled = true
+	return m.CleanErr
+}
+
+// FetchPendingAttempts records that the method was called and returns the
+// mock's PendingErr.
+func (m *MockAttemptStore) FetchPendingAttempts() ([]uint64, error) {
+	m.PendingCalled = true
+	return nil, m.PendingErr
+}
+
+// DisableRemoteRouter records that the method was called and returns the
+// mock's DisableErr.
+func (m *MockAttemptStore) DisableRemoteRouter() error {
+	m.DisableCalled = true
+	return m.DisableErr
+}
