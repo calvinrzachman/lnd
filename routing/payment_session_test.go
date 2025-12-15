@@ -312,7 +312,7 @@ func TestRouteTransformFunc(t *testing.T) {
 		func(Graph) (bandwidthHints, error) {
 			return &mockBandwidthHints{}, nil
 		},
-		newMockGraphSessionFactory(&sessionGraph{}),
+		&sessionGraph{},
 		&MissionControl{},
 		PathFindingConfig{},
 		withRouteTransform(trimFirstHop),
