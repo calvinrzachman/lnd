@@ -259,7 +259,8 @@ func (s *Server) SendOnion(_ context.Context,
 	// this, but all dynamic validation (checks against the mutable state
 	// of the world like channel capacity or peer connectivity) must
 	// happen *after* this to uphold the idempotency contract.
-	err := s.cfg.AttemptStore.InitAttempt(req.AttemptId)
+	attemptID := req.AttemptId
+	err := s.cfg.AttemptStore.InitAttempt(attemptID)
 	if err != nil {
 		// An existing record for this attempt ID was found. This is a
 		// replay from the client. We return a distinct error to signal
@@ -291,9 +292,6 @@ func (s *Server) SendOnion(_ context.Context,
 	// 2. VALIDATE: Perform all RPC-level pre-checks.
 	chanID, htlcAdd, validationErr := s.validateAndPrepareOnion(req)
 
-	// With the attempt initialized, we now dispatch the HTLC.
-	dispatchErr := s.DispatchHTLC(firstHop, attemptID, htlc)
-
 	// 3. ROLLBACK: If validation fails, we MUST synchronously roll back
 	// the PENDING state to FAILED
 	if validationErr != nil {
@@ -315,8 +313,10 @@ func (s *Server) SendOnion(_ context.Context,
 		htlcAdd.PaymentHash, chanID)
 
 	// 4. ACT: Call the core dispatch logic.
-	err = s.cfg.HtlcDispatcher.SendHTLC(chanID, req.AttemptId, htlcAdd)
-	if err != nil {
+	// With the attempt initialized, we now dispatch the HTLC.
+	dispatchErr := s.cfg.HtlcDispatcher.SendHTLC(chanID, attemptID, htlcAdd)
+	// err = s.cfg.HtlcDispatcher.SendHTLC(chanID, req.AttemptId, htlcAdd)
+	if dispatchErr != nil {
 		// TODO(calvin): Rollback here as well? Or is that the point of
 		// SendHTLC being updated? So that it rolls back itself? Wait,
 		// we won't be using the "safe" but rather the "core" so there
@@ -358,7 +358,7 @@ func (s *Server) rollbackAttempt(attemptID uint64, context string) {
 	// The original, more specific error is returned to the client.
 	failReason := &lnwire.FailTemporaryNodeFailure{}
 
-	err := s.cfg.AttemptStore.FailAttempt(
+	err := s.cfg.AttemptStore.FailPendingAttempt(
 		attemptID, htlcswitch.NewLinkError(failReason),
 	)
 	if err != nil {
