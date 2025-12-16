@@ -242,51 +242,42 @@ func (s *Server) SendOnion(_ context.Context,
 	req *SendOnionRequest) (*SendOnionResponse, error) {
 
 	// 1. REGISTER: First, we initialize the attempt in our persistent
-	// store. This serves as a durable record of our intent to send and
-	// gates the attempt id for concurrent callers, allowing them to safely
-	// retry.
-	//
-	// NOTE: This MUST be the first significant action. Any pure static
-	// validation (checks on immutable request data) can happen before
-	// this, but all dynamic validation (checks against the mutable state
-	// of the world like channel capacity or peer connectivity) must
-	// happen *after* this to uphold the idempotency contract.
+	// store. This serves as a durable record of our intent to send.
 	attemptID := req.AttemptId
 	err := s.cfg.AttemptStore.InitAttempt(attemptID)
 	if err != nil {
-		// An existing record for this attempt ID was found. This is a
-		// replay from the client. We return a distinct error to signal
-		// that the dispatch request is acknowledged and that the caller
-		// can safely proceed to track the result.
+		// If the attempt ID already exists, we return the canonical
+		// gRPC error code for this condition. This is the expected
+		// outcome for a safe client retry.
 		if errors.Is(err, htlcswitch.ErrPaymentIDAlreadyExists) {
-			log.Debugf("Attempt id=%v already exists", attemptID)
-
-			return &SendOnionResponse{
-				Success: false,
-				ErrorMessage: htlcswitch.ErrDuplicateAdd.
-					Error(),
-				ErrorCode: ErrorCode_DUPLICATE_HTLC,
-			}, nil
-
+			return nil, status.Errorf(codes.AlreadyExists,
+				"payment with attempt ID %d already exists",
+				attemptID)
 		}
 
-		// If we receive an initialization error, we'll return the error
-		// directly to the caller so they can handle the ambiguity.
-		//
-		// TODO(calvin): actually transport the error signal across the
-		// rpc boundary possibly using grpc st.WithDetails()
-		log.Errorf("Unable to initialize attempt id=%d: %v", attemptID,
-			err)
+		// This is the ambiguous case where the DB is sick. We signal
+		// this with a retryable gRPC code and a specific detail.
+		failureDetails := &SendOnionFailureDetails{
+			ErrorCode: ErrorCode_AMBIGUOUS_STATE,
+			ErrorMessage: "idempotency anchor write failed: " +
+				err.Error(),
+		}
+		st := status.New(codes.Unavailable, "server state is ambiguous, "+
+			"client must retry")
 
-		return nil, status.Errorf(codes.Internal,
-			"InitAttempt failed: %v", err)
+		stWithDetails, attachErr := st.WithDetails(failureDetails)
+		if attachErr != nil {
+			log.Warnf("Unable to attach details to ambiguous "+
+				"SendOnion error: %v", attachErr)
+
+			return nil, st.Err()
+		}
+
+		return nil, stWithDetails.Err()
 	}
 
 	// 2. VALIDATE: Perform all RPC-level pre-checks.
 	chanID, htlcAdd, validationErr := s.validateAndPrepareOnion(req)
-
-	// 3. ROLLBACK: If validation fails, we MUST synchronously roll back
-	// the PENDING state to FAILED
 	if validationErr != nil {
 		// For plain errors (fee exceeded, duplicate, etc.), we create a
 		// generic LinkError for the internal rollback.
@@ -307,16 +298,8 @@ func (s *Server) SendOnion(_ context.Context,
 		htlcAdd.PaymentHash, chanID)
 
 	// 4. ACT: Call the core dispatch logic.
-	// With the attempt initialized, we now dispatch the HTLC.
 	dispatchErr := s.cfg.HtlcDispatcher.SendHTLC(chanID, attemptID, htlcAdd)
 	if dispatchErr != nil {
-		// If dispatch failed, the HTLC is not in-flight. We must ensure that
-		// the attempt, which was initialized via InitAttempt, does not remain
-		// in a pending state if it was never actually dispatched. To resolve
-		// this ambiguity, we fail the attempt, transitioning it to a terminal
-		// FAILED state. This prevents a caller from hanging on an initialized
-		// but un-dispatched attempt.
-
 		// 3B. ROLLBACK (on Dispatch Error): The core dispatch logic
 		// failed definitively. We own the PENDING record, so we must
 		// roll it back.
@@ -325,19 +308,13 @@ func (s *Server) SendOnion(_ context.Context,
 
 		s.rollbackAttempt(req.AttemptId, "dispatch failure")
 
-		// NOTE: Because SendHTLC now also contains its own rollback,
-		// we don't need to call FailAttempt here. SendHTLC guarantees
-		// that any error it returns is final. OUTDATED!!
-		message, code := translateErrorForRPC(dispatchErr)
-		return &SendOnionResponse{
-			Success:      false,
-			ErrorMessage: message,
-			ErrorCode:    code,
-		}, nil
+		// Translate the internal dispatch error into a gRPC status
+		// with rich details for the client.
+		return nil, translateErrorForRPC(dispatchErr)
 	}
 
-	// 5. ACKNOWLEDGE: Return success.
-	return &SendOnionResponse{Success: true}, nil
+	// 5. ACKNOWLEDGE: Return success with an empty response.
+	return &SendOnionResponse{}, nil
 }
 
 // rollbackAttempt is a helper to perform a synchronous rollback of a PENDING
@@ -557,15 +534,7 @@ func (s *Server) TrackOnion(ctx context.Context,
 		req.AttemptId, hash, errorDecryptor,
 	)
 	if err != nil {
-		message, code := translateErrorForRPC(err)
-
-		log.Errorf("GetAttemptResult failed for attempt_id=%d of "+
-			" payment=%x: %v", req.AttemptId, hash, message)
-
-		return &TrackOnionResponse{
-			ErrorCode:    code,
-			ErrorMessage: message,
-		}, nil
+		return nil, translateErrorForRPC(err)
 	}
 
 	// The switch knows about this payment, we'll wait for a result to be
@@ -579,11 +548,8 @@ func (s *Server) TrackOnion(ctx context.Context,
 	case result, ok = <-resultChan:
 		if !ok {
 			// This channel is closed when the Switch shuts down.
-			return &TrackOnionResponse{
-				ErrorCode: ErrorCode_SWITCH_EXITING,
-				ErrorMessage: htlcswitch.ErrSwitchExiting.
-					Error(),
-			}, nil
+			err := htlcswitch.ErrSwitchExiting
+			return nil, translateErrorForRPC(err)
 		}
 
 	case <-ctx.Done():
@@ -593,23 +559,19 @@ func (s *Server) TrackOnion(ctx context.Context,
 
 	// The attempt result arrived so the HTLC is no longer in-flight.
 	if result.Error != nil {
-		message, code := translateErrorForRPC(result.Error)
-
 		log.Errorf("Payment via onion failed for payment=%v: %v",
-			hash, message)
+			hash, result.Error)
 
-		return &TrackOnionResponse{
-			ErrorCode:    code,
-			ErrorMessage: message,
-		}, nil
+		return nil, translateErrorForRPC(result.Error)
 	}
 
 	if len(result.EncryptedError) > 0 {
 		log.Errorf("Payment via onion failed for payment=%v", hash)
 
-		return &TrackOnionResponse{
-			EncryptedError: result.EncryptedError,
-		}, nil
+		// TODO(calvin): This should be a structured error detail.
+		return nil, status.Errorf(codes.Aborted, "payment "+
+			"failed with encrypted error: %x",
+			result.EncryptedError)
 	}
 
 	// If we have reached this point, we expect a valid preimage for a
@@ -618,10 +580,8 @@ func (s *Server) TrackOnion(ctx context.Context,
 		log.Errorf("Payment %v completed without a valid preimage or "+
 			"error", hash)
 
-		return &TrackOnionResponse{
-			ErrorCode:    ErrorCode_INTERNAL,
-			ErrorMessage: ErrAmbiguousPaymentState.Error(),
-		}, nil
+		return nil, status.Errorf(codes.Internal,
+			ErrAmbiguousPaymentState.Error())
 	}
 
 	log.Debugf("Received preimage via onion attempt_id=%d for payment=%v",
@@ -776,58 +736,84 @@ func (s *Server) BuildOnion(_ context.Context,
 }
 
 // translateErrorForRPC converts an error from the underlying HTLC switch to
-// a form that we can package for delivery to SendOnion rpc clients.
-func translateErrorForRPC(err error) (string, ErrorCode) {
+// a gRPC status error with rich, fine-grained details.
+func translateErrorForRPC(err error) error {
 	var (
 		clearTextErr htlcswitch.ClearTextError
 		fwdErr       *htlcswitch.ForwardingError
+		details      *SendOnionFailureDetails
 	)
 
 	switch {
 	case errors.Is(err, htlcswitch.ErrPaymentIDNotFound):
-		return err.Error(), ErrorCode_PAYMENT_ID_NOT_FOUND
-
-	case errors.Is(err, htlcswitch.ErrDuplicateAdd):
-		return err.Error(), ErrorCode_DUPLICATE_HTLC
+		details = &SendOnionFailureDetails{
+			ErrorCode:    ErrorCode_PAYMENT_ID_NOT_FOUND,
+			ErrorMessage: err.Error(),
+		}
 
 	case errors.Is(err, htlcswitch.ErrUnreadableFailureMessage):
-		return err.Error(),
-			ErrorCode_UNREADABLE_FAILURE_MESSAGE
+		details = &SendOnionFailureDetails{
+			ErrorCode:    ErrorCode_UNREADABLE_FAILURE_MESSAGE,
+			ErrorMessage: err.Error(),
+		}
 
 	case errors.Is(err, htlcswitch.ErrSwitchExiting):
-		return err.Error(), ErrorCode_SWITCH_EXITING
+		details = &SendOnionFailureDetails{
+			ErrorCode:    ErrorCode_SWITCH_EXITING,
+			ErrorMessage: err.Error(),
+		}
 
 	case errors.As(err, &clearTextErr):
 		// If this is a forwarding error, we'll handle it specially.
 		if errors.As(err, &fwdErr) {
 			encodedError, encodeErr := encodeForwardingError(fwdErr)
 			if encodeErr != nil {
-				return fmt.Sprintf("failed to encode wire "+
-						"message: %v", encodeErr),
-					ErrorCode_INTERNAL
+				return status.Errorf(codes.Internal,
+					"failed to encode wire message: %v",
+					encodeErr)
 			}
 
-			return encodedError,
-				ErrorCode_FORWARDING_ERROR
-		}
+			details = &SendOnionFailureDetails{
+				ErrorCode:    ErrorCode_FORWARDING_ERROR,
+				ErrorMessage: encodedError,
+			}
+		} else {
+			// Otherwise, we'll just encode the clear text error.
+			var buf bytes.Buffer
+			encodeErr := lnwire.EncodeFailure(
+				&buf, clearTextErr.WireMessage(), 0,
+			)
+			if encodeErr != nil {
+				return status.Errorf(codes.Internal,
+					"failed to encode wire message: %v",
+					encodeErr)
+			}
 
-		// Otherwise, we'll just encode the clear text error.
-		var buf bytes.Buffer
-		encodeErr := lnwire.EncodeFailure(
-			&buf, clearTextErr.WireMessage(), 0,
-		)
-		if encodeErr != nil {
-			return fmt.Sprintf("failed to encode wire "+
-					"message: %v", encodeErr),
-				ErrorCode_INTERNAL
+			details = &SendOnionFailureDetails{
+				ErrorCode:    ErrorCode_CLEAR_TEXT_ERROR,
+				ErrorMessage: hex.EncodeToString(buf.Bytes()),
+			}
 		}
-
-		return hex.EncodeToString(buf.Bytes()),
-			ErrorCode_CLEAR_TEXT_ERROR
 
 	default:
-		return err.Error(), ErrorCode_INTERNAL
+		details = &SendOnionFailureDetails{
+			ErrorCode:    ErrorCode_INTERNAL,
+			ErrorMessage: err.Error(),
+		}
 	}
+
+	// All definitive failures that are translated by this function occurred
+	// after the idempotency key was written. We can generally classify them
+	// as a failed precondition for the dispatch to succeed.
+	st := status.New(codes.FailedPrecondition, err.Error())
+	stWithDetails, attachErr := st.WithDetails(details)
+	if attachErr != nil {
+		log.Warnf("Unable to attach details to SendOnion error: %v",
+			attachErr)
+		return st.Err()
+	}
+
+	return stWithDetails.Err()
 }
 
 // encodeForwardingError converts a forwarding error from the switch to the
