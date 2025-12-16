@@ -136,12 +136,11 @@ func TestSendOnion(t *testing.T) {
 			setup: func(t *testing.T, s *Server,
 				req *SendOnionRequest) {
 
-				// Mock a duplicate error from the dispatcher,
-				// which is the new way to signal a duplicate
-				// attempt for the same ID.
-				payer, ok := s.cfg.HtlcDispatcher.(*mockPayer)
+				// Mock a duplicate error from the attempt
+				// store.
+				store, ok := s.cfg.AttemptStore.(*mockAttemptStore)
 				require.True(t, ok)
-				payer.sendErr = htlcswitch.ErrDuplicateAdd
+				store.initErr = htlcswitch.ErrPaymentIDAlreadyExists
 			},
 			expectedResponse: &SendOnionResponse{
 				Success:      false,
@@ -159,6 +158,7 @@ func TestSendOnion(t *testing.T) {
 			// isolation.
 			server, _, err := New(&Config{
 				HtlcDispatcher: &mockPayer{},
+				AttemptStore:   &mockAttemptStore{},
 			})
 			require.NoError(t, err)
 
