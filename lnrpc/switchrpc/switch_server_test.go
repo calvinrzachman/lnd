@@ -160,6 +160,7 @@ func TestSendOnion(t *testing.T) {
 			// isolation.
 			server, _, err := New(&Config{
 				HtlcDispatcher: &mockPayer{},
+				AttemptStore:   &mockAttemptStore{},
 			})
 			require.NoError(t, err)
 
