@@ -80,18 +80,19 @@ message SendOnionRequest {
     bytes extra_data = 10;
 }
 
+// The success response is now empty. A nil error on the RPC call is the
+// signal for success.
 message SendOnionResponse {
-    // Indicates if the onion was successfully sent or not.
-    // Equivalent to `error_code == ERROR_CODE_UNSPECIFIED`.
-    bool success = 1;
+}
 
-    // In case of failure, this field will provide more information about the
-    // error.
+// SendOnionFailureDetails is a structured error payload that is attached to a
+// gRPC status in case of a definitive, application-level failure.
+message SendOnionFailureDetails {
+    // A code representing the type of error that occurred.
+    ErrorCode error_code = 1;
+
+    // A human-readable message providing more information about the error.
     string error_message = 2;
-
-    // A code representing the type of error that occurred. This can be used
-    // to programmatically distinguish between different kinds of errors.
-    ErrorCode error_code = 3;
 }
 
 enum ErrorCode {
@@ -121,7 +122,8 @@ enum ErrorCode {
     UNREADABLE_FAILURE_MESSAGE = 4;
 
     /*
-    An HTLC with same ID is already in flight.
+    An HTLC with the same ID has already been processed. The HTLC may be in
+    flight. The client may proceed to tracking the result of the attempt.
     */
     DUPLICATE_HTLC = 5;
 
@@ -139,6 +141,14 @@ enum ErrorCode {
     Opaque internal server error.
     */
     INTERNAL = 8;
+
+    /*
+    The server encountered a failure during the durable write of the
+    idempotency anchor (InitAttempt) and cannot determine if the htlc has been
+    processed via the current or a prior request. The client MUST retry the
+    request with the same ID to resolve the uncertainty.
+    */
+    AMBIGUOUS_STATE = 9;
 }
 
 message TrackOnionRequest {

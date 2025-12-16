@@ -401,10 +401,11 @@
         "DUPLICATE_HTLC",
         "NO_LINK",
         "SWITCH_EXITING",
-        "INTERNAL"
+        "INTERNAL",
+        "AMBIGUOUS_STATE"
       ],
       "default": "UNSPECIFIED",
-      "description": " - UNSPECIFIED: Default value for unset errors.\n - PAYMENT_ID_NOT_FOUND: Payment ID was not found.\n - FORWARDING_ERROR: Error occurred during forwarding.\n - CLEAR_TEXT_ERROR: Clear text error.\n - UNREADABLE_FAILURE_MESSAGE: Failure message could not be read.\n - DUPLICATE_HTLC: An HTLC with same ID is already in flight.\n - NO_LINK: No link available for payment.\n - SWITCH_EXITING: HTLC switch is exiting.\n - INTERNAL: Opaque internal server error."
+      "description": " - UNSPECIFIED: Default value for unset errors.\n - PAYMENT_ID_NOT_FOUND: Payment ID was not found.\n - FORWARDING_ERROR: Error occurred during forwarding.\n - CLEAR_TEXT_ERROR: Clear text error.\n - UNREADABLE_FAILURE_MESSAGE: Failure message could not be read.\n - DUPLICATE_HTLC: An HTLC with the same ID has already been processed. The HTLC may be in\nflight. The client may proceed to tracking the result of the attempt.\n - NO_LINK: No link available for payment.\n - SWITCH_EXITING: HTLC switch is exiting.\n - INTERNAL: Opaque internal server error.\n - AMBIGUOUS_STATE: The server encountered a failure during the durable write of the\nidempotency anchor (InitAttempt) and cannot determine if the htlc has been\nprocessed via the current or a prior request. The client MUST retry the\nrequest with the same ID to resolve the uncertainty."
     },
     "switchrpcSendOnionRequest": {
       "type": "object",
@@ -466,20 +467,7 @@
     },
     "switchrpcSendOnionResponse": {
       "type": "object",
-      "properties": {
-        "success": {
-          "type": "boolean",
-          "description": "Indicates if the onion was successfully sent or not.\nEquivalent to `error_code == ERROR_CODE_UNSPECIFIED`."
-        },
-        "error_message": {
-          "type": "string",
-          "description": "In case of failure, this field will provide more information about the\nerror."
-        },
-        "error_code": {
-          "$ref": "#/definitions/switchrpcErrorCode",
-          "description": "A code representing the type of error that occurred. This can be used\nto programmatically distinguish between different kinds of errors."
-        }
-      }
+      "description": "The success response is now empty. A nil error on the RPC call is the\nsignal for success."
     },
     "switchrpcTrackOnionResponse": {
       "type": "object",
