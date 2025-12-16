@@ -241,34 +241,167 @@ func (r *ServerShell) CreateSubServer(
 func (s *Server) SendOnion(_ context.Context,
 	req *SendOnionRequest) (*SendOnionResponse, error) {
 
+	// 1. REGISTER: First, we initialize the attempt in our persistent
+	// store. This serves as a durable record of our intent to send and
+	// gates the attempt id for concurrent callers, allowing them to safely
+	// retry.
+	//
+	// NOTE: This MUST be the first significant action. Any pure static
+	// validation (checks on immutable request data) can happen before
+	// this, but all dynamic validation (checks against the mutable state
+	// of the world like channel capacity or peer connectivity) must
+	// happen *after* this to uphold the idempotency contract.
+	attemptID := req.AttemptId
+	err := s.cfg.AttemptStore.InitAttempt(attemptID)
+	if err != nil {
+		// An existing record for this attempt ID was found. This is a
+		// replay from the client. We return a distinct error to signal
+		// that the dispatch request is acknowledged and that the caller
+		// can safely proceed to track the result.
+		if errors.Is(err, htlcswitch.ErrPaymentIDAlreadyExists) {
+			log.Debugf("Attempt id=%v already exists", attemptID)
+
+			return &SendOnionResponse{
+				Success: false,
+				ErrorMessage: htlcswitch.ErrDuplicateAdd.
+					Error(),
+				ErrorCode: ErrorCode_DUPLICATE_HTLC,
+			}, nil
+
+		}
+
+		// If we receive an initialization error, we'll return the error
+		// directly to the caller so they can handle the ambiguity.
+		//
+		// TODO(calvin): actually transport the error signal across the
+		// rpc boundary possibly using grpc st.WithDetails()
+		log.Errorf("Unable to initialize attempt id=%d: %v", attemptID,
+			err)
+
+		return nil, status.Errorf(codes.Internal,
+			"InitAttempt failed: %v", err)
+	}
+
+	// 2. VALIDATE: Perform all RPC-level pre-checks.
+	chanID, htlcAdd, validationErr := s.validateAndPrepareOnion(req)
+
+	// 3. ROLLBACK: If validation fails, we MUST synchronously roll back
+	// the PENDING state to FAILED
+	if validationErr != nil {
+		// For plain errors (fee exceeded, duplicate, etc.), we create a
+		// generic LinkError for the internal rollback.
+		// 3A. ROLLBACK (on Validation Error): Validation failed. We own
+		// the PENDING record, so we must roll it back.
+		log.Warnf("Validation failed for attempt %d: %v. Rolling back.",
+			req.AttemptId, validationErr)
+
+		s.rollbackAttempt(req.AttemptId, "validation failure")
+
+		// Return the original, more specific validation error to the
+		// client.
+		return nil, validationErr
+	}
+
+	log.Debugf("Dispatching HTLC attempt(id=%v, amt=%v) for payment=%x "+
+		"via channel=%s", req.AttemptId, req.Amount,
+		htlcAdd.PaymentHash, chanID)
+
+	// 4. ACT: Call the core dispatch logic.
+	// With the attempt initialized, we now dispatch the HTLC.
+	dispatchErr := s.cfg.HtlcDispatcher.SendHTLC(chanID, attemptID, htlcAdd)
+	if dispatchErr != nil {
+		// If dispatch failed, the HTLC is not in-flight. We must ensure that
+		// the attempt, which was initialized via InitAttempt, does not remain
+		// in a pending state if it was never actually dispatched. To resolve
+		// this ambiguity, we fail the attempt, transitioning it to a terminal
+		// FAILED state. This prevents a caller from hanging on an initialized
+		// but un-dispatched attempt.
+
+		// 3B. ROLLBACK (on Dispatch Error): The core dispatch logic
+		// failed definitively. We own the PENDING record, so we must
+		// roll it back.
+		log.Warnf("DispatchHTLC failed for attempt %d: %v. Rolling back.",
+			req.AttemptId, dispatchErr)
+
+		s.rollbackAttempt(req.AttemptId, "dispatch failure")
+
+		// NOTE: Because SendHTLC now also contains its own rollback,
+		// we don't need to call FailAttempt here. SendHTLC guarantees
+		// that any error it returns is final. OUTDATED!!
+		message, code := translateErrorForRPC(dispatchErr)
+		return &SendOnionResponse{
+			Success:      false,
+			ErrorMessage: message,
+			ErrorCode:    code,
+		}, nil
+	}
+
+	// 5. ACKNOWLEDGE: Return success.
+	return &SendOnionResponse{Success: true}, nil
+}
+
+// rollbackAttempt is a helper to perform a synchronous rollback of a PENDING
+// attempt.
+func (s *Server) rollbackAttempt(attemptID uint64, context string) {
+	// We use a generic failure reason, as this is an internal rollback.
+	// The original, more specific error is returned to the client.
+	failReason := &lnwire.FailTemporaryNodeFailure{}
+
+	err := s.cfg.AttemptStore.FailPendingAttempt(
+		attemptID, htlcswitch.NewLinkError(failReason),
+	)
+	if err != nil {
+		log.Errorf("Unable to roll back attempt %d after %s: %v",
+			attemptID, context, err)
+	}
+}
+
+// validateAndPrepareOnion performs the pre-checks and preparation for a
+// SendOnion request. It returns the channel ID, the HTLC to be sent, and any
+// validation error.
+func (s *Server) validateAndPrepareOnion(req *SendOnionRequest) (
+	chanID lnwire.ShortChannelID, htlcAdd *lnwire.UpdateAddHTLC, err error) {
+
 	if len(req.OnionBlob) != lnwire.OnionPacketSize {
-		return nil, status.Errorf(codes.InvalidArgument,
+		err = status.Errorf(
+			codes.InvalidArgument,
 			"onion blob size=%d does not match expected %d bytes",
-			len(req.OnionBlob), lnwire.OnionPacketSize)
+			len(req.OnionBlob), lnwire.OnionPacketSize,
+		)
+
+		return
 	}
 
 	if len(req.PaymentHash) == 0 {
-		return nil, status.Error(codes.InvalidArgument,
-			"payment hash is required")
+		err = status.Error(
+			codes.InvalidArgument, "payment hash is required")
+
+		return
 	}
 
 	if req.Amount <= 0 {
-		return nil, status.Error(codes.InvalidArgument,
-			"amount must be greater than zero")
+		err = status.Error(codes.InvalidArgument,
+			"amount must be greater than zero",
+		)
+
+		return
 	}
 
 	var (
 		amount       = lnwire.MilliSatoshi(req.Amount)
 		pubkeySet    = len(req.FirstHopPubkey) != 0
 		channelIDSet = req.FirstHopChanId != 0
-		chanID       lnwire.ShortChannelID
 	)
 
 	switch {
 	case pubkeySet == channelIDSet:
-		return nil, status.Error(codes.InvalidArgument,
+		err = status.Error(
+			codes.InvalidArgument,
 			"must specify exactly one of first_hop_pubkey or "+
-				"first_hop_chan_id")
+				"first_hop_chan_id",
+		)
+
+		return
 
 	case channelIDSet:
 		// Case 1: The caller provided the first hop chan id directly.
@@ -277,35 +410,42 @@ func (s *Server) SendOnion(_ context.Context,
 	case pubkeySet:
 		// Case 2: Convert the first hop pubkey into a format usable by
 		// the forwarding subsystem.
-		firstHop, err := btcec.ParsePubKey(req.FirstHopPubkey)
-		if err != nil {
-			return nil, status.Errorf(codes.InvalidArgument,
+		firstHop, parseErr := btcec.ParsePubKey(req.FirstHopPubkey)
+		if parseErr != nil {
+			err = status.Errorf(codes.InvalidArgument,
 				"invalid first hop pubkey=%x: %v",
-				req.FirstHopPubkey, err)
+				req.FirstHopPubkey, parseErr)
+
+			return
 		}
 
 		// Find an eligible channel ID for the given first-hop pubkey.
 		chanID, err = s.findEligibleChannelID(firstHop, amount)
 		if err != nil {
-			return nil, status.Errorf(codes.Internal,
+			err = status.Errorf(codes.Internal,
 				"unable to find eligible channel for "+
 					"pubkey=%x: %v",
 				firstHop.SerializeCompressed(), err)
+			return
 		}
 	}
 
-	hash, err := lntypes.MakeHash(req.PaymentHash)
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument,
-			"invalid payment_hash=%x: %v", req.PaymentHash, err)
+	hash, parseErr := lntypes.MakeHash(req.PaymentHash)
+	if parseErr != nil {
+		err = status.Errorf(codes.InvalidArgument,
+			"invalid payment_hash=%x: %v", req.PaymentHash,
+			parseErr)
+
+		return
 	}
 
 	var blindingPoint lnwire.BlindingPointRecord
 	if len(req.BlindingPoint) > 0 {
-		pubkey, err := btcec.ParsePubKey(req.BlindingPoint)
-		if err != nil {
-			return nil, status.Errorf(codes.InvalidArgument,
-				"invalid blinding point: %v", err)
+		pubkey, parseErr := btcec.ParsePubKey(req.BlindingPoint)
+		if parseErr != nil {
+			err = status.Errorf(codes.InvalidArgument,
+				"invalid blinding point: %v", parseErr)
+			return
 		}
 
 		blindingPoint = tlv.SomeRecordT(
@@ -318,7 +458,7 @@ func (s *Server) SendOnion(_ context.Context,
 	// Craft an HTLC packet to send to the htlcswitch. The metadata within
 	// this packet will be used to route the payment through the network,
 	// starting with the first-hop.
-	htlcAdd := &lnwire.UpdateAddHTLC{
+	htlcAdd = &lnwire.UpdateAddHTLC{
 		Amount:        amount,
 		Expiry:        req.Timelock,
 		PaymentHash:   hash,
@@ -328,21 +468,7 @@ func (s *Server) SendOnion(_ context.Context,
 		ExtraData:     lnwire.ExtraOpaqueData(req.ExtraData),
 	}
 
-	log.Debugf("Dispatching HTLC attempt(id=%v, amt=%v) for payment=%v "+
-		"via channel=%s", req.AttemptId, req.Amount, hash, chanID)
-
-	// Send the HTLC to the first hop directly by way of the HTLCSwitch.
-	err = s.cfg.HtlcDispatcher.SendHTLC(chanID, req.AttemptId, htlcAdd)
-	if err != nil {
-		message, code := translateErrorForRPC(err)
-		return &SendOnionResponse{
-			Success:      false,
-			ErrorMessage: message,
-			ErrorCode:    code,
-		}, nil
-	}
-
-	return &SendOnionResponse{Success: true}, nil
+	return
 }
 
 // findEligibleChannelID attempts to find an eligible channel based on the
