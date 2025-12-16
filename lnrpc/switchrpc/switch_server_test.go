@@ -54,12 +54,9 @@ func TestSendOnion(t *testing.T) {
 		// specific test case.
 		setup func(*testing.T, *Server, *SendOnionRequest)
 
-		// expectedErrCode is the gRPC error code we expect from the
-		// call.
-		expectedErrCode codes.Code
-
-		// expectedResponse is the expected response from the RPC call.
-		expectedResponse *SendOnionResponse
+		// checkError is a function that asserts the specifics of an
+		// expected error. If nil, no error is expected.
+		checkError func(*testing.T, error)
 	}{
 		{
 			name: "valid request",
@@ -71,7 +68,7 @@ func TestSendOnion(t *testing.T) {
 				require.True(t, ok)
 				payer.sendErr = nil
 			},
-			expectedResponse: &SendOnionResponse{Success: true},
+			checkError: nil, // Expect no error.
 		},
 		{
 			name: "missing onion blob",
@@ -80,7 +77,12 @@ func TestSendOnion(t *testing.T) {
 
 				req.OnionBlob = nil
 			},
-			expectedErrCode: codes.InvalidArgument,
+			checkError: func(t *testing.T, err error) {
+				require.Error(t, err)
+				s, ok := status.FromError(err)
+				require.True(t, ok)
+				require.Equal(t, codes.InvalidArgument, s.Code())
+			},
 		},
 		{
 			name: "invalid onion blob size",
@@ -89,28 +91,53 @@ func TestSendOnion(t *testing.T) {
 
 				req.OnionBlob = make([]byte, 1)
 			},
-			expectedErrCode: codes.InvalidArgument,
+			checkError: func(t *testing.T, err error) {
+				require.Error(t, err)
+				s, ok := status.FromError(err)
+				require.True(t, ok)
+				require.Equal(t, codes.InvalidArgument, s.Code())
+			},
 		},
 		{
-			name: "missing payment hash",
+			name: "init attempt duplicate",
 			setup: func(t *testing.T, s *Server,
 				req *SendOnionRequest) {
 
-				req.PaymentHash = nil
+				// Mock a duplicate error from the attempt store.
+				store, ok := s.cfg.AttemptStore.(*mockAttemptStore)
+				require.True(t, ok)
+				store.initErr = htlcswitch.ErrPaymentIDAlreadyExists
 			},
-			expectedErrCode: codes.InvalidArgument,
+			checkError: func(t *testing.T, err error) {
+				require.Error(t, err)
+				s, ok := status.FromError(err)
+				require.True(t, ok)
+				require.Equal(t, codes.AlreadyExists, s.Code())
+			},
 		},
 		{
-			name: "zero amount",
+			name: "init attempt ambiguous",
 			setup: func(t *testing.T, s *Server,
 				req *SendOnionRequest) {
 
-				req.Amount = 0
+				// Mock an ambiguous internal error from the store.
+				store, ok := s.cfg.AttemptStore.(*mockAttemptStore)
+				require.True(t, ok)
+				store.initErr = errors.New("db is sick")
 			},
-			expectedErrCode: codes.InvalidArgument,
+			checkError: func(t *testing.T, err error) {
+				require.Error(t, err)
+				s, ok := status.FromError(err)
+				require.True(t, ok)
+				require.Equal(t, codes.Unavailable, s.Code())
+
+				// Check that the attached details are correct.
+				requireSendOnionFailureDetails(t, err,
+					ErrorCode_AMBIGUOUS_STATE)
+			},
 		},
 		{
-			name: "dispatcher internal error",
+			name: "dispatcher internal error with rollback",
 			setup: func(t *testing.T, s *Server,
 				req *SendOnionRequest) {
 
@@ -119,35 +146,14 @@ func TestSendOnion(t *testing.T) {
 				require.True(t, ok)
 				payer.sendErr = errors.New("internal error")
 			},
-			expectedResponse: &SendOnionResponse{
-				Success:      false,
-				ErrorMessage: "internal error",
-				ErrorCode:    ErrorCode_INTERNAL,
-			},
-		},
-		{
-			// The ErrDuplicateAdd error is the means by which an
-			// rpc client is safe to retry the SendOnion rpc until
-			// an explicit acknowledgement of htlc dispatch can be
-			// received from the server. The ability to retry and
-			// rely on duplicate prevention is useful under
-			// scenarios where the status of htlc dispatch is
-			// uncertain (eg: network timeout or after restart).
-			name: "dispatcher duplicate htlc error",
-			setup: func(t *testing.T, s *Server,
-				req *SendOnionRequest) {
-
-				// Mock a duplicate error from the dispatcher,
-				// which is the new way to signal a duplicate
-				// attempt for the same ID.
-				payer, ok := s.cfg.HtlcDispatcher.(*mockPayer)
+			checkError: func(t *testing.T, err error) {
+				require.Error(t, err)
+				s, ok := status.FromError(err)
 				require.True(t, ok)
-				payer.sendErr = htlcswitch.ErrDuplicateAdd
-			},
-			expectedResponse: &SendOnionResponse{
-				Success:      false,
-				ErrorMessage: htlcswitch.ErrDuplicateAdd.Error(),
-				ErrorCode:    ErrorCode_DUPLICATE_HTLC,
+				require.Equal(t, codes.FailedPrecondition, s.Code())
+
+				requireSendOnionFailureDetails(t, err,
+					ErrorCode_INTERNAL)
 			},
 		},
 	}
@@ -160,6 +166,7 @@ func TestSendOnion(t *testing.T) {
 			// isolation.
 			server, _, err := New(&Config{
 				HtlcDispatcher: &mockPayer{},
+				AttemptStore:   &mockAttemptStore{},
 			})
 			require.NoError(t, err)
 
@@ -172,21 +179,58 @@ func TestSendOnion(t *testing.T) {
 
 			resp, err := server.SendOnion(t.Context(), req)
 
-			// Check for gRPC level errors.
-			if tc.expectedErrCode != codes.OK {
-				require.Error(t, err)
-				s, ok := status.FromError(err)
-				require.True(t, ok)
-				require.Equal(t, tc.expectedErrCode, s.Code())
-
+			// If we expect an error, check it and return.
+			if tc.checkError != nil {
+				tc.checkError(t, err)
 				return
 			}
 
-			// If no gRPC error was expected, check the response.
+			// Otherwise, assert success.
 			require.NoError(t, err)
-			require.Equal(t, tc.expectedResponse, resp)
+			require.Equal(t, &SendOnionResponse{}, resp)
 		})
 	}
+}
+
+// getSendOnionFailureDetails extracts SendOnionFailureDetails from a gRPC
+// status. It will fail the test if the details are not found or are of the
+// wrong type.
+func getSendOnionFailureDetails(t *testing.T,
+	st *status.Status) *SendOnionFailureDetails {
+
+	t.Helper()
+
+	for _, detail := range st.Details() {
+		if d, ok := detail.(*SendOnionFailureDetails); ok {
+			return d
+		}
+	}
+	require.Fail(t, "expected SendOnionFailureDetails in gRPC status details")
+
+	return nil
+}
+
+// requireSendOnionFailureDetails is a test helper that asserts a gRPC error
+// contains SendOnionFailureDetails with the expected ErrorCode.
+func requireSendOnionFailureDetails(t *testing.T, err error,
+	expectedErrorCode ErrorCode) {
+
+	t.Helper() // Marks this function as a test helper.
+
+	st, ok := status.FromError(err)
+	require.True(t, ok, "expected gRPC status error")
+
+	// Look for our specific detail message.
+	for _, detail := range st.Details() {
+		if d, ok := detail.(*SendOnionFailureDetails); ok {
+			require.Equal(t, expectedErrorCode, d.ErrorCode,
+				"unexpected ErrorCode in details")
+			return // Found and asserted, we're done.
+		}
+	}
+
+	// If we reach here, the SendOnionFailureDetails was not found.
+	require.Fail(t, "expected SendOnionFailureDetails in gRPC error details")
 }
 
 // TestTrackOnion is a unit test that rigorously verifies the behavior of the
