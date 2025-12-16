@@ -39,6 +39,16 @@
   has been removed from the public key parsing methods, and proper mutex
   protection has been added to the cache access in `DisconnectBlockAtHeight`.
 
+- The `ChannelRouter`'s payment life-cycle management may subscribe for a result
+  of an attempt that was never actually dispatched if we crash after
+  `CommitCircuits` records the Switch's intent to forward but before the HTLC is
+  included in the commitment transaction of the outgoing link. This change also
+  introduces a new `cleanupOrphanedAttempts` procedure *within the Switch* that
+  runs on startup. This routine addresses this inconsistent or dangling circuit
+  state by finding any attempts that were left in a pending state after a node
+  crash and safely fails them, fixing a long-standing latent bug where local
+  payments could become permanently stuck.
+
 # New Features
 
 - Basic Support for [onion messaging forwarding](https://github.com/lightningnetwork/lnd/pull/9868) 
@@ -47,6 +57,17 @@
   serialization and deserialization logic for peer-to-peer communication.
 
 ## Functional Enhancements
+
+* Introduced a new `AttemptStore` interface within `htlcswitch`, and expanded
+  its `kvdb` implementation, `networkResultStore`. A new `InitAttempt` method,
+  which serves as a "durable write of intent" or "write-ahead log" to checkpoint
+  an attempt in a new `PENDING` state prior to dispatch, now provides the
+  foundational durable storage required for external tracking of the HTLC
+  attempt lifecycle. This is a preparatory step that enables a future
+  idempotent `switchrpc.SendOnion` RPC, which will offer "at most once"
+  processing of htlc dispatch requests for remote clients. Care was taken to
+  avoid modifications to the existing flows for dispatching local payments,
+  preserving the existing battle-tested logic.
 
 ## RPC Additions
 
