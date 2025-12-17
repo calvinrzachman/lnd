@@ -212,6 +212,7 @@ func testSendOnionIdempotencyLifecycle(ht *lntest.HarnessTest) {
 	// Now that the original HTLC attempt has settled, we'll send the same
 	// onion again with the same attempt ID. This should also fail.
 	err = alice.RPC.SendOnion(sendReq)
+	require.Error(ht, err, "expected failure on onion send")
 
 	s, ok = status.FromError(err)
 	require.True(ht, ok, "expected gRPC status error")
@@ -331,13 +332,22 @@ func testSendOnionConcurrency(ht *lntest.HarnessTest) {
 			continue
 		}
 
-		// For non-nil errors, we expect a gRPC status error indicating
-		// that the attempt already exists.
+		// For non-nil errors, we should receive a gRPC status error.
 		s, ok := status.FromError(err)
-		require.True(ht, ok, "expected gRPC status error")
-		require.Equal(ht, codes.AlreadyExists, s.Code(),
-			"unexpected error code")
-		duplicateCount++
+		if !ok {
+			// If it's not a gRPC status error, it's an unexpected
+			// condition.
+			ht.Fatalf("unexpected error from SendOnion: %v, "+
+				"code: %v", s.Err().Error(), s.Code())
+		}
+
+		// Check if the error code indicates a duplicate acknowledgment.
+		if s.Code() == codes.AlreadyExists {
+			duplicateCount++
+		} else {
+			ht.Fatalf("unexpected error from SendOnion: %v, "+
+				"code: %v", s.Err().Error(), s.Code())
+		}
 	}
 
 	// Confirm that only a single dispatch succeeds.
