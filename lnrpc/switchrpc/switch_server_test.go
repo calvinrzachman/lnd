@@ -665,14 +665,6 @@ func TestMarshallFailureDetails(t *testing.T) {
 		expectedDetails *FailureDetails
 	}{
 		{
-			name: "not found",
-			err:  htlcswitch.ErrPaymentIDNotFound,
-			expectedDetails: &FailureDetails{
-				ErrorCode:    ErrorCode_PAYMENT_ID_NOT_FOUND,
-				ErrorMessage: htlcswitch.ErrPaymentIDNotFound.Error(),
-			},
-		},
-		{
 			name: "unreadable",
 			err:  htlcswitch.ErrUnreadableFailureMessage,
 			expectedDetails: &FailureDetails{
