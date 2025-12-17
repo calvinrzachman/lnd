@@ -71,7 +71,7 @@ func TestSendOnion(t *testing.T) {
 			checkError: nil, // Expect no error.
 		},
 		{
-			name: "missing onion blob",
+			name: "validation fail (missing onion blob)",
 			setup: func(t *testing.T, s *Server,
 				req *SendOnionRequest) {
 
@@ -85,11 +85,39 @@ func TestSendOnion(t *testing.T) {
 			},
 		},
 		{
-			name: "invalid onion blob size",
+			name: "validation fail (invalid onion blob size)",
 			setup: func(t *testing.T, s *Server,
 				req *SendOnionRequest) {
 
 				req.OnionBlob = make([]byte, 1)
+			},
+			checkError: func(t *testing.T, err error) {
+				require.Error(t, err)
+				s, ok := status.FromError(err)
+				require.True(t, ok)
+				require.Equal(t, codes.InvalidArgument, s.Code())
+			},
+		},
+		{
+			name: "validation fail (missing payment hash)",
+			setup: func(t *testing.T, s *Server,
+				req *SendOnionRequest) {
+
+				req.PaymentHash = nil
+			},
+			checkError: func(t *testing.T, err error) {
+				require.Error(t, err)
+				s, ok := status.FromError(err)
+				require.True(t, ok)
+				require.Equal(t, codes.InvalidArgument, s.Code())
+			},
+		},
+		{
+			name: "validation fail (zero amount)",
+			setup: func(t *testing.T, s *Server,
+				req *SendOnionRequest) {
+
+				req.Amount = 0
 			},
 			checkError: func(t *testing.T, err error) {
 				require.Error(t, err)
