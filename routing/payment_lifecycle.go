@@ -1139,19 +1139,38 @@ func (p *paymentLifecycle) reloadInflightAttempts() (paymentsdb.DBMPPayment,
 		// For a remote router, this will perform write-first recovery.
 		err := p.router.cfg.Resumer(&a)
 
+		// The Resumer contract is strong:
+		// 1. nil error means the HTLC is definitively in-flight.
+		// 2. Any error means the HTLC is definitively NOT in-flight,
+		//    *or* an unrecoverable ambiguity was hit (timeout) that
+		//    requires terminating the payment.
 		if err != nil {
-			// If the resumption strategy failed definitively, we log the error
-			// and do NOT proceed to track the result, as the HTLC is confirmed
-			// NOT in-flight (or is in an unrecoverable state).
-			log.Errorf("Resumption strategy for attempt %v on payment %v failed: %v."+
-				"HTLC confirmed NOT in-flight.",
+			// If the resumption strategy failed, its status is ambiguous.
+			// We log a warning and do NOT proceed to track the result, as
+			// we cannot be sure it was ever dispatched. The attempt will
+			// remain in-flight (or pending) in the database until resolved
+			// by a subsequent restart or cleanup via the janitor.
+			log.Warnf("Resumption strategy for attempt %v on payment %v "+
+				"failed: %v. The status of this HTLC remains "+
+				"ambiguous. Skipping result collection to prevent hang. "+
+				"This attempt will remain in-flight (or pending) in the "+
+				"database until resolved by a subsequent restart or cleanup.",
 				a.AttemptID, p.identifier, err)
 
+			// TODO(calvin): consider handling definitive errors with
+			// handleSwitchErr once we're confident that the RPC dispatcher
+			// NEVER will hand back any non-definitive errors. For now, we
+			// prioritize safety and do not assume definitive failure.
+
+			// We do NOT call resultCollector, but we also don't
+			// need to explicitly fail the attempt here. The overall
+			// payment will eventually fail when all other attempts
+			// resolve or if this was the last one.
 			continue
 		}
 
-		// If the resumer succeeded (or was a no-op), we are safe to start
-		// collecting the result.
+		// If the resumer succeeded (or was a no-op), we are safe to
+		// start collecting the result.
 		p.resultCollector(&a)
 	}
 
