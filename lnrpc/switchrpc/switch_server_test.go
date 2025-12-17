@@ -679,7 +679,7 @@ func TestTranslateErrorForRPC(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg, code := translateErrorForRPC(tt.err)
+			msg, code := translateErrorForResponse(tt.err)
 			require.Contains(t, msg, tt.expectedMsg)
 			require.Equal(t, tt.expectedCode, code)
 		})
@@ -756,7 +756,7 @@ func TestForwardingErrorEncodeDecode(t *testing.T) {
 	mockForwardingErr := htlcswitch.NewForwardingError(mockWireMsg, 1)
 
 	// Encode the forwarding error.
-	encodedError, _ := translateErrorForRPC(mockForwardingErr)
+	encodedError, _ := translateErrorForResponse(mockForwardingErr)
 
 	// Decode the forwarding error.
 	decodedError, err := ParseForwardingError(encodedError)

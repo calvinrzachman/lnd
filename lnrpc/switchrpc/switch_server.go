@@ -310,7 +310,7 @@ func (s *Server) SendOnion(_ context.Context,
 
 		// Translate the internal dispatch error into a gRPC status
 		// with rich details for the client.
-		return nil, translateErrorForRPC(dispatchErr)
+		return nil, translateErrorForSendOnion(dispatchErr)
 	}
 
 	// 5. ACKNOWLEDGE: Return success with an empty response.
@@ -534,7 +534,15 @@ func (s *Server) TrackOnion(ctx context.Context,
 		req.AttemptId, hash, errorDecryptor,
 	)
 	if err != nil {
-		return nil, translateErrorForRPC(err)
+		message, code := translateErrorForResponse(err)
+
+		log.Errorf("GetAttemptResult failed for attempt_id=%d of "+
+			" payment=%x: %v", req.AttemptId, hash, message)
+
+		return &TrackOnionResponse{
+			ErrorCode:    code,
+			ErrorMessage: message,
+		}, nil
 	}
 
 	// The switch knows about this payment, we'll wait for a result to be
@@ -548,8 +556,11 @@ func (s *Server) TrackOnion(ctx context.Context,
 	case result, ok = <-resultChan:
 		if !ok {
 			// This channel is closed when the Switch shuts down.
-			err := htlcswitch.ErrSwitchExiting
-			return nil, translateErrorForRPC(err)
+			return &TrackOnionResponse{
+				ErrorCode: ErrorCode_SWITCH_EXITING,
+				ErrorMessage: htlcswitch.ErrSwitchExiting.
+					Error(),
+			}, nil
 		}
 
 	case <-ctx.Done():
@@ -559,19 +570,23 @@ func (s *Server) TrackOnion(ctx context.Context,
 
 	// The attempt result arrived so the HTLC is no longer in-flight.
 	if result.Error != nil {
-		log.Errorf("Payment via onion failed for payment=%v: %v",
-			hash, result.Error)
+		message, code := translateErrorForResponse(result.Error)
 
-		return nil, translateErrorForRPC(result.Error)
+		log.Errorf("Payment via onion failed for payment=%v: %v",
+			hash, message)
+
+		return &TrackOnionResponse{
+			ErrorCode:    code,
+			ErrorMessage: message,
+		}, nil
 	}
 
 	if len(result.EncryptedError) > 0 {
 		log.Errorf("Payment via onion failed for payment=%v", hash)
 
-		// TODO(calvin): This should be a structured error detail.
-		return nil, status.Errorf(codes.Aborted, "payment "+
-			"failed with encrypted error: %x",
-			result.EncryptedError)
+		return &TrackOnionResponse{
+			EncryptedError: result.EncryptedError,
+		}, nil
 	}
 
 	// If we have reached this point, we expect a valid preimage for a
@@ -580,8 +595,10 @@ func (s *Server) TrackOnion(ctx context.Context,
 		log.Errorf("Payment %v completed without a valid preimage or "+
 			"error", hash)
 
-		return nil, status.Errorf(codes.Internal,
-			ErrAmbiguousPaymentState.Error())
+		return &TrackOnionResponse{
+			ErrorCode:    ErrorCode_INTERNAL,
+			ErrorMessage: ErrAmbiguousPaymentState.Error(),
+		}, nil
 	}
 
 	log.Debugf("Received preimage via onion attempt_id=%d for payment=%v",
@@ -735,9 +752,61 @@ func (s *Server) BuildOnion(_ context.Context,
 	}, nil
 }
 
-// translateErrorForRPC converts an error from the underlying HTLC switch to
-// a gRPC status error with rich, fine-grained details.
-func translateErrorForRPC(err error) error {
+// translateErrorForResponse converts an error from the underlying HTLC switch to
+// a message and error code suitable for returning in an RPC response body.
+func translateErrorForResponse(err error) (string, ErrorCode) {
+	var (
+		clearTextErr htlcswitch.ClearTextError
+		fwdErr       *htlcswitch.ForwardingError
+	)
+
+	switch {
+	case errors.Is(err, htlcswitch.ErrPaymentIDNotFound):
+		return err.Error(), ErrorCode_PAYMENT_ID_NOT_FOUND
+
+	case errors.Is(err, htlcswitch.ErrUnreadableFailureMessage):
+		return err.Error(),
+			ErrorCode_UNREADABLE_FAILURE_MESSAGE
+
+	case errors.Is(err, htlcswitch.ErrSwitchExiting):
+		return err.Error(), ErrorCode_SWITCH_EXITING
+
+	case errors.As(err, &clearTextErr):
+		// If this is a forwarding error, we'll handle it specially.
+		if errors.As(err, &fwdErr) {
+			encodedError, encodeErr := encodeForwardingError(fwdErr)
+			if encodeErr != nil {
+				return fmt.Sprintf("failed to encode wire "+
+						"message: %v", encodeErr),
+					ErrorCode_INTERNAL
+			}
+
+			return encodedError,
+				ErrorCode_FORWARDING_ERROR
+		}
+
+		// Otherwise, we'll just encode the clear text error.
+		var buf bytes.Buffer
+		encodeErr := lnwire.EncodeFailure(
+			&buf, clearTextErr.WireMessage(), 0,
+		)
+		if encodeErr != nil {
+			return fmt.Sprintf("failed to encode wire "+
+					"message: %v", encodeErr),
+				ErrorCode_INTERNAL
+		}
+
+		return hex.EncodeToString(buf.Bytes()),
+			ErrorCode_CLEAR_TEXT_ERROR
+
+	default:
+		return err.Error(), ErrorCode_INTERNAL
+	}
+}
+
+// translateErrorForSendOnion converts an error from the underlying HTLC switch
+// to a gRPC status error with rich, fine-grained details.
+func translateErrorForSendOnion(err error) error {
 	var (
 		clearTextErr htlcswitch.ClearTextError
 		fwdErr       *htlcswitch.ForwardingError
