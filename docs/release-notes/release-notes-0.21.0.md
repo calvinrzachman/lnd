@@ -71,6 +71,17 @@
 
 ## RPC Additions
 
+* **switchrpc: Make `SendOnion` RPC Idempotent**
+
+  The `SendOnion` RPC is now fully idempotent, providing a critical reliability
+  improvement for external payment orchestrators (such as a remote
+  `ChannelRouter`). Callers can now safely retry a `SendOnion` request after a
+  network timeout or ambiguous error without risking a duplicate payment. If a
+  request with the same `attempt_id` has already been processed, the RPC will
+  now return a `DUPLICATE_HTLC` error, serving as a definitive acknowledgment
+  that the dispatch was received. This allows clients to build more resilient
+  payment-sending logic.
+
 * [Added support for coordinator-based MuSig2 signing
   patterns](https://github.com/lightningnetwork/lnd/pull/10436) with two new
   RPCs: `MuSig2RegisterCombinedNonce` allows registering a pre-aggregated
