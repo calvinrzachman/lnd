@@ -1,6 +1,7 @@
 package htlcswitch
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"errors"
@@ -3106,7 +3107,7 @@ func TestSwitchGetAttemptResult(t *testing.T) {
 		isResolution: true,
 	}
 
-	err = s.networkResults.storeResult(paymentID, n)
+	err = s.attemptStore.StoreResult(paymentID, n)
 	require.NoError(t, err, "unable to store result")
 
 	// The result should be available.
@@ -5553,4 +5554,359 @@ func testSwitchAliasInterceptFail(t *testing.T, zeroConf bool) {
 	}
 
 	require.NoError(t, interceptSwitch.Stop())
+}
+
+// TestSwitchFailOrphanedAttempt demonstrates that a caller to GetAttemptResult
+// will hang if an attempt is orphaned in a state where it has been initialized
+// but not actually dispatched. We then verify that a this scenario is resolved
+// via FailPendingAttempt storing a final failed result, thereby unblocking the
+// GetAttemptResult subscriber.
+func TestSwitchFailOrphanedAttempt(t *testing.T) {
+	t.Parallel()
+
+	s, err := initSwitchWithTempDB(t, 0)
+	require.NoError(t, err)
+	require.NoError(t, s.Start())
+	t.Cleanup(func() { require.NoError(t, s.Stop()) })
+
+	// Manually initialize an attempt in the store. This simulates the "bad"
+	// state where an attempt is pending but has no corresponding circuit.
+	attemptID := uint64(1)
+	err = s.attemptStore.InitAttempt(attemptID)
+	require.NoError(t, err, "unable to initialize attempt")
+
+	// Now, call GetAttemptResult. This function returns a channel that will
+	// deliver the result.
+	resChan, err := s.GetAttemptResult(
+		attemptID, lntypes.Hash{}, nil,
+	)
+	require.NoError(t, err)
+
+	// We expect the call to hang. We'll use a timeout to verify that no
+	// result is received from the channel.
+	select {
+	case <-resChan:
+		t.Fatalf("received result unexpectedly, should have hung")
+	case <-time.After(100 * time.Millisecond):
+		// This is the expected path, the call has "hung" for 100ms.
+	}
+
+	// Now, simulate the fix by manually calling FailPendingAttempt.
+	err = s.attemptStore.FailPendingAttempt(attemptID, NewLinkError(
+		&lnwire.FailTemporaryNodeFailure{}),
+	)
+	require.NoError(t, err, "unable to fail attempt")
+
+	// The channel should now un-block and deliver the final failed
+	// result.
+	select {
+	case result := <-resChan:
+		// We expect a result with an error, indicating failure.
+		require.Error(t, result.Error, "expected a failed result")
+	case <-time.After(1 * time.Second):
+		t.Fatalf("did not receive result after manual failure")
+	}
+}
+
+// TestSwitchOrphanCleanup tests that the switch's startup procedure will
+// correctly identify and clean up any orphaned attempts. This includes both
+// simple pending orphans (from a crash after InitAttempt) and "half-open"
+// circuit orphans (from a crash after CommitCircuits).
+func TestSwitchOrphanCleanup(t *testing.T) {
+	t.Parallel()
+
+	const attemptID = uint64(1)
+
+	testCases := []struct {
+		name        string
+		setupOrphan func(t *testing.T, s *Switch, cdb *channeldb.DB)
+	}{
+		{
+			name: "pre-commit orphan",
+			setupOrphan: func(t *testing.T, s *Switch,
+				_ *channeldb.DB) {
+
+				// Manually initialize an attempt to simulate
+				// the state of the database if the node crashed
+				// after InitAttempt but before CommitCircuits.
+				err := s.attemptStore.InitAttempt(attemptID)
+				require.NoError(t, err, "unable to init")
+			},
+		},
+		{
+			name: "half-open circuit orphan",
+			setupOrphan: func(t *testing.T, s *Switch,
+				_ *channeldb.DB) {
+
+				// Manually initialize an attempt and commit a
+				// circuit to simulate the state of the database
+				// if the node crashed after CommitCircuits but
+				// before the packet was handed off to the link.
+				err := s.attemptStore.InitAttempt(attemptID)
+				require.NoError(t, err, "unable to init")
+
+				htlc := &lnwire.UpdateAddHTLC{
+					PaymentHash: lntypes.Hash{0x01},
+				}
+
+				// We'll create a dummy outgoing channel ID to
+				// attach to the circuit. The existence of an
+				// outgoingChanID is what makes this a
+				// "half-open" orphan, as the switch knows it
+				// was intended to be forwarded somewhere.
+				const outgoingChanID = 123
+				packet := &htlcPacket{
+					incomingChanID: hop.Source,
+					incomingHTLCID: attemptID,
+					outgoingChanID: lnwire.
+						NewShortChanIDFromInt(
+							outgoingChanID,
+						),
+					htlc:   htlc,
+					amount: htlc.Amount,
+				}
+
+				circuit := newPaymentCircuit(
+					&htlc.PaymentHash, packet,
+				)
+				_, err = s.circuits.CommitCircuits(circuit)
+				require.NoError(t, err, "commit failed")
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Create a temporary database path that will persist
+			// across restarts.
+			tempPath := t.TempDir()
+
+			// First, we'll create a database and a switch
+			// instance.
+			cdb1 := channeldb.OpenForTesting(t, tempPath)
+			s1, err := initSwitchWithDB(0, cdb1)
+			require.NoError(t, err)
+			require.NoError(t, s1.Start())
+
+			// Call the specific setup function for this test case
+			// to create the desired orphan state.
+			tc.setupOrphan(t, s1, cdb1)
+
+			// We must stop the switch and close its database to
+			// ensure the state is flushed to disk at tempPath.
+			require.NoError(t, s1.Stop())
+			require.NoError(t, cdb1.Close())
+
+			// Now, we'll create a new database instance from the
+			// same path and a new switch. This simulates a node
+			// restart.
+			cdb2 := channeldb.OpenForTesting(t, tempPath)
+			t.Cleanup(func() { cdb2.Close() })
+
+			s2, err := initSwitchWithDB(0, cdb2)
+			require.NoError(t, err)
+			require.NoError(t, s2.Start())
+			t.Cleanup(func() { require.NoError(t, s2.Stop()) })
+
+			// After startup, we query the store for our orphaned
+			// attempt ID. We expect to find a final FAILED
+			// result, as the janitor should have cleaned it up.
+			result, err := s2.attemptStore.GetResult(attemptID)
+			require.NoError(t, err, "expected final result")
+			require.NotNil(t, result, "result should not be nil")
+
+			// The result should be a failure message.
+			failMsg, ok := result.msg.(*lnwire.UpdateFailHTLC)
+			require.True(t, ok, "expected fail message")
+
+			// The cleanup routine uses a generic failure reason.
+			require.True(t, result.unencrypted, "unencrypted")
+			reason, err := lnwire.DecodeFailure(
+				bytes.NewReader(failMsg.Reason), 0,
+			)
+			require.NoError(t, err, "unable to decode failure")
+
+			// We expect a FailTemporaryNodeFailure.
+			_, ok = reason.(*lnwire.FailTemporaryNodeFailure)
+			require.True(t, ok, "expected temp node failure")
+		})
+	}
+}
+
+// TestExtractResult is a unit test for the extractResult function. It verifies
+// that the function correctly processes network results under various
+// conditions.
+func TestExtractResult(t *testing.T) {
+	t.Parallel()
+
+	// Define mock data to be used across test cases.
+	preimage := lntypes.Preimage{1}
+	hash := preimage.Hash()
+	attemptID := uint64(42)
+	encryptedReason := []byte("encrypted reason")
+
+	// Create a mock deobfuscator that will successfully "decrypt" the
+	// reason.
+	decryptedFailure := NewLinkError(
+		lnwire.NewTemporaryChannelFailure(nil),
+	)
+	mockDeobfuscator := &mockErrorDecryptor{
+		result: &ForwardingError{
+			msg: decryptedFailure.WireMessage(),
+		},
+	}
+
+	// Create a mock unencrypted failure message.
+	var unencryptedReasonBytes bytes.Buffer
+	unencryptedFailure := lnwire.NewTemporaryChannelFailure(nil)
+	err := lnwire.EncodeFailure(&unencryptedReasonBytes,
+		unencryptedFailure, 0,
+	)
+	require.NoError(t, err)
+
+	//nolint:ll
+	tests := []struct {
+		name           string
+		deobfuscator   ErrorDecrypter
+		networkResult  *networkResult
+		expectedResult *PaymentResult
+		expectedErr    bool
+	}{
+		//  1. A successful payment (UpdateFulfillHTLC) correctly
+		//     returns the preimage.
+		{
+			name:         "success with preimage",
+			deobfuscator: nil,
+			networkResult: &networkResult{
+				msg: &lnwire.UpdateFulfillHTLC{
+					PaymentPreimage: preimage,
+				},
+			},
+			expectedResult: &PaymentResult{
+				Preimage: preimage,
+			},
+		},
+		//  2. A failed payment (UpdateFailHTLC) with no deobfuscator
+		//     correctly returns the opaque, encrypted error reason.
+		{
+			name:         "fail with no deobfuscator",
+			deobfuscator: nil,
+			networkResult: &networkResult{
+				msg: &lnwire.UpdateFailHTLC{
+					Reason: encryptedReason,
+				},
+			},
+			expectedResult: &PaymentResult{
+				EncryptedError: encryptedReason,
+			},
+		},
+		//  3. A failed payment with a deobfuscator correctly decrypts
+		//     and returns the underlying failure message.
+		{
+			name:         "fail with deobfuscator",
+			deobfuscator: mockDeobfuscator,
+			networkResult: &networkResult{
+				msg: &lnwire.UpdateFailHTLC{
+					Reason: encryptedReason,
+				},
+			},
+			expectedResult: &PaymentResult{
+				Error: NewForwardingError(
+					decryptedFailure.WireMessage(), 0,
+				),
+			},
+		},
+		//  4. An unencrypted, local failure is correctly decoded and
+		//     returned.
+		{
+			name:         "unencrypted local failure",
+			deobfuscator: nil,
+			networkResult: &networkResult{
+				msg: &lnwire.UpdateFailHTLC{
+					Reason: unencryptedReasonBytes.Bytes(),
+				},
+				unencrypted: true,
+			},
+			expectedResult: &PaymentResult{
+				Error: NewLinkError(unencryptedFailure),
+			},
+		},
+		//  5. An unencrypted, local failure is correctly decoded and
+		//     returned.
+		{
+			name:         "unencrypted local failure no reason",
+			deobfuscator: nil,
+			networkResult: &networkResult{
+				msg: &lnwire.UpdateFailHTLC{
+					Reason: []byte{},
+				},
+				unencrypted: true,
+			},
+			expectedResult: &PaymentResult{
+				Error: &LinkError{
+					msg:           unencryptedFailure,
+					FailureDetail: OutgoingFailureDecodeError,
+				},
+			},
+		},
+		//  6. An on-chain resolution failure is correctly identified
+		//     and returned.
+		{
+			name:         "on-chain resolution failure",
+			deobfuscator: nil,
+			networkResult: &networkResult{
+				msg: &lnwire.UpdateFailHTLC{
+					Reason: nil,
+				},
+				isResolution: true,
+			},
+			expectedResult: &PaymentResult{
+				Error: NewDetailedLinkError(
+					&lnwire.FailPermanentChannelFailure{},
+					OutgoingFailureOnChainTimeout,
+				),
+			},
+		},
+		//  7. An unknown message type results in an error.
+		{
+			name:          "unknown message type",
+			deobfuscator:  nil,
+			networkResult: &networkResult{msg: &lnwire.UpdateAddHTLC{}},
+			expectedErr:   true,
+		},
+	}
+
+	// Initialize a bare-bones switch. It's only needed for context,
+	// the functions under test have no side effects on it.
+	s, err := initSwitchWithTempDB(t, testStartingHeight)
+	require.NoError(t, err)
+	err = s.Start()
+	require.NoError(t, err)
+	defer func() {
+		err := s.Stop()
+		require.NoError(t, err)
+	}()
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result, err := s.extractResult(
+				tt.deobfuscator, tt.networkResult,
+				attemptID, hash,
+			)
+
+			if tt.expectedErr {
+				require.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, tt.expectedResult, result)
+		})
+	}
 }
