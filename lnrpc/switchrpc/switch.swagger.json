@@ -366,17 +366,15 @@
       "type": "string",
       "enum": [
         "UNSPECIFIED",
-        "PAYMENT_ID_NOT_FOUND",
-        "FORWARDING_ERROR",
-        "CLEAR_TEXT_ERROR",
-        "UNREADABLE_FAILURE_MESSAGE",
         "DUPLICATE_HTLC",
         "NO_LINK",
         "SWITCH_EXITING",
+        "AMBIGUOUS_STATE",
+        "UNREADABLE_FAILURE_MESSAGE",
         "INTERNAL"
       ],
       "default": "UNSPECIFIED",
-      "description": " - UNSPECIFIED: Default value for unset errors.\n - PAYMENT_ID_NOT_FOUND: Payment ID was not found.\n - FORWARDING_ERROR: Error occurred during forwarding.\n - CLEAR_TEXT_ERROR: Clear text error.\n - UNREADABLE_FAILURE_MESSAGE: Failure message could not be read.\n - DUPLICATE_HTLC: An HTLC with same ID is already in flight.\n - NO_LINK: No link available for payment.\n - SWITCH_EXITING: HTLC switch is exiting.\n - INTERNAL: Opaque internal server error."
+      "description": " - UNSPECIFIED: Default value for unset errors.\n - DUPLICATE_HTLC: An HTLC with the same ID has already been processed. For SendOnion,\nthis is not a terminal error; it confirms the dispatch and the client\ncan safely proceed to tracking.\n - NO_LINK: The outgoing channel link for a SendOnion attempt was not found or was\nnot in a state to forward the payment.\n - SWITCH_EXITING: The server is in the process of shutting down. This is a transient\nerror; the client should retry after a delay.\n - AMBIGUOUS_STATE: The server encountered a failure during the durable write of an\nidempotency anchor (InitAttempt). The state of the HTLC is unknown.\nThe client MUST retry the request to resolve the ambiguity.\n - UNREADABLE_FAILURE_MESSAGE: The failure message from a remote peer could not be decrypted. The\nclient must use the encrypted_error_data to decrypt it themselves.\n - INTERNAL: A generic, internal server error occurred."
     },
     "switchrpcFailureDetails": {
       "type": "object",
@@ -481,20 +479,7 @@
     },
     "switchrpcSendOnionResponse": {
       "type": "object",
-      "properties": {
-        "success": {
-          "type": "boolean",
-          "description": "Indicates if the onion was successfully sent or not.\nEquivalent to `error_code == ERROR_CODE_UNSPECIFIED`."
-        },
-        "error_message": {
-          "type": "string",
-          "description": "In case of failure, this field will provide more information about the\nerror."
-        },
-        "error_code": {
-          "$ref": "#/definitions/switchrpcErrorCode",
-          "description": "A code representing the type of error that occurred. This can be used\nto programmatically distinguish between different kinds of errors."
-        }
-      }
+      "description": "SendOnionResponse is an empty message. A gRPC OK status indicates successful\ndispatch. Failures are communicated via the gRPC status error's details,\nwhich will contain a SendOnionFailureDetails message."
     },
     "switchrpcTrackOnionRequest": {
       "type": "object",
