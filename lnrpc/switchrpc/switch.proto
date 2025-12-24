@@ -80,18 +80,25 @@ message SendOnionRequest {
     optional bytes extra_data = 10;
 }
 
+// SendOnionResponse is an empty message. A gRPC OK status indicates successful
+// dispatch. Failures are communicated via the gRPC status error's details,
+// which will contain a SendOnionFailureDetails message.
 message SendOnionResponse {
-    // Indicates if the onion was successfully sent or not.
-    // Equivalent to `error_code == ERROR_CODE_UNSPECIFIED`.
-    bool success = 1;
+}
 
-    // In case of failure, this field will provide more information about the
-    // error.
+// SendOnionFailureDetails provides structured details for a synchronous
+// dispatch failure. It is attached to a non-OK gRPC status.
+message SendOnionFailureDetails {
+    // A stable, machine-readable code for the dispatch failure.
+    ErrorCode error_code = 1;
+
+    // A human-readable message for logging and debugging.
     string error_message = 2;
 
-    // A code representing the type of error that occurred. This can be used
-    // to programmatically distinguish between different kinds of errors.
-    ErrorCode error_code = 3;
+    // The specific details of a definitive, local failure. This will be
+    // populated if the error_code is CLEAR_TEXT_ERROR. This corresponds to
+    // an htlcswitch.ClearTextError.
+    ClearTextFailure clear_text_failure = 3;
 }
 
 enum ErrorCode {
@@ -101,44 +108,41 @@ enum ErrorCode {
     UNSPECIFIED = 0;
 
     /*
-    Payment ID was not found.
+    An HTLC with the same ID has already been processed. For SendOnion,
+    this is not a terminal error; it confirms the dispatch and the client
+    can safely proceed to tracking.
     */
-    PAYMENT_ID_NOT_FOUND = 1;
+    DUPLICATE_HTLC = 1;
 
     /*
-    Error occurred during forwarding.
+    The outgoing channel link for a SendOnion attempt was not found or was
+    not in a state to forward the payment.
     */
-    FORWARDING_ERROR = 2;
+    NO_LINK = 2;
 
     /*
-    Clear text error.
+    The server is in the process of shutting down. This is a transient
+    error; the client should retry after a delay.
     */
-    CLEAR_TEXT_ERROR = 3;
+    SWITCH_EXITING = 3;
 
     /*
-    Failure message could not be read.
+    The server encountered a failure during the durable write of an
+    idempotency anchor (InitAttempt). The state of the HTLC is unknown.
+    The client MUST retry the request to resolve the ambiguity.
     */
-    UNREADABLE_FAILURE_MESSAGE = 4;
+    AMBIGUOUS_STATE = 4;
 
     /*
-    An HTLC with same ID is already in flight.
+    The failure message from a remote peer could not be decrypted. The
+    client must use the encrypted_error_data to decrypt it themselves.
     */
-    DUPLICATE_HTLC = 5;
+    UNREADABLE_FAILURE_MESSAGE = 5;
 
     /*
-    No link available for payment.
+    A generic, internal server error occurred.
     */
-    NO_LINK = 6;
-
-    /*
-    HTLC switch is exiting.
-    */
-    SWITCH_EXITING = 7;
-
-    /*
-    Opaque internal server error.
-    */
-    INTERNAL = 8;
+    INTERNAL = 6;
 }
 
 message TrackOnionRequest {
