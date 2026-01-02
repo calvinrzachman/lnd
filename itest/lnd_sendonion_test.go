@@ -102,13 +102,18 @@ func testSendOnion(ht *lntest.HarnessTest) {
 	ht.AssertInvoiceSettled(dave, invoices[0].PaymentAddr)
 }
 
-// testSendOnionTwice tests that the switch correctly rejects a duplicate
-// payment attempt for an HTLC that is already in-flight. It sends an onion,
-// then immediately sends the exact same onion with the same attempt ID. The
-// test asserts that the second attempt is rejected with a DUPLICATE_HTLC
-// error. It also verifies that sending again after the original HTLC has
-// settled is also rejected.
-func testSendOnionTwice(ht *lntest.HarnessTest) {
+// testSendOnionIdempotencyLifecycle verifies the full lifecycle of SendOnion's
+// idempotency guarantees. It tests that the switch correctly rejects duplicate
+// payment attempts across various states:
+//  1. While the original HTLC is still in-flight.
+//  2. After the original HTLC has definitively settled.
+//  3. After the attempt record has been explicitly preserved via CleanStore.
+//  4. After the attempt record has been explicitly deleted via CleanStore,
+//     proving the idempotency key can be reused.
+//
+// This test ensures the SendOnion RPC provides a stable and trustworthy
+// contract for clients managing payment attempts.
+func testSendOnionIdempotencyLifecycle(ht *lntest.HarnessTest) {
 	// Create a four-node context consisting of Alice, Bob, Carol, and
 	// Dave with the following topology:
 	//     Alice -> Bob -> Carol -> Dave
@@ -207,11 +212,37 @@ func testSendOnionTwice(ht *lntest.HarnessTest) {
 	// Now that the original HTLC attempt has settled, we'll send the same
 	// onion again with the same attempt ID. This should also fail.
 	err = alice.RPC.SendOnion(sendReq)
-	require.Error(ht, err, "expected failure on onion send")
 
 	s, ok = status.FromError(err)
 	require.True(ht, ok, "expected gRPC status error")
 	require.Equal(ht, codes.AlreadyExists, s.Code(), "unexpected error code")
+
+	// Now we'll test the CleanStore RPC. First, we'll call it with the
+	// attempt ID in the keep list.
+	cleanReq := &switchrpc.CleanStoreRequest{
+		KeepAttemptIds: []uint64{sendReq.AttemptId},
+	}
+	alice.RPC.CleanStore(cleanReq)
+
+	// Since we specified that the ID should be kept, calling SendOnion
+	// again should still result in a duplicate error.
+	err = alice.RPC.SendOnion(sendReq)
+
+	s, ok = status.FromError(err)
+	require.True(ht, ok, "expected gRPC status error")
+	require.Equal(ht, codes.AlreadyExists, s.Code(), "unexpected error code")
+
+	// Now, we'll call CleanStore with an empty keep list, which should
+	// delete our record.
+	cleanReq.KeepAttemptIds = []uint64{}
+	alice.RPC.CleanStore(cleanReq)
+
+	// Finally, we'll send the onion one last time. Since the idempotency
+	// record has been deleted, this should be accepted by the switch. It
+	// will ultimately fail at the final hop since the invoice is already
+	// paid, but the initial dispatch will succeed.
+	err = alice.RPC.SendOnion(sendReq)
+	require.NoError(ht, err, "expected successful onion send")
 }
 
 // testSendOnionConcurrency simulates a client that crashes and attempts to
