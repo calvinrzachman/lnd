@@ -134,6 +134,12 @@ type networkResultStore struct {
 	// its read-then-write sequence from concurrent calls, and it maintains
 	// consistency between the database state and result subscribers.
 	attemptIDMtx *multimutex.Mutex[uint64]
+
+	// storeMtx is a read-write mutex that protects the entire store during
+	// global operations, such as a full cleanup. A read-lock should be
+	// held by all per-attempt operations, while a full write-lock should
+	// be held by CleanStore.
+	storeMtx sync.RWMutex
 }
 
 func newNetworkResultStore(db kvdb.Backend,
@@ -215,6 +221,11 @@ func newNetworkResultStore(db kvdb.Backend,
 // NOTE: This is part of the AttemptStore interface. Subscribed clients do not
 // receive notice of this initialization.
 func (store *networkResultStore) InitAttempt(attemptID uint64) error {
+	// Hold a read lock on the store to prevent this per-attempt operation
+	// from racing with a global CleanStore operation.
+	store.storeMtx.RLock()
+	defer store.storeMtx.RUnlock()
+
 	// We get a mutex for this attempt ID to serialize init, store, and
 	// subscribe operations. This is needed to ensure consistency between
 	// the database state and the subscribers in case of concurrent calls.
@@ -307,6 +318,11 @@ func (store *networkResultStore) InitAttempt(attemptID uint64) error {
 func (store *networkResultStore) StoreResult(attemptID uint64,
 	result *networkResult) error {
 
+	// Hold a read lock on the store to prevent this per-attempt operation
+	// from racing with a global CleanStore operation.
+	store.storeMtx.RLock()
+	defer store.storeMtx.RUnlock()
+
 	// We get a mutex for this attempt ID. This is needed to ensure
 	// consistency between the database state and the subscribers in case
 	// of concurrent calls.
@@ -366,6 +382,11 @@ func (store *networkResultStore) notifySubscribers(attemptID uint64,
 // ID.  It returns a channel on which the result will be delivered when ready.
 func (store *networkResultStore) SubscribeResult(attemptID uint64) (
 	<-chan *networkResult, error) {
+
+	// Hold a read lock on the store to prevent this per-attempt operation
+	// from racing with a global CleanStore operation.
+	store.storeMtx.RLock()
+	defer store.storeMtx.RUnlock()
 
 	// We get a mutex for this payment ID. This is needed to ensure
 	// consistency between the database state and the subscribers in case
@@ -442,6 +463,11 @@ func (store *networkResultStore) SubscribeResult(attemptID uint64) (
 func (store *networkResultStore) GetResult(pid uint64) (
 	*networkResult, error) {
 
+	// Hold a read lock on the store to prevent this per-attempt operation
+	// from racing with a global CleanStore operation.
+	store.storeMtx.RLock()
+	defer store.storeMtx.RUnlock()
+
 	var result *networkResult
 	err := kvdb.View(store.backend, func(tx kvdb.RTx) error {
 		var err error
@@ -495,6 +521,13 @@ func fetchResult(tx kvdb.RTx, pid uint64) (*networkResult, error) {
 // concurrently while this process is ongoing, as its result might end up being
 // deleted.
 func (store *networkResultStore) CleanStore(keep map[uint64]struct{}) error {
+	// Acquire a full write lock on the store. This is a global operation
+	// that needs to be serialized with all other per-attempt operations
+	// to prevent race conditions between the DB state and the in-memory
+	// subscription map.
+	store.storeMtx.Lock()
+	defer store.storeMtx.Unlock()
+
 	return kvdb.Update(store.backend, func(tx kvdb.RwTx) error {
 		networkResults, err := tx.CreateTopLevelBucket(
 			networkResultStoreBucketKey,
@@ -539,6 +572,11 @@ func (store *networkResultStore) CleanStore(keep map[uint64]struct{}) error {
 //
 // NOTE: This function is NOT safe for concurrent access.
 func (store *networkResultStore) FetchPendingAttempts() ([]uint64, error) {
+	// Hold a read lock on the store to prevent this per-attempt operation
+	// from racing with a global CleanStore operation.
+	store.storeMtx.RLock()
+	defer store.storeMtx.RUnlock()
+
 	var pending []uint64
 	err := kvdb.View(store.backend, func(tx kvdb.RTx) error {
 		bucket := tx.ReadBucket(networkResultStoreBucketKey)
@@ -600,6 +638,11 @@ func (store *networkResultStore) FetchPendingAttempts() ([]uint64, error) {
 // recorded via the StoreResult method and should not use FailPendingAttempt.
 func (store *networkResultStore) FailPendingAttempt(attemptID uint64,
 	linkErr *LinkError) error {
+
+	// Hold a read lock on the store to prevent this per-attempt operation
+	// from racing with a global CleanStore operation.
+	store.storeMtx.RLock()
+	defer store.storeMtx.RUnlock()
 
 	// We get a mutex for this attempt ID to ensure consistency between the
 	// database state and the subscribers in case of concurrent calls.
