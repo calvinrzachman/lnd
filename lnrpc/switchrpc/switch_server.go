@@ -1067,6 +1067,45 @@ func UnmarshallSendOnionError(rpcErr error) error {
 	return ErrUnknown
 }
 
+// UnmarshallFailureDetails translates a FailureDetails message from a
+// TrackOnion response into a concrete Go error. It handles all cases of the
+// 'oneof failure' field and falls back to the ErrorCode if needed.
+func UnmarshallFailureDetails(details *FailureDetails,
+	deobfuscator htlcswitch.ErrorDecrypter) (error, error) {
+
+	if details == nil {
+		return nil, errors.New("cannot unmarshall nil FailureDetails")
+	}
+
+	// Use a type switch on the 'oneof failure' field to handle the primary
+	// structured error cases.
+	switch failure := details.Failure.(type) {
+	case *FailureDetails_ForwardingFailure:
+		return UnmarshallForwardingError(failure.ForwardingFailure)
+
+	case *FailureDetails_ClearTextFailure:
+		return UnmarshallLinkError(failure.ClearTextFailure)
+
+	case *FailureDetails_EncryptedErrorData:
+		if deobfuscator == nil {
+			return htlcswitch.ErrUnreadableFailureMessage, nil
+		}
+		// The client provides the decryption key/logic.
+		return deobfuscator.DecryptError(failure.EncryptedErrorData)
+	}
+
+	// If the 'oneof' was not populated, fall back to the error code.
+	switch details.ErrorCode {
+	case ErrorCode_UNREADABLE_FAILURE_MESSAGE:
+		return htlcswitch.ErrUnreadableFailureMessage, nil
+	case ErrorCode_SWITCH_EXITING:
+		return htlcswitch.ErrSwitchExiting, nil
+	}
+
+	// If all else fails, return the generic error message.
+	return errors.New(details.ErrorMessage), nil
+}
+
 // CleanStore deletes all attempt results except those specified in request as
 // to be kept. This allows for remote maintenance of HTLC attempt data in the
 // Switch's underlying attempt store and should be used by routers to
