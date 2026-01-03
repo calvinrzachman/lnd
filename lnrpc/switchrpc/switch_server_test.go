@@ -762,3 +762,52 @@ func TestUnmarshallSendOnionError(t *testing.T) {
 		})
 	}
 }
+
+// TestUnmarshallFailureDetails tests the client helper for unmarshalling a
+// TrackOnion FailureDetails message. This is a round-trip test that ensures the
+// client helper can correctly decode the exact message that the server-side
+// logic produces.
+func TestUnmarshallFailureDetails(t *testing.T) {
+	t.Parallel()
+
+	// Create mock errors to be marshalled.
+	wireMsg := lnwire.NewTemporaryChannelFailure(nil)
+	linkErr := htlcswitch.NewLinkError(wireMsg)
+	fwdErr := htlcswitch.NewForwardingError(wireMsg, 1)
+	exitErr := htlcswitch.ErrSwitchExiting
+
+	testCases := []struct {
+		name        string
+		originalErr error
+	}{
+		{
+			name:        "forwarding failure",
+			originalErr: fwdErr,
+		},
+		{
+			name:        "clear text failure",
+			originalErr: linkErr,
+		},
+		{
+			name:        "switch exiting",
+			originalErr: exitErr,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// 1. Marshalling: Use the server-side helper to
+			// create the FailureDetails message.
+			details := marshallFailureDetails(tc.originalErr)
+
+			// 2. Unmarshalling: Use the client-side helper to
+			// translate it back to a Go error.
+			translatedErr, err := UnmarshallFailureDetails(details, nil)
+			require.NoError(t, err)
+
+			// 3. Assertion: The final error should be of the same
+			// type as the original.
+			require.IsType(t, tc.originalErr, translatedErr)
+		})
+	}
+}
