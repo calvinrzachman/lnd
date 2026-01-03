@@ -1022,6 +1022,9 @@ func UnmarshallSendOnionError(rpcErr error) error {
 		if failure, ok := detail.(*SendOnionFailureDetails); ok {
 			// We found the details. Now translate them into the
 			// appropriate Go error type.
+
+			// First, check for a specific structured error. This is
+			// the most detailed information we can get.
 			if failure.ClearTextFailure != nil {
 				// This is the most common case for a definitive
 				// failure.
@@ -1035,14 +1038,27 @@ func UnmarshallSendOnionError(rpcErr error) error {
 				return linkErr
 			}
 
+			// If no structured error is present, check for a
+			// specific error code.
+			switch failure.ErrorCode {
+			case ErrorCode_DUPLICATE_HTLC:
+				return htlcswitch.ErrDuplicateAdd
+			case ErrorCode_UNREADABLE_FAILURE_MESSAGE:
+				return htlcswitch.ErrUnreadableFailureMessage
+			case ErrorCode_SWITCH_EXITING:
+				return htlcswitch.ErrSwitchExiting
+			}
+
 			// Fallback to the generic error message if no
-			// structured failure is present.
-			return errors.New(failure.ErrorMessage)
+			// structured failure or specific code is present.
+			return fmt.Errorf("%w: %s", ErrUnknown,
+				failure.ErrorMessage)
 		}
 	}
 
-	// No details were found, return the original gRPC status error.
-	return ErrUnknown
+	// No details were found, return the original gRPC status error
+	// wrapped in our sentinel error.
+	return fmt.Errorf("%w: %w", ErrUnknown, rpcErr)
 }
 
 // UnmarshallFailureDetails translates a FailureDetails message from a
