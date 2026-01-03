@@ -715,3 +715,50 @@ func TestBuildErrorDecryptor(t *testing.T) {
 		})
 	}
 }
+
+// TestUnmarshallSendOnionError tests the client helper for unmarshalling a
+// SendOnion error. This is a round-trip test that ensures the client helper can
+// correctly decode the exact error that the server-side
+// logic produces.
+func TestUnmarshallSendOnionError(t *testing.T) {
+	t.Parallel()
+
+	// Create a mock clear text error to be marshalled by the server-side
+	// helper.
+	wireMsg := lnwire.NewTemporaryChannelFailure(nil)
+	linkErr := htlcswitch.NewLinkError(wireMsg)
+
+	// Create a generic internal error.
+	internalErr := errors.New("internal error")
+
+	testCases := []struct {
+		name        string
+		originalErr error
+	}{
+		{
+			name:        "clear text error",
+			originalErr: linkErr,
+		},
+		{
+			name:        "internal error",
+			originalErr: internalErr,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// 1. Marshalling: Use the server-side helper to
+			// create the gRPC status error.
+			rpcErr := marshallSendOnionError(tc.originalErr)
+
+			// 2. Unmarshalling: Use the client-side helper to
+			// translate it back.
+			translatedErr := UnmarshallSendOnionError(rpcErr)
+			require.Error(t, translatedErr)
+
+			// 3. Assertion: The final error should be of the same
+			// type as the original.
+			require.IsType(t, tc.originalErr, translatedErr)
+		})
+	}
+}
