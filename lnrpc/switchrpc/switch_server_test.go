@@ -4,8 +4,10 @@
 package switchrpc
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -143,6 +145,23 @@ func TestSendOnion(t *testing.T) {
 				store.initErr = htlcswitch.ErrPaymentIDAlreadyExists
 			},
 			expectedErrCode: codes.AlreadyExists,
+		},
+		{
+			name: "ambiguous attempt init error",
+			setup: func(t *testing.T, s *Server,
+				req *SendOnionRequest) {
+
+				store, ok := s.cfg.AttemptStore.(*mockAttemptStore)
+				require.True(t, ok)
+				store.initErr = htlcswitch.ErrAmbiguousAttemptInit
+			},
+			expectedErrCode: codes.Unavailable,
+			checkFailureDetails: func(t *testing.T,
+				details *SendOnionFailureDetails) {
+
+				require.Equal(t, ErrorCode_AMBIGUOUS_STATE,
+					details.ErrorCode)
+			},
 		},
 		{
 			name: "clear text error",
@@ -630,6 +649,245 @@ func TestBuildOnion(t *testing.T) {
 	}
 }
 
+// TestMarshallFailureDetails tests the conversion of internal errors types
+// produced by the Switch into the wire/rpc representation.
+func TestMarshallFailureDetails(t *testing.T) {
+	t.Parallel()
+
+	mockWireMsg := lnwire.NewTemporaryChannelFailure(nil)
+	mockLinkErr := htlcswitch.NewLinkError(mockWireMsg)
+	mockFwdErr := htlcswitch.NewForwardingError(mockWireMsg, 1)
+
+	//nolint:ll
+	testCases := []struct {
+		name            string
+		err             error
+		expectedDetails *FailureDetails
+	}{
+		{
+			name: "unreadable",
+			err:  htlcswitch.ErrUnreadableFailureMessage,
+			expectedDetails: &FailureDetails{
+				ErrorCode:    ErrorCode_UNREADABLE_FAILURE_MESSAGE,
+				ErrorMessage: htlcswitch.ErrUnreadableFailureMessage.Error(),
+			},
+		},
+		{
+			name: "switch exiting",
+			err:  htlcswitch.ErrSwitchExiting,
+			expectedDetails: &FailureDetails{
+				ErrorCode:    ErrorCode_SWITCH_EXITING,
+				ErrorMessage: htlcswitch.ErrSwitchExiting.Error(),
+			},
+		},
+		{
+			name: "clear text error",
+			err:  mockLinkErr,
+			expectedDetails: &FailureDetails{
+				ErrorMessage: mockLinkErr.Error(),
+				Failure: &FailureDetails_ClearTextFailure{
+					ClearTextFailure: &ClearTextFailure{},
+				},
+			},
+		},
+		{
+			name: "forwarding error",
+			err:  mockFwdErr,
+			expectedDetails: &FailureDetails{
+				ErrorMessage: mockFwdErr.Error(),
+				Failure: &FailureDetails_ForwardingFailure{
+					ForwardingFailure: &ForwardingFailure{
+						FailureSourceIndex: 1,
+					},
+				},
+			},
+		},
+		{
+			name: "generic internal error",
+			err:  errors.New("unknown internal problem"),
+			expectedDetails: &FailureDetails{
+				ErrorCode:    ErrorCode_INTERNAL,
+				ErrorMessage: "unknown internal problem",
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			details := marshallFailureDetails(tc.err)
+
+			require.Equal(t, tc.expectedDetails.ErrorCode,
+				details.ErrorCode)
+			require.Contains(t, details.ErrorMessage,
+				tc.expectedDetails.ErrorMessage)
+
+			if tc.expectedDetails.Failure == nil {
+				require.Nil(t, details.Failure)
+				return
+			}
+
+			// For clear text and forwarding errors, we expect the
+			// wire message to be encoded correctly.
+			switch failure := details.Failure.(type) {
+			case *FailureDetails_ForwardingFailure:
+				require.NotNil(t, failure.ForwardingFailure)
+				require.Equal(
+					t,
+					tc.expectedDetails.
+						GetForwardingFailure().
+						FailureSourceIndex,
+					failure.ForwardingFailure.
+						FailureSourceIndex,
+				)
+
+				decoded, err := UnmarshallFailureMessage(
+					failure.ForwardingFailure.WireMessage,
+				)
+				require.NoError(t, err)
+				require.Equal(t, mockWireMsg, decoded)
+
+			case *FailureDetails_ClearTextFailure:
+				require.NotNil(t, failure.ClearTextFailure)
+
+				decoded, err := UnmarshallFailureMessage(
+					failure.ClearTextFailure.WireMessage,
+				)
+				require.NoError(t, err)
+				require.Equal(t, mockWireMsg, decoded)
+
+			default:
+				t.Fatalf("unexpected failure type: %T",
+					details.Failure)
+			}
+		})
+	}
+}
+
+// TestUnmarshallFailureDetails tests the client helper for unmarshalling a
+// TrackOnion FailureDetails message. This is a round-trip test that ensures the
+// client helper can correctly decode the exact message that the server-side
+// logic produces.
+func TestUnmarshallFailureDetails(t *testing.T) {
+	t.Parallel()
+
+	// Create mock errors to be marshalled.
+	wireMsg := lnwire.NewTemporaryChannelFailure(nil)
+	linkErr := htlcswitch.NewLinkError(wireMsg)
+	fwdErr := htlcswitch.NewForwardingError(wireMsg, 1)
+	exitErr := htlcswitch.ErrSwitchExiting
+
+	// Create a forwarding error to be returned by the mock decrypter.
+	// Mock error decrypter that always returns a specific error.
+	mockErrorDecrypter := &mockErrorDecrypter{
+		decryptedErr: *fwdErr,
+	}
+
+	testCases := []struct {
+		name        string
+		originalErr error
+	}{
+		{
+			name:        "forwarding failure",
+			originalErr: fwdErr,
+		},
+		{
+			name:        "clear text failure",
+			originalErr: linkErr,
+		},
+		{
+			name:        "switch exiting",
+			originalErr: exitErr,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Use the server-side helper to create the
+			// FailureDetails message.
+			details := marshallFailureDetails(tc.originalErr)
+
+			// Use the client-side helper to translate it back to a
+			// Go error.
+			translatedErr, err := UnmarshallFailureDetails(
+				details, nil,
+			)
+			require.NoError(t, err)
+
+			// Confirm that the final error is of the same type as
+			// the original.
+			require.IsType(t, tc.originalErr, translatedErr)
+		})
+	}
+
+	// Add a test case for nil FailureDetails input.
+	t.Run("nil failure details", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := UnmarshallFailureDetails(nil, nil)
+		require.Error(t, err)
+		require.EqualError(t, err, "cannot unmarshall nil FailureDetails")
+	})
+
+	t.Run("unreadable failure message fallback", func(t *testing.T) {
+		t.Parallel()
+
+		details := &FailureDetails{
+			ErrorCode:    ErrorCode_UNREADABLE_FAILURE_MESSAGE,
+			ErrorMessage: htlcswitch.ErrUnreadableFailureMessage.Error(),
+		}
+
+		translatedErr, err := UnmarshallFailureDetails(details, nil)
+		require.NoError(t, err)
+		require.ErrorIs(t, translatedErr, htlcswitch.ErrUnreadableFailureMessage)
+	})
+
+	t.Run("switch exiting fallback", func(t *testing.T) {
+		t.Parallel()
+
+		details := &FailureDetails{
+			ErrorCode:    ErrorCode_SWITCH_EXITING,
+			ErrorMessage: htlcswitch.ErrSwitchExiting.Error(),
+		}
+
+		translatedErr, err := UnmarshallFailureDetails(details, nil)
+		require.NoError(t, err)
+		require.ErrorIs(t, translatedErr, htlcswitch.ErrSwitchExiting)
+	})
+
+	t.Run("generic error message fallback", func(t *testing.T) {
+		t.Parallel()
+
+		expectedMsg := "some generic error"
+		details := &FailureDetails{
+			ErrorCode:    ErrorCode_INTERNAL,
+			ErrorMessage: expectedMsg,
+		}
+
+		translatedErr, err := UnmarshallFailureDetails(details, nil)
+		require.NoError(t, err)
+		require.EqualError(t, translatedErr, expectedMsg)
+	})
+
+	t.Run("encrypted error with decryptor", func(t *testing.T) {
+		t.Parallel()
+
+		encryptedData := []byte("some encrypted data")
+		details := &FailureDetails{
+			Failure: &FailureDetails_EncryptedErrorData{
+				EncryptedErrorData: encryptedData,
+			},
+		}
+
+		translatedErr, err := UnmarshallFailureDetails(
+			details, mockErrorDecrypter,
+		)
+		require.NoError(t, err)
+		require.Equal(t, fwdErr, translatedErr)
+	})
+}
+
 // TestBuildErrorDecryptor tests the buildErrorDecryptor function.
 func TestBuildErrorDecryptor(t *testing.T) {
 	t.Parallel()
@@ -816,6 +1074,9 @@ func TestUnmarshallSendOnionError(t *testing.T) {
 	linkErr := htlcswitch.NewLinkError(wireMsg)
 	exitErr := htlcswitch.ErrSwitchExiting
 	internalErr := errors.New("internal error")
+	dbFailure := errors.New("db failure")
+	ambiguousInitErr := fmt.Errorf("%w: %s",
+		htlcswitch.ErrAmbiguousAttemptInit, dbFailure)
 
 	testCases := []struct {
 		name        string
@@ -833,6 +1094,21 @@ func TestUnmarshallSendOnionError(t *testing.T) {
 		{
 			name:        "switch exiting",
 			originalErr: exitErr,
+			isSpecific:  true,
+		},
+		{
+			name:        "duplicate htlc",
+			originalErr: htlcswitch.ErrDuplicateAdd,
+			isSpecific:  true,
+		},
+		{
+			name:        "unreadable failure message",
+			originalErr: htlcswitch.ErrUnreadableFailureMessage,
+			isSpecific:  true,
+		},
+		{
+			name:        "failed attempt initialization",
+			originalErr: ambiguousInitErr,
 			isSpecific:  true,
 		},
 		{
@@ -857,6 +1133,13 @@ func TestUnmarshallSendOnionError(t *testing.T) {
 			// error, we either expect a specific Go error type
 			// back, or a generic error that wraps our sentinel.
 			if tc.isSpecific {
+				if errors.Is(tc.originalErr, htlcswitch.ErrAmbiguousAttemptInit) {
+					// For the ambiguous error, we assert that the translated error
+					// is the htlcswitch.ErrAmbiguousAttemptInit sentinel.
+					require.ErrorIs(t, translatedErr, htlcswitch.ErrAmbiguousAttemptInit)
+					return
+				}
+
 				require.Equal(t, tc.originalErr, translatedErr)
 			} else {
 				require.ErrorIs(t, translatedErr, ErrUnknown)
@@ -867,51 +1150,110 @@ func TestUnmarshallSendOnionError(t *testing.T) {
 	}
 }
 
-// TestUnmarshallFailureDetails tests the client helper for unmarshalling a
-// TrackOnion FailureDetails message. This is a round-trip test that ensures the
-// client helper can correctly decode the exact message that the server-side
-// logic produces.
-func TestUnmarshallFailureDetails(t *testing.T) {
+// TestGetSendOnionFailureDetails verifies the behavior of the
+// GetSendOnionFailureDetails helper.
+func TestGetSendOnionFailureDetails(t *testing.T) {
 	t.Parallel()
 
-	// Create mock errors to be marshalled.
+	// Create a mock SendOnionFailureDetails struct.
+	mockDetails := &SendOnionFailureDetails{
+		ErrorCode:    ErrorCode_INTERNAL,
+		ErrorMessage: "mock error message",
+	}
+
+	// Create a gRPC status error with the mock details.
+	gRPCErrorWithDetails, err := status.New(
+		codes.FailedPrecondition, "test error",
+	).WithDetails(mockDetails)
+	require.NoError(t, err)
+
+	// Create a mock wire message and encode it.
 	wireMsg := lnwire.NewTemporaryChannelFailure(nil)
-	linkErr := htlcswitch.NewLinkError(wireMsg)
-	fwdErr := htlcswitch.NewForwardingError(wireMsg, 1)
-	exitErr := htlcswitch.ErrSwitchExiting
+	var buf bytes.Buffer
+	err = lnwire.EncodeFailure(&buf, wireMsg, 0)
+	require.NoError(t, err)
+
+	// Create details with a ClearTextFailure for a table test case.
+	mockDetailsWithClearText := &SendOnionFailureDetails{
+		ErrorCode: ErrorCode_CLEAR_TEXT_ERROR,
+		ClearTextFailure: &ClearTextFailure{
+			WireMessage: buf.Bytes(),
+		},
+	}
+
+	// Create a gRPC error with ClearTextFailure details.
+	gRPCErrorWithClearTextDetails, err := status.New(
+		codes.FailedPrecondition, "clear text",
+	).WithDetails(mockDetailsWithClearText)
+	require.NoError(t, err)
+
+	// Create a gRPC status error without any details.
+	gRPCErrorWithoutDetails := status.Error(codes.Internal,
+		"generic gRPC error")
+
+	// Create a non-gRPC error.
+	nonGrpcError := errors.New("plain old error")
 
 	testCases := []struct {
-		name        string
-		originalErr error
+		name            string
+		err             error
+		expectedDetails *SendOnionFailureDetails
 	}{
 		{
-			name:        "forwarding failure",
-			originalErr: fwdErr,
+			name:            "gRPC error with details",
+			err:             gRPCErrorWithDetails.Err(),
+			expectedDetails: mockDetails,
 		},
 		{
-			name:        "clear text failure",
-			originalErr: linkErr,
+			name:            "gRPC error with clear text details",
+			err:             gRPCErrorWithClearTextDetails.Err(),
+			expectedDetails: mockDetailsWithClearText,
 		},
 		{
-			name:        "switch exiting",
-			originalErr: exitErr,
+			name:            "gRPC error without details",
+			err:             gRPCErrorWithoutDetails,
+			expectedDetails: nil,
+		},
+		{
+			name:            "non-gRPC error",
+			err:             nonGrpcError,
+			expectedDetails: nil,
+		},
+		{
+			name:            "nil error",
+			err:             nil,
+			expectedDetails: nil,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// 1. Marshalling: Use the server-side helper to
-			// create the FailureDetails message.
-			details := marshallFailureDetails(tc.originalErr)
+			result := GetSendOnionFailureDetails(tc.err)
 
-			// 2. Unmarshalling: Use the client-side helper to
-			// translate it back to a Go error.
-			translatedErr, err := UnmarshallFailureDetails(details, nil)
-			require.NoError(t, err)
+			// Confirm now details were provided if none were
+			// expected.
+			if tc.expectedDetails == nil {
+				require.Nil(t, result)
 
-			// 3. Assertion: The final error should be of the same
-			// type as the original.
-			require.IsType(t, tc.originalErr, translatedErr)
+				return
+			}
+
+			// Otherwise, confirm that the failure details are
+			// as expected.
+			require.NotNil(t, result)
+			require.Equal(t, tc.expectedDetails.ErrorCode,
+				result.ErrorCode)
+			require.Equal(t, tc.expectedDetails.ErrorMessage,
+				result.ErrorMessage)
+
+			if tc.expectedDetails.GetClearTextFailure() != nil {
+				require.NotNil(t, result.ClearTextFailure)
+				require.Equal(t, tc.expectedDetails.
+					ClearTextFailure.WireMessage,
+					result.ClearTextFailure.WireMessage)
+			} else {
+				require.Nil(t, result.ClearTextFailure)
+			}
 		})
 	}
 }
