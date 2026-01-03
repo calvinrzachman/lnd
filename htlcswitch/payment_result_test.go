@@ -311,7 +311,8 @@ func TestNetworkResultStoreFailAndFetch(t *testing.T) {
 	t.Parallel()
 
 	db := channeldb.OpenForTesting(t, t.TempDir())
-	store := newNetworkResultStore(db)
+	store, err := newNetworkResultStore(db, false)
+	require.NoError(t, err)
 
 	// Test FetchPendingAttempts on an empty store.
 	pending, err := store.FetchPendingAttempts()
