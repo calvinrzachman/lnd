@@ -4,9 +4,7 @@
 package switchrpc
 
 import (
-	"bytes"
 	"context"
-	"encoding/hex"
 	"errors"
 	"testing"
 
@@ -17,8 +15,8 @@ import (
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/routing/route"
 	"github.com/stretchr/testify/require"
-	codes "google.golang.org/grpc/codes"
-	status "google.golang.org/grpc/status"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // TestSendOnion is a unit test that rigorously verifies the behavior of the
@@ -45,7 +43,6 @@ func TestSendOnion(t *testing.T) {
 		}
 	}
 
-	//nolint:ll
 	testCases := []struct {
 		name string
 
@@ -57,8 +54,9 @@ func TestSendOnion(t *testing.T) {
 		// call.
 		expectedErrCode codes.Code
 
-		// expectedResponse is the expected response from the RPC call.
-		expectedResponse *SendOnionResponse
+		// checkFailureDetails is a function that asserts the contents
+		// of the SendOnionFailureDetails message.
+		checkFailureDetails func(*testing.T, *SendOnionFailureDetails)
 	}{
 		{
 			name: "valid request",
@@ -70,7 +68,7 @@ func TestSendOnion(t *testing.T) {
 				require.True(t, ok)
 				payer.sendErr = nil
 			},
-			expectedResponse: &SendOnionResponse{Success: true},
+			expectedErrCode: codes.OK,
 		},
 		{
 			name: "missing onion blob",
@@ -118,21 +116,23 @@ func TestSendOnion(t *testing.T) {
 				require.True(t, ok)
 				payer.sendErr = errors.New("internal error")
 			},
-			expectedResponse: &SendOnionResponse{
-				Success:      false,
-				ErrorMessage: "internal error",
-				ErrorCode:    ErrorCode_INTERNAL,
+			expectedErrCode: codes.Internal,
+			checkFailureDetails: func(t *testing.T,
+				details *SendOnionFailureDetails) {
+
+				require.Equal(t, ErrorCode_INTERNAL,
+					details.ErrorCode)
+
+				require.Contains(t, details.ErrorMessage,
+					"internal error")
 			},
 		},
 		{
-			// The ErrDuplicateAdd error is the means by which an
-			// rpc client is safe to retry the SendOnion rpc until
-			// an explicit acknowledgement of htlc dispatch can be
-			// received from the server. The ability to retry and
-			// rely on duplicate prevention is useful under
-			// scenarios where the status of htlc dispatch is
-			// uncertain (eg: network timeout or after restart).
-			name: "dispatcher duplicate htlc error",
+			// The ErrPaymentIDAlreadyExists error is the means by
+			// which an rpc client is safe to retry the SendOnion
+			// RPC until an explicit acknowledgement of HTLC
+			// dispatch can be received from the server.
+			name: "idempotency anchor fails",
 			setup: func(t *testing.T, s *Server,
 				req *SendOnionRequest) {
 
@@ -142,10 +142,34 @@ func TestSendOnion(t *testing.T) {
 				require.True(t, ok)
 				store.initErr = htlcswitch.ErrPaymentIDAlreadyExists
 			},
-			expectedResponse: &SendOnionResponse{
-				Success:      false,
-				ErrorMessage: htlcswitch.ErrDuplicateAdd.Error(),
-				ErrorCode:    ErrorCode_DUPLICATE_HTLC,
+			expectedErrCode: codes.AlreadyExists,
+		},
+		{
+			name: "clear text error",
+			setup: func(t *testing.T, s *Server,
+				req *SendOnionRequest) {
+
+				wireMsg := lnwire.NewTemporaryChannelFailure(nil)
+				linkErr := htlcswitch.NewLinkError(wireMsg)
+
+				payer, ok := s.cfg.HtlcDispatcher.(*mockPayer)
+				require.True(t, ok)
+				payer.sendErr = linkErr
+			},
+			expectedErrCode: codes.FailedPrecondition,
+			checkFailureDetails: func(t *testing.T,
+				details *SendOnionFailureDetails) {
+
+				require.Equal(t, ErrorCode_UNSPECIFIED,
+					details.ErrorCode)
+
+				failure := details.GetClearTextFailure()
+				require.NotNil(t, failure)
+
+				_, err := UnmarshallFailureMessage(
+					failure.WireMessage,
+				)
+				require.NoError(t, err)
 			},
 		},
 	}
@@ -171,9 +195,19 @@ func TestSendOnion(t *testing.T) {
 
 			resp, err := server.SendOnion(t.Context(), req)
 
-			// Check for gRPC level errors.
-			if tc.expectedErrCode != codes.OK {
-				require.Error(t, err)
+			// If we expected OK, assert a nil error and non-nil
+			// response.
+			if tc.expectedErrCode == codes.OK {
+				require.NoError(t, err)
+				require.NotNil(t, resp)
+				return
+			}
+
+			// Otherwise, we expect a gRPC status error.
+			require.Error(t, err)
+
+			// If we don't need to check details, we're done.
+			if tc.checkFailureDetails == nil {
 				s, ok := status.FromError(err)
 				require.True(t, ok)
 				require.Equal(t, tc.expectedErrCode, s.Code())
@@ -181,11 +215,34 @@ func TestSendOnion(t *testing.T) {
 				return
 			}
 
-			// If no gRPC error was expected, check the response.
-			require.NoError(t, err)
-			require.Equal(t, tc.expectedResponse, resp)
+			// Otherwise confirm the failure details are as
+			// expected.
+			details := requireSendOnionFailureDetails(
+				t, err, tc.expectedErrCode,
+			)
+			tc.checkFailureDetails(t, details)
 		})
 	}
+}
+
+// requireSendOnionFailureDetails is a test helper that asserts a SendOnion call
+// failed with a specific gRPC status code and extracts the embedded
+// SendOnionFailureDetails message.
+func requireSendOnionFailureDetails(t *testing.T, err error,
+	expectedRPCCode codes.Code) *SendOnionFailureDetails {
+
+	s, ok := status.FromError(err)
+	require.True(t, ok, "expected gRPC status error")
+	require.Equal(t, expectedRPCCode, s.Code(),
+		"unexpected gRPC status code")
+
+	details := s.Details()
+	require.Len(t, details, 1, "expected one failure detail")
+
+	failureDetails, ok := details[0].(*SendOnionFailureDetails)
+	require.True(t, ok, "expected SendOnionFailureDetails")
+
+	return failureDetails
 }
 
 // TestTrackOnion is a unit test that rigorously verifies the behavior of the
@@ -568,173 +625,6 @@ func TestBuildOnion(t *testing.T) {
 			require.NoError(t, err)
 			if tc.checkResponse != nil {
 				tc.checkResponse(t, resp)
-			}
-		})
-	}
-}
-
-// TestTranslateErrorForRPC tests the TranslateErrorForRPC function.
-func TestTranslateErrorForRPC(t *testing.T) {
-	t.Parallel()
-
-	mockWireMsg := lnwire.NewTemporaryChannelFailure(nil)
-	mockClearTextErr := htlcswitch.NewLinkError(mockWireMsg)
-
-	var buf bytes.Buffer
-	err := lnwire.EncodeFailure(&buf, mockWireMsg, 0)
-	require.NoError(t, err)
-
-	encodedMsg := hex.EncodeToString(buf.Bytes())
-
-	//nolint:ll
-	tests := []struct {
-		name         string
-		err          error
-		expectedMsg  string
-		expectedCode ErrorCode
-	}{
-		{
-			name:         "ErrPaymentIDNotFound",
-			err:          htlcswitch.ErrPaymentIDNotFound,
-			expectedMsg:  htlcswitch.ErrPaymentIDNotFound.Error(),
-			expectedCode: ErrorCode_PAYMENT_ID_NOT_FOUND,
-		},
-		{
-			name:         "ErrUnreadableFailureMessage",
-			err:          htlcswitch.ErrUnreadableFailureMessage,
-			expectedMsg:  htlcswitch.ErrUnreadableFailureMessage.Error(),
-			expectedCode: ErrorCode_UNREADABLE_FAILURE_MESSAGE,
-		},
-		{
-			name:         "ErrSwitchExiting",
-			err:          htlcswitch.ErrSwitchExiting,
-			expectedMsg:  htlcswitch.ErrSwitchExiting.Error(),
-			expectedCode: ErrorCode_SWITCH_EXITING,
-		},
-		{
-			name:         "ClearTextError",
-			err:          mockClearTextErr,
-			expectedMsg:  encodedMsg,
-			expectedCode: ErrorCode_CLEAR_TEXT_ERROR,
-		},
-		{
-			name:         "Unknown Error",
-			err:          errors.New("some unexpected error"),
-			expectedMsg:  "some unexpected error",
-			expectedCode: ErrorCode_INTERNAL,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			msg, code := translateErrorForRPC(tt.err)
-			require.Contains(t, msg, tt.expectedMsg)
-			require.Equal(t, tt.expectedCode, code)
-		})
-	}
-}
-
-// TestMarshallFailureDetails tests the conversion of internal errors types
-// produced by the Switch into the wire/rpc representation.
-func TestMarshallFailureDetails(t *testing.T) {
-	t.Parallel()
-
-	mockWireMsg := lnwire.NewTemporaryChannelFailure(nil)
-	mockLinkErr := htlcswitch.NewLinkError(mockWireMsg)
-	mockFwdErr := htlcswitch.NewForwardingError(mockWireMsg, 1)
-
-	//nolint:ll
-	testCases := []struct {
-		name            string
-		err             error
-		expectedDetails *FailureDetails
-	}{
-		{
-			name: "not found",
-			err:  htlcswitch.ErrPaymentIDNotFound,
-			expectedDetails: &FailureDetails{
-				ErrorCode:    ErrorCode_PAYMENT_ID_NOT_FOUND,
-				ErrorMessage: htlcswitch.ErrPaymentIDNotFound.Error(),
-			},
-		},
-		{
-			name: "unreadable",
-			err:  htlcswitch.ErrUnreadableFailureMessage,
-			expectedDetails: &FailureDetails{
-				ErrorCode:    ErrorCode_UNREADABLE_FAILURE_MESSAGE,
-				ErrorMessage: htlcswitch.ErrUnreadableFailureMessage.Error(),
-			},
-		},
-		{
-			name: "clear text error",
-			err:  mockLinkErr,
-			expectedDetails: &FailureDetails{
-				ErrorMessage: mockLinkErr.Error(),
-				Failure: &FailureDetails_ClearTextFailure{
-					ClearTextFailure: &ClearTextFailure{},
-				},
-			},
-		},
-		{
-			name: "forwarding error",
-			err:  mockFwdErr,
-			expectedDetails: &FailureDetails{
-				ErrorMessage: mockFwdErr.Error(),
-				Failure: &FailureDetails_ForwardingFailure{
-					ForwardingFailure: &ForwardingFailure{
-						FailureSourceIndex: 1,
-					},
-				},
-			},
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			details := marshallFailureDetails(tc.err)
-
-			require.Equal(t, tc.expectedDetails.ErrorCode,
-				details.ErrorCode)
-			require.Contains(t, details.ErrorMessage,
-				tc.expectedDetails.ErrorMessage)
-
-			if tc.expectedDetails.Failure == nil {
-				require.Nil(t, details.Failure)
-				return
-			}
-
-			// For clear text and forwarding errors, we expect the
-			// wire message to be encoded correctly.
-			switch failure := details.Failure.(type) {
-			case *FailureDetails_ForwardingFailure:
-				require.NotNil(t, failure.ForwardingFailure)
-				require.Equal(
-					t,
-					tc.expectedDetails.
-						GetForwardingFailure().
-						FailureSourceIndex,
-					failure.ForwardingFailure.
-						FailureSourceIndex,
-				)
-
-				decoded, err := UnmarshallFailureMessage(
-					failure.ForwardingFailure.WireMessage,
-				)
-				require.NoError(t, err)
-				require.Equal(t, mockWireMsg, decoded)
-
-			case *FailureDetails_ClearTextFailure:
-				require.NotNil(t, failure.ClearTextFailure)
-
-				decoded, err := UnmarshallFailureMessage(
-					failure.ClearTextFailure.WireMessage,
-				)
-				require.NoError(t, err)
-				require.Equal(t, mockWireMsg, decoded)
-
-			default:
-				t.Fatalf("unexpected failure type: %T",
-					details.Failure)
 			}
 		})
 	}
