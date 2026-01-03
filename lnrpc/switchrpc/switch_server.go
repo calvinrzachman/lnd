@@ -355,7 +355,7 @@ func (s *Server) SendOnion(_ context.Context,
 
 		// Translate the internal dispatch error into a gRPC status
 		// with rich details for the client.
-		return nil, buildSendOnionRpcError(dispatchErr)
+		return nil, marshallSendOnionError(dispatchErr)
 	}
 
 	// The onion attempt was successfully dispatched.
@@ -857,9 +857,9 @@ func (s *Server) DisableRemoteRouter(ctx context.Context,
 	return &DisableRemoteRouterResponse{}, nil
 }
 
-// buildSendOnionRpcError translates an error from the underlying HTLC switch
+// marshallSendOnionError translates an error from the underlying HTLC switch
 // into a gRPC status error with rich, fine-grained details.
-func buildSendOnionRpcError(err error) error {
+func marshallSendOnionError(err error) error {
 	var clearTextErr htlcswitch.ClearTextError
 
 	details := &SendOnionFailureDetails{
@@ -1026,6 +1026,45 @@ func UnmarshallFailureMessage(wireMsg []byte) (lnwire.FailureMessage, error) {
 	r := bytes.NewReader(wireMsg)
 
 	return lnwire.DecodeFailure(r, 0)
+}
+
+// UnmarshallSendOnionError inspects a gRPC error from a SendOnion call,
+// extracts the rich failure details, and translates it into a concrete Go
+// error. It returns the specific translated error if details are found,
+// otherwise it returns a generic error.
+func UnmarshallSendOnionError(rpcErr error) error {
+	st, ok := status.FromError(rpcErr)
+	if !ok {
+		// Not a gRPC status error, return as is.
+		return rpcErr
+	}
+
+	// Search for the specific failure details message within the status.
+	for _, detail := range st.Details() {
+		if failure, ok := detail.(*SendOnionFailureDetails); ok {
+			// We found the details. Now translate them into the
+			// appropriate Go error type.
+			if failure.ClearTextFailure != nil {
+				// This is the most common case for a definitive
+				// failure.
+				linkErr, err := UnmarshallLinkError(
+					failure.ClearTextFailure,
+				)
+				if err != nil {
+					return err
+				}
+
+				return linkErr
+			}
+
+			// Fallback to the generic error message if no
+			// structured failure is present.
+			return errors.New(failure.ErrorMessage)
+		}
+	}
+
+	// No details were found, return the original gRPC status error.
+	return ErrUnknown
 }
 
 // CleanStore deletes all attempt results except those specified in request as
