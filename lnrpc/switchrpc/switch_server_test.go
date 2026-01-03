@@ -811,25 +811,34 @@ func TestCleanStore(t *testing.T) {
 func TestUnmarshallSendOnionError(t *testing.T) {
 	t.Parallel()
 
-	// Create a mock clear text error to be marshalled by the server-side
-	// helper.
+	// Create mock errors to be marshalled by the server-side helper.
 	wireMsg := lnwire.NewTemporaryChannelFailure(nil)
 	linkErr := htlcswitch.NewLinkError(wireMsg)
-
-	// Create a generic internal error.
+	exitErr := htlcswitch.ErrSwitchExiting
 	internalErr := errors.New("internal error")
 
 	testCases := []struct {
 		name        string
 		originalErr error
+
+		// isSpecific denotes if we expect to unmarshall a specific Go
+		// error type, vs a generic one that wraps ErrUnknown.
+		isSpecific bool
 	}{
 		{
 			name:        "clear text error",
 			originalErr: linkErr,
+			isSpecific:  true,
+		},
+		{
+			name:        "switch exiting",
+			originalErr: exitErr,
+			isSpecific:  true,
 		},
 		{
 			name:        "internal error",
 			originalErr: internalErr,
+			isSpecific:  false,
 		},
 	}
 
@@ -844,9 +853,16 @@ func TestUnmarshallSendOnionError(t *testing.T) {
 			translatedErr := UnmarshallSendOnionError(rpcErr)
 			require.Error(t, translatedErr)
 
-			// 3. Assertion: The final error should be of the same
-			// type as the original.
-			require.IsType(t, tc.originalErr, translatedErr)
+			// 3. Assertion: Based on the type of the original
+			// error, we either expect a specific Go error type
+			// back, or a generic error that wraps our sentinel.
+			if tc.isSpecific {
+				require.Equal(t, tc.originalErr, translatedErr)
+			} else {
+				require.ErrorIs(t, translatedErr, ErrUnknown)
+				require.Contains(t, translatedErr.Error(),
+					tc.originalErr.Error())
+			}
 		})
 	}
 }
