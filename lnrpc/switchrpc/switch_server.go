@@ -884,6 +884,7 @@ func marshallSendOnionError(err error) error {
 		details.ClearTextFailure = &ClearTextFailure{
 			WireMessage: buf.Bytes(),
 		}
+		details.ErrorCode = ErrorCode_CLEAR_TEXT_ERROR
 		rpcCode = codes.FailedPrecondition
 
 	case errors.Is(err, htlcswitch.ErrUnreadableFailureMessage):
