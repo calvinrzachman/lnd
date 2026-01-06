@@ -140,34 +140,36 @@ enum ErrorCode {
     DUPLICATE_HTLC = 1;
 
     /*
-    The outgoing channel link for a SendOnion attempt was not found or was
-    not in a state to forward the payment.
-    */
-    NO_LINK = 2;
-
-    /*
     The server is in the process of shutting down. This is a transient
     error; the client should retry after a delay.
     */
-    SWITCH_EXITING = 3;
+    SWITCH_EXITING = 2;
 
     /*
     The server encountered a failure during the durable write of an
     idempotency anchor (InitAttempt). The state of the HTLC is unknown.
     The client MUST retry the request to resolve the ambiguity.
     */
-    AMBIGUOUS_STATE = 4;
+    AMBIGUOUS_STATE = 3;
 
     /*
     The failure message from a remote peer could not be decrypted. The
     client must use the encrypted_error_data to decrypt it themselves.
     */
-    UNREADABLE_FAILURE_MESSAGE = 5;
+    UNREADABLE_FAILURE_MESSAGE = 4;
 
     /*
     A generic, internal server error occurred.
     */
-    INTERNAL = 6;
+    INTERNAL = 5;
+
+    /*
+    A definitive, local failure occurred for which a detailed lnwire
+    message is available, but for which there is no more-specific error
+    code. This is a forward-compatibility measure that allows clients to
+    correctly identify new definitive failures.
+    */
+    CLEAR_TEXT_ERROR = 6;
 }
 
 message TrackOnionRequest {
