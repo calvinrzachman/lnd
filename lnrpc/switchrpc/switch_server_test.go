@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -728,6 +729,295 @@ func TestBuildOnion(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDeleteAttempts is a unit test that verifies the behavior of the
+// DeleteAttempts RPC handler in isolation. It ensures correct translation of
+// store-level deletion results into the proto response, proper ordering of
+// results to match the request, and correct gRPC error handling when the
+// store fails.
+func TestDeleteAttempts(t *testing.T) {
+	t.Parallel()
+
+	//nolint:ll
+	testCases := []struct {
+		name string
+
+		// setup configures the mock store and returns the request.
+		setup func(*testing.T, *mockAttemptStore) *DeleteAttemptsRequest
+
+		// expectedErrCode is the gRPC error code we expect from the
+		// call. codes.OK means we expect a successful response.
+		expectedErrCode codes.Code
+
+		// checkResponse validates the response on success.
+		checkResponse func(*testing.T, *DeleteAttemptsResponse)
+	}{
+		{
+			name: "successful batch delete with mixed results",
+			setup: func(t *testing.T,
+				store *mockAttemptStore) *DeleteAttemptsRequest {
+
+				store.deleteResp = map[uint64]htlcswitch.DeletionStatus{
+					1: htlcswitch.DeletionOK,
+					2: htlcswitch.DeletionPending,
+					3: htlcswitch.DeletionNotFound,
+				}
+
+				return &DeleteAttemptsRequest{
+					AttemptIds: []uint64{1, 2, 3},
+				}
+			},
+			expectedErrCode: codes.OK,
+			checkResponse: func(t *testing.T,
+				resp *DeleteAttemptsResponse) {
+
+				require.Len(t, resp.Results, 3)
+
+				// Verify results preserve request order.
+				require.Equal(t, uint64(1),
+					resp.Results[0].AttemptId)
+				require.Equal(t,
+					AttemptDeletionStatus_DELETION_OK,
+					resp.Results[0].Status,
+				)
+
+				require.Equal(t, uint64(2),
+					resp.Results[1].AttemptId)
+				require.Equal(t,
+					AttemptDeletionStatus_DELETION_PENDING,
+					resp.Results[1].Status,
+				)
+
+				require.Equal(t, uint64(3),
+					resp.Results[2].AttemptId)
+				require.Equal(t,
+					AttemptDeletionStatus_DELETION_NOT_FOUND,
+					resp.Results[2].Status,
+				)
+			},
+		},
+		{
+			name: "empty request returns empty results",
+			setup: func(t *testing.T,
+				store *mockAttemptStore) *DeleteAttemptsRequest {
+
+				store.deleteResp = map[uint64]htlcswitch.DeletionStatus{}
+
+				return &DeleteAttemptsRequest{
+					AttemptIds: []uint64{},
+				}
+			},
+			expectedErrCode: codes.OK,
+			checkResponse: func(t *testing.T,
+				resp *DeleteAttemptsResponse) {
+
+				require.Empty(t, resp.Results)
+			},
+		},
+		{
+			name: "store error returns internal gRPC error",
+			setup: func(t *testing.T,
+				store *mockAttemptStore) *DeleteAttemptsRequest {
+
+				store.deleteErr = errors.New("db failure")
+
+				return &DeleteAttemptsRequest{
+					AttemptIds: []uint64{1},
+				}
+			},
+			expectedErrCode: codes.Internal,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			mockStore := &mockAttemptStore{}
+
+			server, _, err := New(&Config{
+				HtlcDispatcher: &mockPayer{},
+				AttemptStore:   mockStore,
+			})
+			require.NoError(t, err)
+
+			req := tc.setup(t, mockStore)
+
+			resp, err := server.DeleteAttempts(
+				t.Context(), req,
+			)
+
+			if tc.expectedErrCode != codes.OK {
+				require.Error(t, err)
+				s, ok := status.FromError(err)
+				require.True(t, ok)
+				require.Equal(t,
+					tc.expectedErrCode, s.Code(),
+				)
+
+				return
+			}
+
+			require.NoError(t, err)
+			require.NotNil(t, resp)
+
+			if tc.checkResponse != nil {
+				tc.checkResponse(t, resp)
+			}
+		})
+	}
+}
+
+// TestDeletionStatusToProto verifies the mapping from internal DeletionStatus
+// values to their proto enum counterparts.
+func TestDeletionStatusToProto(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name     string
+		input    htlcswitch.DeletionStatus
+		expected AttemptDeletionStatus
+	}{
+		{
+			name:     "OK",
+			input:    htlcswitch.DeletionOK,
+			expected: AttemptDeletionStatus_DELETION_OK,
+		},
+		{
+			name:     "Pending",
+			input:    htlcswitch.DeletionPending,
+			expected: AttemptDeletionStatus_DELETION_PENDING,
+		},
+		{
+			name:     "NotFound",
+			input:    htlcswitch.DeletionNotFound,
+			expected: AttemptDeletionStatus_DELETION_NOT_FOUND,
+		},
+		{
+			name:     "unknown defaults to NotFound",
+			input:    htlcswitch.DeletionStatus(99),
+			expected: AttemptDeletionStatus_DELETION_NOT_FOUND,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := deletionStatusToProto(tc.input)
+			require.Equal(t, tc.expected, result)
+		})
+	}
+}
+
+// statefulAttemptStore is a mock that tracks initialized attempt IDs to
+// simulate real idempotency behavior. Unlike the basic mockAttemptStore, this
+// mock maintains state across calls, making it suitable for testing multi-step
+// interactions between SendOnion and DeleteAttempts.
+type statefulAttemptStore struct {
+	mockAttemptStore
+
+	mu          sync.Mutex
+	initialized map[uint64]bool
+}
+
+// InitAttempt records the attempt ID and returns ErrPaymentIDAlreadyExists if
+// the ID was already initialized.
+func (s *statefulAttemptStore) InitAttempt(attemptID uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.initialized[attemptID] {
+		return htlcswitch.ErrPaymentIDAlreadyExists
+	}
+
+	s.initialized[attemptID] = true
+
+	return nil
+}
+
+// DeleteAttempts removes initialized IDs and reports per-ID results.
+func (s *statefulAttemptStore) DeleteAttempts(
+	attemptIDs []uint64) (map[uint64]htlcswitch.DeletionStatus, error) {
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	results := make(map[uint64]htlcswitch.DeletionStatus)
+	for _, id := range attemptIDs {
+		if s.initialized[id] {
+			delete(s.initialized, id)
+			results[id] = htlcswitch.DeletionOK
+		} else {
+			results[id] = htlcswitch.DeletionNotFound
+		}
+	}
+
+	return results, nil
+}
+
+// TestSendOnionAfterDelete verifies the interaction between SendOnion and
+// DeleteAttempts. It demonstrates that deleting a terminal attempt record
+// removes the idempotency protection established by InitAttempt, allowing a
+// subsequent SendOnion call with the same attempt ID to succeed. This behavior
+// is by design for the current hard-delete model; a future tombstone-based
+// approach could preserve the protection while still reclaiming storage.
+func TestSendOnionAfterDelete(t *testing.T) {
+	t.Parallel()
+
+	store := &statefulAttemptStore{
+		initialized: make(map[uint64]bool),
+	}
+
+	server, _, err := New(&Config{
+		HtlcDispatcher: &mockPayer{},
+		AttemptStore:   store,
+	})
+	require.NoError(t, err)
+
+	req := &SendOnionRequest{
+		OnionBlob:      make([]byte, lnwire.OnionPacketSize),
+		PaymentHash:    make([]byte, 32),
+		AttemptId:      1,
+		Amount:         1000,
+		FirstHopChanId: 12345,
+	}
+
+	// Step 1: First SendOnion succeeds — the attempt is initialized and
+	// dispatched.
+	_, err = server.SendOnion(t.Context(), req)
+	require.NoError(t, err)
+
+	// Step 2: Retry with the same attempt ID is rejected — the
+	// idempotency record prevents a duplicate dispatch.
+	_, err = server.SendOnion(t.Context(), req)
+	require.Error(t, err)
+
+	s, ok := status.FromError(err)
+	require.True(t, ok)
+	require.Equal(t, codes.AlreadyExists, s.Code())
+
+	// Step 3: Delete the attempt record.
+	deleteReq := &DeleteAttemptsRequest{
+		AttemptIds: []uint64{1},
+	}
+	deleteResp, err := server.DeleteAttempts(t.Context(), deleteReq)
+	require.NoError(t, err)
+	require.Len(t, deleteResp.Results, 1)
+	require.Equal(t, AttemptDeletionStatus_DELETION_OK,
+		deleteResp.Results[0].Status,
+	)
+
+	// Step 4: SendOnion with the same ID succeeds again — the hard
+	// delete has removed the idempotency protection. This is an
+	// important behavioral property to document: hard delete trades
+	// idempotency safety for storage reclamation. A well-behaved client
+	// MUST only delete attempt IDs it has fully finalized and will
+	// never reuse.
+	_, err = server.SendOnion(t.Context(), req)
+	require.NoError(t, err, "expected SendOnion to succeed after "+
+		"delete removed idempotency protection")
 }
 
 // TestMarshallFailureDetails tests the conversion of internal errors types

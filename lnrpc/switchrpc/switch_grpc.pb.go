@@ -87,6 +87,27 @@ type SwitchClient interface {
 	TrackOnion(ctx context.Context, in *TrackOnionRequest, opts ...grpc.CallOption) (*TrackOnionResponse, error)
 	// BuildOnion attempts to build an onion packet for the specified route.
 	BuildOnion(ctx context.Context, in *BuildOnionRequest, opts ...grpc.CallOption) (*BuildOnionResponse, error)
+	// DeleteAttempts removes terminal (settled or failed) payment attempt records
+	// from the server's attempt store. This enables remote clients to perform
+	// online garbage collection of completed attempt data without requiring a
+	// disruptive "stop-the-world" quiescent state.
+	//
+	// This RPC uses "positive space" deletion semantics: the client explicitly
+	// names the finished attempts to delete. This is fundamentally safer than a
+	// "delete everything except" model for distributed systems, as it is immune
+	// to stale-snapshot race conditions.
+	//
+	// The server processes each attempt ID independently and reports per-ID
+	// results. Pending (in-flight) attempts are never deleted; they are reported
+	// with a DELETION_PENDING status. Unknown attempt IDs are reported with
+	// DELETION_NOT_FOUND. The overall RPC succeeds (gRPC OK) as long as the
+	// request could be processed, even if individual attempts were not deleted.
+	//
+	// Clients MUST only request deletion of attempts they have durably finalized
+	// in their own state and will never reuse. This is a contractual obligation;
+	// deleting an attempt removes the server's idempotency protection for that
+	// attempt ID.
+	DeleteAttempts(ctx context.Context, in *DeleteAttemptsRequest, opts ...grpc.CallOption) (*DeleteAttemptsResponse, error)
 }
 
 type switchClient struct {
@@ -118,6 +139,15 @@ func (c *switchClient) TrackOnion(ctx context.Context, in *TrackOnionRequest, op
 func (c *switchClient) BuildOnion(ctx context.Context, in *BuildOnionRequest, opts ...grpc.CallOption) (*BuildOnionResponse, error) {
 	out := new(BuildOnionResponse)
 	err := c.cc.Invoke(ctx, "/switchrpc.Switch/BuildOnion", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *switchClient) DeleteAttempts(ctx context.Context, in *DeleteAttemptsRequest, opts ...grpc.CallOption) (*DeleteAttemptsResponse, error) {
+	out := new(DeleteAttemptsResponse)
+	err := c.cc.Invoke(ctx, "/switchrpc.Switch/DeleteAttempts", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -197,6 +227,27 @@ type SwitchServer interface {
 	TrackOnion(context.Context, *TrackOnionRequest) (*TrackOnionResponse, error)
 	// BuildOnion attempts to build an onion packet for the specified route.
 	BuildOnion(context.Context, *BuildOnionRequest) (*BuildOnionResponse, error)
+	// DeleteAttempts removes terminal (settled or failed) payment attempt records
+	// from the server's attempt store. This enables remote clients to perform
+	// online garbage collection of completed attempt data without requiring a
+	// disruptive "stop-the-world" quiescent state.
+	//
+	// This RPC uses "positive space" deletion semantics: the client explicitly
+	// names the finished attempts to delete. This is fundamentally safer than a
+	// "delete everything except" model for distributed systems, as it is immune
+	// to stale-snapshot race conditions.
+	//
+	// The server processes each attempt ID independently and reports per-ID
+	// results. Pending (in-flight) attempts are never deleted; they are reported
+	// with a DELETION_PENDING status. Unknown attempt IDs are reported with
+	// DELETION_NOT_FOUND. The overall RPC succeeds (gRPC OK) as long as the
+	// request could be processed, even if individual attempts were not deleted.
+	//
+	// Clients MUST only request deletion of attempts they have durably finalized
+	// in their own state and will never reuse. This is a contractual obligation;
+	// deleting an attempt removes the server's idempotency protection for that
+	// attempt ID.
+	DeleteAttempts(context.Context, *DeleteAttemptsRequest) (*DeleteAttemptsResponse, error)
 	mustEmbedUnimplementedSwitchServer()
 }
 
@@ -212,6 +263,9 @@ func (UnimplementedSwitchServer) TrackOnion(context.Context, *TrackOnionRequest)
 }
 func (UnimplementedSwitchServer) BuildOnion(context.Context, *BuildOnionRequest) (*BuildOnionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method BuildOnion not implemented")
+}
+func (UnimplementedSwitchServer) DeleteAttempts(context.Context, *DeleteAttemptsRequest) (*DeleteAttemptsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteAttempts not implemented")
 }
 func (UnimplementedSwitchServer) mustEmbedUnimplementedSwitchServer() {}
 
@@ -280,6 +334,24 @@ func _Switch_BuildOnion_Handler(srv interface{}, ctx context.Context, dec func(i
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Switch_DeleteAttempts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteAttemptsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SwitchServer).DeleteAttempts(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/switchrpc.Switch/DeleteAttempts",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SwitchServer).DeleteAttempts(ctx, req.(*DeleteAttemptsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Switch_ServiceDesc is the grpc.ServiceDesc for Switch service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -298,6 +370,10 @@ var Switch_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "BuildOnion",
 			Handler:    _Switch_BuildOnion_Handler,
+		},
+		{
+			MethodName: "DeleteAttempts",
+			Handler:    _Switch_DeleteAttempts_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

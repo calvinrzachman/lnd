@@ -307,6 +307,31 @@
         }
       }
     },
+    "switchrpcAttemptDeletionResult": {
+      "type": "object",
+      "properties": {
+        "attempt_id": {
+          "type": "string",
+          "format": "uint64",
+          "description": "The attempt ID this result corresponds to."
+        },
+        "status": {
+          "$ref": "#/definitions/switchrpcAttemptDeletionStatus",
+          "description": "The outcome of the deletion for this attempt."
+        }
+      },
+      "description": "AttemptDeletionResult reports the outcome of deleting a single attempt."
+    },
+    "switchrpcAttemptDeletionStatus": {
+      "type": "string",
+      "enum": [
+        "DELETION_OK",
+        "DELETION_PENDING",
+        "DELETION_NOT_FOUND"
+      ],
+      "default": "DELETION_OK",
+      "description": "AttemptDeletionStatus describes the outcome of a single attempt deletion.\n\n - DELETION_OK: The attempt result was successfully deleted from the store.\n - DELETION_PENDING: The attempt is still in-flight (pending) and cannot be safely deleted.\n - DELETION_NOT_FOUND: The attempt ID was not found in the store. This can occur if the attempt\nwas already deleted or was never initialized."
+    },
     "switchrpcBuildOnionRequest": {
       "type": "object",
       "properties": {
@@ -361,6 +386,19 @@
         }
       },
       "description": "ClearTextFailure is included when the failure originates locally or is a\nfully decrypted, known failure from an upstream node. It contains the raw\nlnwire.FailureMessage."
+    },
+    "switchrpcDeleteAttemptsResponse": {
+      "type": "object",
+      "properties": {
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/switchrpcAttemptDeletionResult"
+          },
+          "description": "Per-attempt deletion outcomes. The order corresponds to the order of\nattempt_ids in the request."
+        }
+      }
     },
     "switchrpcFailureDetails": {
       "type": "object",

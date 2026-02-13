@@ -65,6 +65,10 @@ var (
 			Entity: "offchain",
 			Action: "read",
 		}},
+		"/switchrpc.Switch/DeleteAttempts": {{
+			Entity: "offchain",
+			Action: "write",
+		}},
 	}
 
 	// DefaultSwitchMacFilename is the default name of the switch macaroon
@@ -839,6 +843,62 @@ func (s *Server) BuildOnion(_ context.Context,
 		SessionKey: sessionKey.Serialize(),
 		HopPubkeys: hopPubKeys,
 	}, nil
+}
+
+// DeleteAttempts removes terminal (settled or failed) payment attempt records
+// from the server's attempt store. This enables remote clients to perform
+// online garbage collection of completed attempt data.
+//
+// The server processes each attempt ID independently and reports per-ID
+// results. Pending (in-flight) attempts are never deleted. The overall RPC
+// succeeds (gRPC OK) as long as the request could be processed.
+func (s *Server) DeleteAttempts(_ context.Context,
+	req *DeleteAttemptsRequest) (*DeleteAttemptsResponse, error) {
+
+	log.Debugf("DeleteAttempts called for %d attempt(s)",
+		len(req.AttemptIds))
+
+	storeResults, err := s.cfg.AttemptStore.DeleteAttempts(
+		req.AttemptIds,
+	)
+	if err != nil {
+		log.Errorf("DeleteAttempts failed: %v", err)
+
+		return nil, status.Errorf(codes.Internal,
+			"failed to delete attempts: %v", err)
+	}
+
+	// Convert the store-level results into proto results, preserving the
+	// request order.
+	results := make(
+		[]*AttemptDeletionResult, 0, len(req.AttemptIds),
+	)
+	for _, id := range req.AttemptIds {
+		protoStatus := deletionStatusToProto(storeResults[id])
+		results = append(results, &AttemptDeletionResult{
+			AttemptId: id,
+			Status:    protoStatus,
+		})
+	}
+
+	return &DeleteAttemptsResponse{Results: results}, nil
+}
+
+// deletionStatusToProto converts an internal DeletionStatus to the
+// corresponding proto enum value.
+func deletionStatusToProto(
+	s htlcswitch.DeletionStatus) AttemptDeletionStatus {
+
+	switch s {
+	case htlcswitch.DeletionOK:
+		return AttemptDeletionStatus_DELETION_OK
+	case htlcswitch.DeletionPending:
+		return AttemptDeletionStatus_DELETION_PENDING
+	case htlcswitch.DeletionNotFound:
+		return AttemptDeletionStatus_DELETION_NOT_FOUND
+	default:
+		return AttemptDeletionStatus_DELETION_NOT_FOUND
+	}
 }
 
 // marshallDispatchFailure translates an error from the underlying HTLC switch
