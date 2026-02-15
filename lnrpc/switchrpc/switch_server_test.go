@@ -786,17 +786,18 @@ func TestDeleteAttempts(t *testing.T) {
 					2: htlcswitch.DeletionPending,
 					3: htlcswitch.DeletionNotFound,
 					4: htlcswitch.DeletionFailed,
+					5: htlcswitch.DeletionAlreadyDeleted,
 				}
 
 				return &DeleteAttemptsRequest{
-					AttemptIds: []uint64{1, 2, 3, 4},
+					AttemptIds: []uint64{1, 2, 3, 4, 5},
 				}
 			},
 			expectedErrCode: codes.OK,
 			checkResponse: func(t *testing.T,
 				resp *DeleteAttemptsResponse) {
 
-				require.Len(t, resp.Results, 4)
+				require.Len(t, resp.Results, 5)
 
 				// Verify results preserve request order.
 				require.Equal(t, uint64(1),
@@ -825,6 +826,13 @@ func TestDeleteAttempts(t *testing.T) {
 				require.Equal(t,
 					AttemptDeletionStatus_DELETION_FAILED,
 					resp.Results[3].Status,
+				)
+
+				require.Equal(t, uint64(5),
+					resp.Results[4].AttemptId)
+				require.Equal(t,
+					AttemptDeletionStatus_DELETION_ALREADY_DELETED,
+					resp.Results[4].Status,
 				)
 			},
 		},
@@ -951,6 +959,11 @@ func TestDeletionStatusToProto(t *testing.T) {
 			name:     "Failed",
 			input:    htlcswitch.DeletionFailed,
 			expected: AttemptDeletionStatus_DELETION_FAILED,
+		},
+		{
+			name:     "AlreadyDeleted",
+			input:    htlcswitch.DeletionAlreadyDeleted,
+			expected: AttemptDeletionStatus_DELETION_ALREADY_DELETED,
 		},
 		{
 			name:     "unknown defaults to NotFound",

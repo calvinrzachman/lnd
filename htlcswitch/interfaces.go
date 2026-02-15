@@ -615,4 +615,10 @@ type AttemptStore interface {
 	// for cleaning results from the store (e.g. via DeleteAttempts)
 	// before calling this method.
 	DisableRemoteRouter() error
+
+	// SweepTombstones removes all tombstone records left by prior
+	// DeleteAttempts calls. This should be called during server startup,
+	// after all TCP connections from the previous process have been torn
+	// down by the OS.
+	SweepTombstones() error
 }
