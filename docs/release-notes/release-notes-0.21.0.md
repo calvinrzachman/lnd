@@ -250,6 +250,13 @@
   the source-end counterpart to `AdditionalEdge`, which extends the graph at
   the destination end via route hints.
 
+* Updated `switchrpc.DeleteAttempts` RPC to internally use a tombstone-based
+  model: deleted records are replaced with a lightweight sentinel that preserves
+  idempotency protection (preventing duplicate HTLC dispatch) until the next
+  server restart, at which point tombstones are swept automatically. This is a
+  precautionary measure which prevents interaction between htlc dispatch via
+  SendOnion and cleanup via DeleteAttempts which may result from client mis-use.
+
 ## RPC Additions
 
 * [Added `DeleteForwardingHistory`
