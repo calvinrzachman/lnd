@@ -959,16 +959,18 @@ func TestDeletionStatusToProto(t *testing.T) {
 }
 
 // TestSendOnionAfterDelete verifies the interaction between SendOnion and
-// DeleteAttempts. It demonstrates that deleting a terminal attempt record
-// removes the idempotency protection established by InitAttempt, allowing a
-// subsequent SendOnion call with the same attempt ID to succeed. This behavior
-// is by design for the current hard-delete model; a future tombstone-based
-// approach could preserve the protection while still reclaiming storage.
+// DeleteAttempts with tombstone-based deletion. It demonstrates that deleting
+// a terminal attempt record preserves the idempotency protection: the
+// tombstone causes InitAttempt to return ErrPaymentIDAlreadyExists, preventing
+// a latent SendOnion from dispatching a duplicate HTLC. After a server restart
+// (simulated by SweepTombstones), the tombstone is removed and the attempt ID
+// can be reused.
 func TestSendOnionAfterDelete(t *testing.T) {
 	t.Parallel()
 
 	store := &statefulAttemptStore{
 		initialized: make(map[uint64]bool),
+		tombstoned:  make(map[uint64]bool),
 	}
 
 	server, _, err := New(&Config{
@@ -1010,14 +1012,26 @@ func TestSendOnionAfterDelete(t *testing.T) {
 		deleteResp.Results[0].Status,
 	)
 
-	// Additional SendOnion requests with the same ID now succeed — the hard
-	// delete has removed the idempotency protection. This is an important
-	// behavioral property to document: hard delete trades idempotency
-	// safety for storage reclamation. A well-behaved client MUST only
-	// delete attempt IDs it has fully finalized and will never reuse.
+	// SendOnion with the same ID is still rejected — the tombstone
+	// preserves duplicate protection. This prevents a latent SendOnion from
+	// a stale TCP connection from dispatching a duplicate HTLC after the
+	// client has already finalized and deleted the attempt.
+	_, err = server.SendOnion(t.Context(), req)
+	require.Error(t, err, "expected SendOnion to be rejected by "+
+		"tombstone after delete")
+
+	s, ok = status.FromError(err)
+	require.True(t, ok)
+	require.Equal(t, codes.AlreadyExists, s.Code())
+
+	// Simulate server restart by sweeping tombstones. After the sweep, the
+	// attempt ID is fully released and can be reused.
+	err = store.SweepTombstones()
+	require.NoError(t, err)
+
 	_, err = server.SendOnion(t.Context(), req)
 	require.NoError(t, err, "expected SendOnion to succeed after "+
-		"delete removed idempotency protection")
+		"tombstone sweep (simulated restart)")
 }
 
 // TestMarshallFailureDetails tests the conversion of internal errors types
