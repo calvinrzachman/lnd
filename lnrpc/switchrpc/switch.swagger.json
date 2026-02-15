@@ -399,10 +399,11 @@
         "DELETION_OK",
         "DELETION_PENDING",
         "DELETION_NOT_FOUND",
-        "DELETION_FAILED"
+        "DELETION_FAILED",
+        "DELETION_ALREADY_DELETED"
       ],
       "default": "DELETION_OK",
-      "description": "AttemptDeletionStatus describes the outcome of a single attempt deletion.\n\n - DELETION_OK: The attempt result was successfully deleted from the store.\n - DELETION_PENDING: The attempt is still in-flight (pending) and cannot be safely deleted.\n - DELETION_NOT_FOUND: The attempt ID was not found in the store. This may indicate a client\nbug (wrong ID, wrong backend) since the server has no record of this\nattempt ever existing.\n - DELETION_FAILED: The attempt record exists but could not be processed (e.g.\ndeserialization error). The record remains in the store."
+      "description": "AttemptDeletionStatus describes the outcome of a single attempt deletion.\n\n - DELETION_OK: The attempt result was successfully deleted from the store.\n - DELETION_PENDING: The attempt is still in-flight (pending) and cannot be safely deleted.\n - DELETION_NOT_FOUND: The attempt ID was not found in the store. This may indicate a client\nbug (wrong ID, wrong backend) since the server has no record of this\nattempt ever existing.\n - DELETION_FAILED: The attempt record exists but could not be processed (e.g.\ndeserialization error). The record remains in the store.\n - DELETION_ALREADY_DELETED: The attempt was already deleted in a prior call. This is expected\nduring idempotent retries and requires no corrective action."
     },
     "switchrpcBuildOnionRequest": {
       "type": "object",

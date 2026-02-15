@@ -583,22 +583,80 @@ func TestDeleteAttempts(t *testing.T) {
 		// Second delete reports not found.
 		results, err = store.DeleteAttempts([]uint64{id})
 		require.NoError(t, err)
-		require.Equal(t, DeletionNotFound, results[id])
+		require.Equal(t, DeletionAlreadyDeleted, results[id])
 	})
 
-	t.Run("InitAttempt succeeds after delete", func(t *testing.T) {
+	t.Run("tombstone blocks InitAttempt after delete", func(t *testing.T) {
 		var id uint64 = 60
 		storeSettled(t, id)
 
-		// Delete the attempt.
+		// Delete the attempt — writes a tombstone.
 		results, err := store.DeleteAttempts([]uint64{id})
 		require.NoError(t, err)
 		require.Equal(t, DeletionOK, results[id])
 
-		// Re-initializing the same ID should now succeed since the
-		// record was fully removed.
+		// Re-initializing the same ID should fail because the
+		// tombstone preserves idempotency protection.
+		err = store.InitAttempt(id)
+		require.ErrorIs(t, err, ErrPaymentIDAlreadyExists)
+	})
+
+	t.Run("InitAttempt succeeds after tombstone sweep", func(t *testing.T) {
+		var id uint64 = 61
+		storeSettled(t, id)
+
+		// Delete the attempt — writes a tombstone.
+		results, err := store.DeleteAttempts([]uint64{id})
+		require.NoError(t, err)
+		require.Equal(t, DeletionOK, results[id])
+
+		// Sweep tombstones (simulates server restart).
+		require.NoError(t, store.SweepTombstones())
+
+		// Now InitAttempt should succeed — the tombstone is gone.
 		err = store.InitAttempt(id)
 		require.NoError(t, err)
+	})
+
+	t.Run("GetResult returns not found for tombstone", func(t *testing.T) {
+		var id uint64 = 70
+		storeSettled(t, id)
+
+		// Verify the result is readable before deletion.
+		_, err := store.GetResult(id)
+		require.NoError(t, err)
+
+		// Delete the attempt — writes a tombstone.
+		results, err := store.DeleteAttempts([]uint64{id})
+		require.NoError(t, err)
+		require.Equal(t, DeletionOK, results[id])
+
+		// GetResult should treat the tombstone as not found.
+		_, err = store.GetResult(id)
+		require.ErrorIs(t, err, ErrPaymentIDNotFound)
+	})
+
+	t.Run("SubscribeResult does not deliver tombstone", func(t *testing.T) {
+		var id uint64 = 80
+		storeSettled(t, id)
+
+		// Delete the attempt — writes a tombstone.
+		results, err := store.DeleteAttempts([]uint64{id})
+		require.NoError(t, err)
+		require.Equal(t, DeletionOK, results[id])
+
+		// SubscribeResult should not deliver the tombstone as a
+		// result. It should return a channel that blocks (awaiting
+		// a real result that will never come).
+		resultChan, err := store.SubscribeResult(id)
+		require.NoError(t, err)
+
+		select {
+		case <-resultChan:
+			t.Fatal("tombstone should not be delivered as " +
+				"a result")
+		default:
+		}
 	})
 }
 
@@ -809,10 +867,13 @@ func TestDeleteAttemptsProperties(t *testing.T) {
 			require.NoError(t, err)
 
 			// PROPERTY: Re-deleting never errors. Each ID reports
-			// NotFound (the record is gone).
+			// AlreadyDeleted rather than NotFound, because the
+			// tombstone is left behind on purpose so InitAttempt
+			// keeps rejecting a reused ID.
 			for _, id := range ids {
 				require.Equal(
-					t, DeletionNotFound, results2[id],
+					t, DeletionAlreadyDeleted,
+					results2[id],
 					"re-delete of %d returned "+
 						"unexpected status %v",
 					id, results2[id],
