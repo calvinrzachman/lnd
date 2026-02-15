@@ -79,12 +79,27 @@ const (
 	// not be processed (e.g. deserialization error). The record remains
 	// in the store.
 	DeletionFailed
+
+	// DeletionAlreadyDeleted indicates the attempt was already deleted
+	// in a prior call. This is normal idempotent retry behavior and
+	// requires no corrective action from the client.
+	DeletionAlreadyDeleted
 )
 
 const (
 	// pendingHtlcMsgType is a custom message type used to represent a
 	// pending HTLC in the network result store.
 	pendingHtlcMsgType lnwire.MessageType = 32768
+
+	// deletedHtlcMsgType is a custom message type used as a tombstone
+	// sentinel in the network result store. When an attempt is deleted
+	// via DeleteAttempts, we write this sentinel instead of removing the
+	// key. This preserves the idempotency protection: InitAttempt will
+	// see the tombstone and return ErrPaymentIDAlreadyExists, preventing
+	// a latent SendOnion from dispatching a duplicate HTLC. Tombstones
+	// are swept on server startup via SweepTombstones, which is safe
+	// because the OS tears down all TCP connections on process exit.
+	deletedHtlcMsgType lnwire.MessageType = 32769
 )
 
 // PaymentResult wraps a decoded result received from the network after a
@@ -426,7 +441,13 @@ func (store *networkResultStore) SubscribeResult(attemptID uint64) (
 	// channel immediately. If the result is still our initialized place
 	// holder, then treat it as not yet available.
 	if result != nil {
-		if result.msg.MsgType() != pendingHtlcMsgType {
+		msgType := result.msg.MsgType()
+
+		// A terminal result (not pending, not tombstoned) can be
+		// delivered immediately.
+		if msgType != pendingHtlcMsgType &&
+			msgType != deletedHtlcMsgType {
+
 			log.Debugf("Obtained full result for attemptID=%v",
 				attemptID)
 
@@ -473,6 +494,13 @@ func (store *networkResultStore) GetResult(pid uint64) (
 		// of this method.
 		if result.msg.MsgType() == pendingHtlcMsgType {
 			return ErrAttemptResultPending
+		}
+
+		// If the record is a tombstone, treat it as not found from
+		// the caller's perspective. The tombstone exists only to
+		// preserve idempotency protection for InitAttempt.
+		if result.msg.MsgType() == deletedHtlcMsgType {
+			return ErrPaymentIDNotFound
 		}
 
 		return nil
@@ -636,10 +664,32 @@ func (store *networkResultStore) DeleteAttempts(
 				continue
 			}
 
-			// Terminal result — safe to delete.
-			if err := bucket.Delete(attemptIDBytes[:]); err != nil {
-				return fmt.Errorf("failed to delete "+
-					"attempt %d: %w", id, err)
+			// Do not "re-delete" tombstoned attempts. Report as
+			// already deleted so the client can distinguish this
+			// from a genuinely unknown attempt ID.
+			if result.msg.MsgType() == deletedHtlcMsgType {
+				results[id] = DeletionAlreadyDeleted
+				continue
+			}
+
+			// Terminal result — write a tombstone sentinel instead
+			// of deleting the key. This preserves idempotency
+			// protection: any latent SendOnion with this attempt
+			// ID will be rejected by InitAttempt. The tombstone is
+			// swept on server restart via SweepTombstones.
+			tombstone, err := makeTombstone()
+			if err != nil {
+				return fmt.Errorf("failed to create "+
+					"tombstone for attempt %d: %w",
+					id, err)
+			}
+
+			if err := bucket.Put(
+				attemptIDBytes[:], tombstone,
+			); err != nil {
+				return fmt.Errorf("failed to write "+
+					"tombstone for attempt %d: %w",
+					id, err)
 			}
 
 			results[id] = DeletionOK
@@ -667,6 +717,76 @@ func (store *networkResultStore) DeleteAttempts(
 	}
 
 	return results, nil
+}
+
+// makeTombstone creates the serialized tombstone sentinel bytes. The tombstone
+// is a networkResult with the deletedHtlcMsgType, matching the existing pattern
+// used by pendingHtlcMsgType for initialized attempts.
+func makeTombstone() ([]byte, error) {
+	tombstoneMsg, err := lnwire.NewCustom(deletedHtlcMsgType, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	tombstoneResult := &networkResult{
+		msg:         tombstoneMsg,
+		unencrypted: true,
+	}
+
+	var b bytes.Buffer
+	if err := serializeNetworkResult(&b, tombstoneResult); err != nil {
+		return nil, err
+	}
+
+	return b.Bytes(), nil
+}
+
+// SweepTombstones removes all tombstone records from the network result store.
+// This should be called during server startup, after the OS has torn down all
+// TCP connections from the previous process. At that point, no stale SendOnion
+// requests from pre-restart connections can arrive, so the tombstones are no
+// longer needed.
+func (store *networkResultStore) SweepTombstones() error {
+	return kvdb.Update(store.backend, func(tx kvdb.RwTx) error {
+		bucket := tx.ReadWriteBucket(networkResultStoreBucketKey)
+		if bucket == nil {
+			return nil
+		}
+
+		var toSweep [][]byte
+		if err := bucket.ForEach(func(k, v []byte) error {
+			r := bytes.NewReader(v)
+			result, err := deserializeNetworkResult(r)
+			if err != nil {
+				log.Warnf("Unable to deserialize result "+
+					"for key %x during tombstone "+
+					"sweep: %v", k, err)
+
+				return nil
+			}
+
+			if result.msg.MsgType() == deletedHtlcMsgType {
+				toSweep = append(toSweep, k)
+			}
+
+			return nil
+		}); err != nil {
+			return err
+		}
+
+		for _, k := range toSweep {
+			if err := bucket.Delete(k); err != nil {
+				return err
+			}
+		}
+
+		if len(toSweep) > 0 {
+			log.Infof("Swept %d tombstone(s) from network "+
+				"result store", len(toSweep))
+		}
+
+		return nil
+	}, func() {})
 }
 
 // FetchPendingAttempts returns a list of all attempt IDs that are currently in
