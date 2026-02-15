@@ -5598,6 +5598,45 @@ func TestSwitchFailOrphanedAttempt(t *testing.T) {
 	}
 }
 
+// TestSwitchStartPreservesLiveTombstones asserts that starting the switch does
+// not remove tombstones already present in the attempt store.
+//
+// Switch.Start runs long after the RPC server begins serving, so a tombstone it
+// finds may have been written moments earlier by live traffic and still be
+// guarding an attempt ID. Sweeping belongs in the store constructor, which runs
+// before any caller exists. This test fails if a sweep is reintroduced here.
+func TestSwitchStartPreservesLiveTombstones(t *testing.T) {
+	t.Parallel()
+
+	const attemptID = uint64(99)
+
+	cdb := channeldb.OpenForTesting(t, t.TempDir())
+	s, err := initSwitchWithDB(0, cdb)
+	require.NoError(t, err)
+
+	// A settled attempt is deleted, leaving a tombstone, before the switch
+	// starts. This mirrors a DeleteAttempts landing in the window where the
+	// RPC server is up but the switch has not started yet.
+	require.NoError(t, s.attemptStore.InitAttempt(attemptID))
+	require.NoError(t, s.attemptStore.StoreResult(attemptID, &networkResult{
+		msg:         &lnwire.UpdateFulfillHTLC{},
+		unencrypted: true,
+	}))
+	results, err := s.attemptStore.DeleteAttempts([]uint64{attemptID})
+	require.NoError(t, err)
+	require.Equal(t, DeletionOK, results[attemptID])
+
+	require.NoError(t, s.Start())
+	t.Cleanup(func() { require.NoError(t, s.Stop()) })
+
+	require.ErrorIs(
+		t, s.attemptStore.InitAttempt(attemptID),
+		ErrPaymentIDAlreadyExists,
+		"starting the switch must not sweep a tombstone written by "+
+			"live traffic",
+	)
+}
+
 // TestSwitchOrphanCleanup tests that the switch's startup procedure will
 // correctly identify and clean up any orphaned attempts. This includes both
 // simple pending orphans (from a crash after InitAttempt) and "half-open"

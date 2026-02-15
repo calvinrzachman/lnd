@@ -1027,6 +1027,48 @@ func TestDeleteAttemptsProperties(t *testing.T) {
 	})
 }
 
+// TestTombstoneSweptOnStoreOpen asserts that opening the store sweeps a
+// tombstone left by a previous process, so the attempt ID is reclaimed.
+//
+// The companion property, that a tombstone written afterwards is not swept, is
+// covered by TestSwitchStartPreservesLiveTombstones, which runs a real
+// Switch.Start between writing one and checking it survives.
+func TestTombstoneSweptOnStoreOpen(t *testing.T) {
+	t.Parallel()
+
+	const inherited = uint64(1)
+
+	dir := t.TempDir()
+	db := channeldb.OpenForTesting(t, dir)
+
+	store, err := newNetworkResultStore(db, true)
+	require.NoError(t, err)
+
+	// A prior process settles an attempt and deletes it, leaving a
+	// tombstone behind.
+	require.NoError(t, store.InitAttempt(inherited))
+	require.NoError(t, store.StoreResult(inherited, &networkResult{
+		msg:         &lnwire.UpdateFulfillHTLC{},
+		unencrypted: true,
+	}))
+	results, err := store.DeleteAttempts([]uint64{inherited})
+	require.NoError(t, err)
+	require.Equal(t, DeletionOK, results[inherited])
+
+	// That process exits.
+	require.NoError(t, db.Close())
+
+	// The next one opens the same store. The inherited tombstone is swept,
+	// so the ID is reclaimed.
+	db2 := channeldb.OpenForTesting(t, dir)
+	t.Cleanup(func() { db2.Close() })
+
+	store2, err := newNetworkResultStore(db2, true)
+	require.NoError(t, err)
+	require.NoError(t, store2.InitAttempt(inherited),
+		"a tombstone from the previous process should have been swept")
+}
+
 // TestDisableRemoteRouter tests that the DisableRemoteRouter method behaves as
 // expected.
 func TestDisableRemoteRouter(t *testing.T) {
