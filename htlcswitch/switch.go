@@ -1856,6 +1856,14 @@ func (s *Switch) Start() error {
 			err)
 	}
 
+	// Sweep any tombstone records left by prior DeleteAttempts calls.
+	// Tombstones prevent stale requests from the previous process
+	// lifetime from reusing a deleted attempt ID. After a restart,
+	// no such requests can arrive, so tombstones can be safely removed.
+	if err := s.attemptStore.SweepTombstones(); err != nil {
+		return fmt.Errorf("failed to sweep tombstones: %w", err)
+	}
+
 	blockEpochStream, err := s.cfg.Notifier.RegisterBlockEpochNtfn(nil)
 	if err != nil {
 		return err
