@@ -53,7 +53,7 @@
     "/v2/switch/deleteattempts": {
       "post": {
         "summary": "DeleteAttempts removes terminal (settled or failed) payment attempt records\nfrom the server's attempt store. This enables remote clients to perform\nonline garbage collection of completed attempt data without requiring a\ndisruptive \"stop-the-world\" quiescent state.",
-        "description": "This RPC uses \"positive space\" deletion semantics: the client explicitly\nnames the finished attempts to delete. This is fundamentally safer than a\n\"delete everything except\" model for distributed systems, as it is immune\nto stale-snapshot race conditions.\n\nThe server processes each attempt ID independently and reports per-ID\nresults. Pending (in-flight) attempts are never deleted; they are reported\nwith a DELETION_PENDING status. Unknown attempt IDs are reported with\nDELETION_NOT_FOUND. The overall RPC succeeds (gRPC OK) as long as the\nrequest could be processed, even if individual attempts were not deleted.\n\nClients MUST only request deletion of attempts they have durably finalized\nin their own state and will never reuse. This is a contractual obligation;\ndeleting an attempt removes the server's idempotency protection for that\nattempt ID.",
+        "description": "This RPC uses \"positive space\" deletion semantics: the client explicitly\nnames the finished attempts to delete. This is fundamentally safer than a\n\"delete everything except\" model for distributed systems, as it is immune\nto stale-snapshot race conditions.\n\nThe server processes each attempt ID independently and reports per-ID\nresults. Pending (in-flight) attempts are never deleted; they are reported\nwith a DELETION_PENDING status. Unknown attempt IDs are reported with\nDELETION_NOT_FOUND. Previously deleted attempts are reported with\nDELETION_ALREADY_DELETED. The overall RPC succeeds (gRPC OK) as long as\nthe request could be processed, even if individual attempts were not\ndeleted.\n\nClients MUST only request deletion of attempts they have durably finalized\nin their own state and will never reuse. This is a contractual obligation;\ndeleting an attempt removes the server's idempotency protection for that\nattempt ID.",
         "operationId": "Switch_DeleteAttempts",
         "responses": {
           "200": {
@@ -365,10 +365,11 @@
       "enum": [
         "DELETION_OK",
         "DELETION_PENDING",
-        "DELETION_NOT_FOUND"
+        "DELETION_NOT_FOUND",
+        "DELETION_ALREADY_DELETED"
       ],
       "default": "DELETION_OK",
-      "description": "AttemptDeletionStatus describes the outcome of a single attempt deletion.\n\n - DELETION_OK: The attempt result was successfully deleted from the store.\n - DELETION_PENDING: The attempt is still in-flight (pending) and cannot be safely deleted.\n - DELETION_NOT_FOUND: The attempt ID was not found in the store. This can occur if the attempt\nwas already deleted or was never initialized."
+      "description": "AttemptDeletionStatus describes the outcome of a single attempt deletion.\n\n - DELETION_OK: The attempt result was successfully deleted from the store.\n - DELETION_PENDING: The attempt is still in-flight (pending) and cannot be safely deleted.\n - DELETION_NOT_FOUND: The attempt ID was not found in the store. This may indicate a client\nbug (wrong ID, wrong backend) since the server has no record of this\nattempt ever existing.\n - DELETION_ALREADY_DELETED: The attempt was already deleted in a prior call. This is expected\nduring idempotent retries and requires no corrective action."
     },
     "switchrpcBuildOnionRequest": {
       "type": "object",

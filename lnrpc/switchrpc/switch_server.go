@@ -900,6 +900,8 @@ func deletionStatusToProto(
 		return AttemptDeletionStatus_DELETION_PENDING
 	case htlcswitch.DeletionNotFound:
 		return AttemptDeletionStatus_DELETION_NOT_FOUND
+	case htlcswitch.DeletionAlreadyDeleted:
+		return AttemptDeletionStatus_DELETION_ALREADY_DELETED
 	default:
 		return AttemptDeletionStatus_DELETION_NOT_FOUND
 	}

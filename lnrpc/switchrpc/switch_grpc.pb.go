@@ -100,8 +100,10 @@ type SwitchClient interface {
 	// The server processes each attempt ID independently and reports per-ID
 	// results. Pending (in-flight) attempts are never deleted; they are reported
 	// with a DELETION_PENDING status. Unknown attempt IDs are reported with
-	// DELETION_NOT_FOUND. The overall RPC succeeds (gRPC OK) as long as the
-	// request could be processed, even if individual attempts were not deleted.
+	// DELETION_NOT_FOUND. Previously deleted attempts are reported with
+	// DELETION_ALREADY_DELETED. The overall RPC succeeds (gRPC OK) as long as
+	// the request could be processed, even if individual attempts were not
+	// deleted.
 	//
 	// Clients MUST only request deletion of attempts they have durably finalized
 	// in their own state and will never reuse. This is a contractual obligation;
@@ -254,8 +256,10 @@ type SwitchServer interface {
 	// The server processes each attempt ID independently and reports per-ID
 	// results. Pending (in-flight) attempts are never deleted; they are reported
 	// with a DELETION_PENDING status. Unknown attempt IDs are reported with
-	// DELETION_NOT_FOUND. The overall RPC succeeds (gRPC OK) as long as the
-	// request could be processed, even if individual attempts were not deleted.
+	// DELETION_NOT_FOUND. Previously deleted attempts are reported with
+	// DELETION_ALREADY_DELETED. The overall RPC succeeds (gRPC OK) as long as
+	// the request could be processed, even if individual attempts were not
+	// deleted.
 	//
 	// Clients MUST only request deletion of attempts they have durably finalized
 	// in their own state and will never reuse. This is a contractual obligation;

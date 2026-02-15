@@ -101,8 +101,10 @@ service Switch {
     The server processes each attempt ID independently and reports per-ID
     results. Pending (in-flight) attempts are never deleted; they are reported
     with a DELETION_PENDING status. Unknown attempt IDs are reported with
-    DELETION_NOT_FOUND. The overall RPC succeeds (gRPC OK) as long as the
-    request could be processed, even if individual attempts were not deleted.
+    DELETION_NOT_FOUND. Previously deleted attempts are reported with
+    DELETION_ALREADY_DELETED. The overall RPC succeeds (gRPC OK) as long as
+    the request could be processed, even if individual attempts were not
+    deleted.
 
     Clients MUST only request deletion of attempts they have durably finalized
     in their own state and will never reuse. This is a contractual obligation;
@@ -368,9 +370,14 @@ enum AttemptDeletionStatus {
     // The attempt is still in-flight (pending) and cannot be safely deleted.
     DELETION_PENDING = 1;
 
-    // The attempt ID was not found in the store. This can occur if the attempt
-    // was already deleted or was never initialized.
+    // The attempt ID was not found in the store. This may indicate a client
+    // bug (wrong ID, wrong backend) since the server has no record of this
+    // attempt ever existing.
     DELETION_NOT_FOUND = 2;
+
+    // The attempt was already deleted in a prior call. This is expected
+    // during idempotent retries and requires no corrective action.
+    DELETION_ALREADY_DELETED = 3;
 }
 
 message DisableRemoteRouterRequest {

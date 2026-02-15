@@ -66,8 +66,13 @@ const (
 	DeletionPending
 
 	// DeletionNotFound indicates the attempt ID was not found in the
-	// store.
+	// store. This may indicate a client bug (wrong ID, wrong backend).
 	DeletionNotFound
+
+	// DeletionAlreadyDeleted indicates the attempt was already deleted
+	// in a prior call. This is normal idempotent retry behavior and
+	// requires no corrective action from the client.
+	DeletionAlreadyDeleted
 )
 
 const (
@@ -642,9 +647,11 @@ func (store *networkResultStore) DeleteAttempts(
 				continue
 			}
 
-			// Do not "re-delete" tombstoned attempts.
+			// Do not "re-delete" tombstoned attempts. Report as
+			// already deleted so the client can distinguish this
+			// from a genuinely unknown attempt ID.
 			if result.msg.MsgType() == deletedHtlcMsgType {
-				results[id] = DeletionNotFound
+				results[id] = DeletionAlreadyDeleted
 				continue
 			}
 
