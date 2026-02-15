@@ -379,6 +379,10 @@ enum AttemptDeletionStatus {
     // The attempt record exists but could not be processed (e.g.
     // deserialization error). The record remains in the store.
     DELETION_FAILED = 3;
+
+    // The attempt was already deleted in a prior call. This is expected
+    // during idempotent retries and requires no corrective action.
+    DELETION_ALREADY_DELETED = 4;
 }
 
 message DisableRemoteRouterRequest {

@@ -93,6 +93,9 @@ const (
 	// The attempt record exists but could not be processed (e.g.
 	// deserialization error). The record remains in the store.
 	AttemptDeletionStatus_DELETION_FAILED AttemptDeletionStatus = 3
+	// The attempt was already deleted in a prior call. This is expected
+	// during idempotent retries and requires no corrective action.
+	AttemptDeletionStatus_DELETION_ALREADY_DELETED AttemptDeletionStatus = 4
 )
 
 // Enum value maps for AttemptDeletionStatus.
@@ -102,12 +105,14 @@ var (
 		1: "DELETION_PENDING",
 		2: "DELETION_NOT_FOUND",
 		3: "DELETION_FAILED",
+		4: "DELETION_ALREADY_DELETED",
 	}
 	AttemptDeletionStatus_value = map[string]int32{
-		"DELETION_OK":        0,
-		"DELETION_PENDING":   1,
-		"DELETION_NOT_FOUND": 2,
-		"DELETION_FAILED":    3,
+		"DELETION_OK":              0,
+		"DELETION_PENDING":         1,
+		"DELETION_NOT_FOUND":       2,
+		"DELETION_FAILED":          3,
+		"DELETION_ALREADY_DELETED": 4,
 	}
 )
 
@@ -1463,12 +1468,13 @@ const file_switchrpc_switch_proto_rawDesc = "" +
 	"\x15IndefiniteFailureCode\x12\x12\n" +
 	"\x0eREASON_UNKNOWN\x10\x00\x12\x12\n" +
 	"\x0eSWITCH_EXITING\x10\x01\x12\x14\n" +
-	"\x10HTLC_INIT_FAILED\x10\x02*k\n" +
+	"\x10HTLC_INIT_FAILED\x10\x02*\x89\x01\n" +
 	"\x15AttemptDeletionStatus\x12\x0f\n" +
 	"\vDELETION_OK\x10\x00\x12\x14\n" +
 	"\x10DELETION_PENDING\x10\x01\x12\x16\n" +
 	"\x12DELETION_NOT_FOUND\x10\x02\x12\x13\n" +
-	"\x0fDELETION_FAILED\x10\x032\xa3\x03\n" +
+	"\x0fDELETION_FAILED\x10\x03\x12\x1c\n" +
+	"\x18DELETION_ALREADY_DELETED\x10\x042\xa3\x03\n" +
 	"\x06Switch\x12F\n" +
 	"\tSendOnion\x12\x1b.switchrpc.SendOnionRequest\x1a\x1c.switchrpc.SendOnionResponse\x12I\n" +
 	"\n" +

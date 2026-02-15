@@ -229,7 +229,7 @@ func testSendOnionTwice(ht *lntest.HarnessTest) {
 	deleteResp = alice.RPC.DeleteAttempts(deleteReq)
 	require.Len(ht, deleteResp.Results, 1)
 	require.Equal(ht,
-		switchrpc.AttemptDeletionStatus_DELETION_NOT_FOUND,
+		switchrpc.AttemptDeletionStatus_DELETION_ALREADY_DELETED,
 		deleteResp.Results[0].Status,
 	)
 }

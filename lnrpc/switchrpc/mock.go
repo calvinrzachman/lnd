@@ -105,6 +105,11 @@ func (m *mockAttemptStore) DeleteAttempts(
 	return m.deleteResp, nil
 }
 
+// SweepTombstones is a no-op for the mock.
+func (m *mockAttemptStore) SweepTombstones() error {
+	return nil
+}
+
 // mockErrorDecrypter is a mock implementation of htlcswitch.ErrorDecrypter.
 type mockErrorDecrypter struct {
 	decryptedErr htlcswitch.ForwardingError
