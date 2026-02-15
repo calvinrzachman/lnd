@@ -570,17 +570,34 @@ func TestDeleteAttempts(t *testing.T) {
 		require.Equal(t, DeletionNotFound, results[id])
 	})
 
-	t.Run("InitAttempt succeeds after delete", func(t *testing.T) {
+	t.Run("tombstone blocks InitAttempt after delete", func(t *testing.T) {
 		var id uint64 = 60
 		storeSettled(t, id)
 
-		// Delete the attempt.
+		// Delete the attempt — writes a tombstone.
 		results, err := store.DeleteAttempts([]uint64{id})
 		require.NoError(t, err)
 		require.Equal(t, DeletionOK, results[id])
 
-		// Re-initializing the same ID should now succeed since the
-		// record was fully removed.
+		// Re-initializing the same ID should fail because the
+		// tombstone preserves idempotency protection.
+		err = store.InitAttempt(id)
+		require.ErrorIs(t, err, ErrPaymentIDAlreadyExists)
+	})
+
+	t.Run("InitAttempt succeeds after tombstone sweep", func(t *testing.T) {
+		var id uint64 = 61
+		storeSettled(t, id)
+
+		// Delete the attempt — writes a tombstone.
+		results, err := store.DeleteAttempts([]uint64{id})
+		require.NoError(t, err)
+		require.Equal(t, DeletionOK, results[id])
+
+		// Sweep tombstones (simulates server restart).
+		require.NoError(t, store.SweepTombstones())
+
+		// Now InitAttempt should succeed — the tombstone is gone.
 		err = store.InitAttempt(id)
 		require.NoError(t, err)
 	})

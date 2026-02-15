@@ -613,6 +613,12 @@ type AttemptStore interface {
 	// finished attempts to delete.
 	DeleteAttempts(attemptIDs []uint64) (map[uint64]DeletionStatus, error)
 
+	// SweepTombstones removes all tombstone records left by prior
+	// DeleteAttempts calls. This should be called during server startup,
+	// after all TCP connections from the previous process have been torn
+	// down by the OS.
+	SweepTombstones() error
+
 	// DisableRemoteRouter checks for in-flight payments and, if none are
 	// found, deletes the remote router marker from the database.
 	DisableRemoteRouter() error

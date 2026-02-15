@@ -920,15 +920,16 @@ type statefulAttemptStore struct {
 
 	mu          sync.Mutex
 	initialized map[uint64]bool
+	tombstoned  map[uint64]bool
 }
 
 // InitAttempt records the attempt ID and returns ErrPaymentIDAlreadyExists if
-// the ID was already initialized.
+// the ID was already initialized or tombstoned.
 func (s *statefulAttemptStore) InitAttempt(attemptID uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.initialized[attemptID] {
+	if s.initialized[attemptID] || s.tombstoned[attemptID] {
 		return htlcswitch.ErrPaymentIDAlreadyExists
 	}
 
@@ -937,7 +938,8 @@ func (s *statefulAttemptStore) InitAttempt(attemptID uint64) error {
 	return nil
 }
 
-// DeleteAttempts removes initialized IDs and reports per-ID results.
+// DeleteAttempts writes tombstones for initialized IDs and reports per-ID
+// results.
 func (s *statefulAttemptStore) DeleteAttempts(
 	attemptIDs []uint64) (map[uint64]htlcswitch.DeletionStatus, error) {
 
@@ -948,6 +950,7 @@ func (s *statefulAttemptStore) DeleteAttempts(
 	for _, id := range attemptIDs {
 		if s.initialized[id] {
 			delete(s.initialized, id)
+			s.tombstoned[id] = true
 			results[id] = htlcswitch.DeletionOK
 		} else {
 			results[id] = htlcswitch.DeletionNotFound
@@ -957,17 +960,29 @@ func (s *statefulAttemptStore) DeleteAttempts(
 	return results, nil
 }
 
+// SweepTombstones clears all tombstone records.
+func (s *statefulAttemptStore) SweepTombstones() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.tombstoned = make(map[uint64]bool)
+
+	return nil
+}
+
 // TestSendOnionAfterDelete verifies the interaction between SendOnion and
-// DeleteAttempts. It demonstrates that deleting a terminal attempt record
-// removes the idempotency protection established by InitAttempt, allowing a
-// subsequent SendOnion call with the same attempt ID to succeed. This behavior
-// is by design for the current hard-delete model; a future tombstone-based
-// approach could preserve the protection while still reclaiming storage.
+// DeleteAttempts with tombstone-based deletion. It demonstrates that deleting
+// a terminal attempt record preserves the idempotency protection: the
+// tombstone causes InitAttempt to return ErrPaymentIDAlreadyExists, preventing
+// a latent SendOnion from dispatching a duplicate HTLC. After a server restart
+// (simulated by SweepTombstones), the tombstone is removed and the attempt ID
+// can be reused.
 func TestSendOnionAfterDelete(t *testing.T) {
 	t.Parallel()
 
 	store := &statefulAttemptStore{
 		initialized: make(map[uint64]bool),
+		tombstoned:  make(map[uint64]bool),
 	}
 
 	server, _, err := New(&Config{
@@ -1009,15 +1024,27 @@ func TestSendOnionAfterDelete(t *testing.T) {
 		deleteResp.Results[0].Status,
 	)
 
-	// Step 4: SendOnion with the same ID succeeds again — the hard
-	// delete has removed the idempotency protection. This is an
-	// important behavioral property to document: hard delete trades
-	// idempotency safety for storage reclamation. A well-behaved client
-	// MUST only delete attempt IDs it has fully finalized and will
-	// never reuse.
+	// Step 4: SendOnion with the same ID is still rejected — the
+	// tombstone preserves idempotency protection. This prevents a
+	// latent SendOnion from a stale TCP connection from dispatching a
+	// duplicate HTLC after the client has already finalized and deleted
+	// the attempt.
+	_, err = server.SendOnion(t.Context(), req)
+	require.Error(t, err, "expected SendOnion to be rejected by "+
+		"tombstone after delete")
+
+	s, ok = status.FromError(err)
+	require.True(t, ok)
+	require.Equal(t, codes.AlreadyExists, s.Code())
+
+	// Step 5: Simulate server restart by sweeping tombstones. After
+	// the sweep, the attempt ID is fully released and can be reused.
+	err = store.SweepTombstones()
+	require.NoError(t, err)
+
 	_, err = server.SendOnion(t.Context(), req)
 	require.NoError(t, err, "expected SendOnion to succeed after "+
-		"delete removed idempotency protection")
+		"tombstone sweep (simulated restart)")
 }
 
 // TestMarshallFailureDetails tests the conversion of internal errors types
