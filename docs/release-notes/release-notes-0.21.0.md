@@ -97,6 +97,15 @@
   that the dispatch was received. This allows clients to build more resilient
   payment-sending logic.
 
+* Added a new `switchrpc.DeleteAttempts` RPC that allows an external router to
+  clean up terminal (settled or failed) attempt records from the `AttemptStore`.
+  The RPC accepts a batch of attempt IDs and returns per-ID results indicating
+  whether each was deleted, still pending (in-flight), or not found. Internally,
+  deletion uses a tombstone-based model: deleted records are replaced with a
+  lightweight sentinel that preserves idempotency protection (preventing
+  duplicate HTLC dispatch) until the next server restart, at which point
+  tombstones are swept automatically.
+
 ## RPC Additions
 
 * [Added support for coordinator-based MuSig2 signing
