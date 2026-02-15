@@ -231,11 +231,27 @@ func newNetworkResultStore(db kvdb.Backend,
 		return nil, err
 	}
 
-	return &networkResultStore{
+	store := &networkResultStore{
 		backend:      db,
 		results:      make(map[uint64][]chan *networkResult),
 		attemptIDMtx: multimutex.NewMutex[uint64](),
-	}, nil
+	}
+
+	// Sweep here rather than at switch startup. A tombstone guards an
+	// attempt ID against reuse by a request the client has abandoned, so
+	// only tombstones written by a previous process may be removed. This
+	// constructor runs while the server is still being assembled, before
+	// the RPC server exists, so every tombstone present now is necessarily
+	// inherited. Sweeping any later would also remove tombstones written
+	// moments earlier by live traffic, which are the ones still doing work.
+	if externalLifecycle {
+		if err := store.SweepTombstones(); err != nil {
+			return nil, fmt.Errorf("unable to sweep tombstones: "+
+				"%w", err)
+		}
+	}
+
+	return store, nil
 }
 
 // InitAttempt initializes the payment attempt with the given attemptID.

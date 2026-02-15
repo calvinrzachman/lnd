@@ -1029,6 +1029,69 @@ func TestDeleteAttemptsProperties(t *testing.T) {
 
 // TestDisableRemoteRouter tests that the DisableRemoteRouter method behaves as
 // expected.
+// TestTombstoneSweepScopedToPriorProcess asserts that opening the store sweeps
+// tombstones inherited from a previous process, and that tombstones written
+// afterwards survive.
+//
+// The distinction is the whole guarantee. A tombstone written by live traffic
+// is still guarding an attempt ID against a request the client abandoned, so
+// removing it reopens the duplicate dispatch it exists to prevent. Only the
+// store constructor may sweep, because it runs before the RPC server exists
+// and so before any caller can have written one.
+func TestTombstoneSweepScopedToPriorProcess(t *testing.T) {
+	t.Parallel()
+
+	const (
+		inherited = uint64(1)
+		live      = uint64(2)
+	)
+
+	dir := t.TempDir()
+	db := channeldb.OpenForTesting(t, dir)
+
+	store, err := newNetworkResultStore(db, true)
+	require.NoError(t, err)
+
+	// A prior process settles an attempt and deletes it, leaving a
+	// tombstone behind.
+	require.NoError(t, store.InitAttempt(inherited))
+	require.NoError(t, store.StoreResult(inherited, &networkResult{
+		msg:         &lnwire.UpdateFulfillHTLC{},
+		unencrypted: true,
+	}))
+	results, err := store.DeleteAttempts([]uint64{inherited})
+	require.NoError(t, err)
+	require.Equal(t, DeletionOK, results[inherited])
+
+	// That process exits.
+	require.NoError(t, db.Close())
+
+	// The next one opens the same store. The inherited tombstone is swept,
+	// so the ID is reclaimed.
+	db2 := channeldb.OpenForTesting(t, dir)
+	t.Cleanup(func() { db2.Close() })
+
+	store2, err := newNetworkResultStore(db2, true)
+	require.NoError(t, err)
+	require.NoError(t, store2.InitAttempt(inherited),
+		"a tombstone from the previous process should have been swept")
+
+	// Now live traffic deletes a second attempt, well after startup.
+	require.NoError(t, store2.InitAttempt(live))
+	require.NoError(t, store2.StoreResult(live, &networkResult{
+		msg:         &lnwire.UpdateFulfillHTLC{},
+		unencrypted: true,
+	}))
+	results, err = store2.DeleteAttempts([]uint64{live})
+	require.NoError(t, err)
+	require.Equal(t, DeletionOK, results[live])
+
+	// That tombstone must survive for the life of the process: nothing
+	// sweeps after construction.
+	require.ErrorIs(t, store2.InitAttempt(live), ErrPaymentIDAlreadyExists,
+		"a tombstone written after startup must keep guarding its ID")
+}
+
 func TestDisableRemoteRouter(t *testing.T) {
 	t.Parallel()
 
