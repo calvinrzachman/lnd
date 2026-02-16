@@ -416,7 +416,8 @@ func TestDeleteAttempts(t *testing.T) {
 	t.Parallel()
 
 	db := channeldb.OpenForTesting(t, t.TempDir())
-	store := newNetworkResultStore(db)
+	store, err := newNetworkResultStore(db, false)
+	require.NoError(t, err)
 
 	// Helper to create and store a settled result.
 	storeSettled := func(t *testing.T, id uint64) {
