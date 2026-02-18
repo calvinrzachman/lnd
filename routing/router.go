@@ -106,7 +106,13 @@ type PaymentAttemptDispatcher interface {
 	// SendHTLC is a function that directs a link-layer switch to
 	// forward a fully encoded payment to the first hop in the route
 	// denoted by its public key. A non-nil error is to be returned if the
-	// payment was unsuccessful.
+	// payment was unsuccessful. A return value of ErrDuplicateAdd signals
+	// that this attempt has already been processed and that the caller
+	// should proceed to track the dispatch result via GetAttemptResult.
+	// While the dispatcher should gracefully handle duplicate `attemptID`s
+	// by returning `ErrDuplicateAdd`, callers must generate globally unique
+	// IDs for each new logical payment attempt to avoid unintended
+	// collisions.
 	SendHTLC(firstHop lnwire.ShortChannelID,
 		attemptID uint64,
 		htlcAdd *lnwire.UpdateAddHTLC) error
