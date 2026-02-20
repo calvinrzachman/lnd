@@ -614,4 +614,8 @@ type AttemptStore interface {
 	// after all TCP connections from the previous process have been torn
 	// down by the OS.
 	SweepTombstones() error
+
+	// DisableRemoteRouter checks for attempt entries and, if none are
+	// found, deletes the remote router marker from the database.
+	DisableRemoteRouter() error
 }
