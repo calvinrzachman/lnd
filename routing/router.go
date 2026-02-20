@@ -318,6 +318,11 @@ type Config struct {
 	// control the outgoing channel of a payment.
 	TrafficShaper fn.Option[htlcswitch.AuxTrafficShaper]
 
+	// ExternalPaymentLifecycle indicates that the payment lifecycle is
+	// managed by an external entity, and the dispatcher's payment store
+	// should not be cleaned on startup.
+	ExternalPaymentLifecycle bool
+
 	// ReconcileAttempt is the strategy executed for each in-flight
 	// HTLC attempt during startup before result collection begins.
 	// See ReconcileFunc for details.
@@ -1478,9 +1483,19 @@ func (r *ChannelRouter) resumePayments() error {
 		}
 	}
 
-	log.Debugf("Cleaning network result store.")
-	if err := r.cfg.Payer.CleanStore(toKeep); err != nil {
-		return err
+	// When the payment life-cycle is managed by an external entity, we
+	// must not clean the attempt store on startup. The external controller
+	// relies on HTLC attempt information persisted by the dispatcher to
+	// resume its payment lifecycle and will need to coordinate all cleanup
+	// operations itself.
+	if !r.cfg.ExternalPaymentLifecycle {
+		log.Debugf("Cleaning network result store.")
+		if err := r.cfg.Payer.CleanStore(toKeep); err != nil {
+			return err
+		}
+	} else {
+		log.Infof("Dispatcher attempt store cleanup disabled. " +
+			"Attempt information must be cleaned remotely.")
 	}
 
 	// launchPayment is a helper closure that handles resuming the payment.
