@@ -101,6 +101,15 @@ service Switch {
     attempt removes the server's idempotency protection for that attempt ID.
     */
     rpc DeleteAttempts (DeleteAttemptsRequest) returns (DeleteAttemptsResponse);
+
+    /*
+    DisableRemoteRouter marks the database as no longer being used by a remote
+    router. This is useful for migrating from a remote router setup back to the
+    default embedded router. This RPC will fail if there are any attempt entries
+    remaining in the network result store.
+    */
+    rpc DisableRemoteRouter (DisableRemoteRouterRequest)
+        returns (DisableRemoteRouterResponse);
 }
 
 message SendOnionRequest {
@@ -374,4 +383,10 @@ enum AttemptDeletionStatus {
     // The attempt was already deleted in a prior call. This is expected
     // during idempotent retries and requires no corrective action.
     DELETION_ALREADY_DELETED = 4;
+}
+
+message DisableRemoteRouterRequest {
+}
+
+message DisableRemoteRouterResponse {
 }
