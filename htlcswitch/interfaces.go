@@ -608,4 +608,10 @@ type AttemptStore interface {
 	// from the store. The returned map reports the outcome for each
 	// requested attempt ID.
 	DeleteAttempts(attemptIDs []uint64) (map[uint64]DeletionStatus, error)
+
+	// SweepTombstones removes all tombstone records left by prior
+	// DeleteAttempts calls. This should be called during server startup,
+	// after all TCP connections from the previous process have been torn
+	// down by the OS.
+	SweepTombstones() error
 }

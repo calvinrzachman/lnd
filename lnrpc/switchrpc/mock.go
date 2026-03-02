@@ -107,6 +107,11 @@ func (m *mockAttemptStore) DeleteAttempts(
 	return m.deleteResp, nil
 }
 
+// SweepTombstones is a no-op for the mock.
+func (m *mockAttemptStore) SweepTombstones() error {
+	return nil
+}
+
 // statefulAttemptStore is a mock that tracks initialized attempt IDs to
 // simulate real idempotency behavior. Unlike the basic mockAttemptStore, this
 // mock maintains state across calls, making it suitable for testing multi-step
@@ -116,15 +121,16 @@ type statefulAttemptStore struct {
 
 	mu          sync.Mutex
 	initialized map[uint64]bool
+	tombstoned  map[uint64]bool
 }
 
 // InitAttempt records the attempt ID and returns ErrPaymentIDAlreadyExists if
-// the ID was already initialized.
+// the ID was already initialized or tombstoned.
 func (s *statefulAttemptStore) InitAttempt(attemptID uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.initialized[attemptID] {
+	if s.initialized[attemptID] || s.tombstoned[attemptID] {
 		return htlcswitch.ErrPaymentIDAlreadyExists
 	}
 
@@ -133,7 +139,8 @@ func (s *statefulAttemptStore) InitAttempt(attemptID uint64) error {
 	return nil
 }
 
-// DeleteAttempts removes initialized IDs and reports per-ID results.
+// DeleteAttempts writes tombstones for initialized IDs and reports per-ID
+// results.
 func (s *statefulAttemptStore) DeleteAttempts(
 	attemptIDs []uint64) (map[uint64]htlcswitch.DeletionStatus, error) {
 
@@ -144,13 +151,26 @@ func (s *statefulAttemptStore) DeleteAttempts(
 	for _, id := range attemptIDs {
 		if s.initialized[id] {
 			delete(s.initialized, id)
+			s.tombstoned[id] = true
 			results[id] = htlcswitch.DeletionOK
+		} else if s.tombstoned[id] {
+			results[id] = htlcswitch.DeletionAlreadyDeleted
 		} else {
 			results[id] = htlcswitch.DeletionNotFound
 		}
 	}
 
 	return results, nil
+}
+
+// SweepTombstones clears all tombstone records.
+func (s *statefulAttemptStore) SweepTombstones() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.tombstoned = make(map[uint64]bool)
+
+	return nil
 }
 
 // mockErrorDecrypter is a mock implementation of htlcswitch.ErrorDecrypter.
