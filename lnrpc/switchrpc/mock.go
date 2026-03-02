@@ -149,13 +149,14 @@ func (s *statefulAttemptStore) DeleteAttempts(
 
 	results := make(map[uint64]htlcswitch.DeletionStatus)
 	for _, id := range attemptIDs {
-		if s.initialized[id] {
+		switch {
+		case s.initialized[id]:
 			delete(s.initialized, id)
 			s.tombstoned[id] = true
 			results[id] = htlcswitch.DeletionOK
-		} else if s.tombstoned[id] {
+		case s.tombstoned[id]:
 			results[id] = htlcswitch.DeletionAlreadyDeleted
-		} else {
+		default:
 			results[id] = htlcswitch.DeletionNotFound
 		}
 	}
