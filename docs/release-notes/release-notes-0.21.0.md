@@ -198,6 +198,10 @@
   composite `synced_to_chain` field which also considers router and blockbeat
   dispatcher states.
 
+* [Add `source_pub_key` to `Route` proto message](https://github.com/lightningnetwork/lnd/pull/9153)
+  so that routes can be constructed and unmarshalled from the perspective of
+  different nodes. Defaults to the node's own public key.
+
 ## lncli Updates
 
 ## Breaking Changes
