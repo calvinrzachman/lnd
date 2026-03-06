@@ -350,7 +350,7 @@ func (p *controlTower) SubscribeAllPayments() (ControlTowerSubscriber, error) {
 	if err != nil {
 		return nil, err
 	}
-	log.Debugf("Scanning for inflight payments finished",
+	log.Debugf("Scanning for inflight payments finished: %d",
 		len(inflightPayments))
 
 	for index := range inflightPayments {
