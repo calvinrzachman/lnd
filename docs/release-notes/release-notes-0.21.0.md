@@ -137,6 +137,26 @@
   (client MUST retry). This is a **breaking change** for any clients of the
   `SendOnion` RPC.
 
+* The `ChannelRouter` now supports a [configurable attempt reconciliation
+  hook](https://github.com/lightningnetwork/lnd/pull/10621) that runs for each
+  in-flight HTLC attempt during startup, before result collection begins. This
+  enables write-first crash recovery for deployments where the router and switch
+  run in separate processes (e.g. a remote `ChannelRouter` dispatching via
+  `switchrpc.SendOnion`). The callback lets the caller confirm dispatch status by
+  idempotently re-submitting each attempt, resolving the ambiguity that arises
+  when a crash occurs between persisting an attempt and receiving the switch's
+  acknowledgement. The default is a no-op, so existing single-process lnd
+  deployments are unaffected.
+
+* Added a new [`switchrpc.DeleteAttempts`](https://github.com/lightningnetwork/lnd/pull/10602)
+  RPC that allows an external router to clean up terminal (settled or failed)
+  attempt records from the `AttemptStore`. The RPC accepts a batch of attempt
+  IDs and returns per-ID results indicating whether each was deleted, already
+  deleted, still pending (in-flight), or not found. Deleting a terminal attempt
+  record removes the duplicate protection established by InitAttempt, allowing a
+  subsequent SendOnion call with the same attempt ID to succeed. Clients should
+  only delete attempt IDs they have fully finalized and will never reuse.
+
 ## RPC Additions
 
 * [Added support for coordinator-based MuSig2 signing
