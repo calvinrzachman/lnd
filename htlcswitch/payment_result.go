@@ -176,54 +176,59 @@ type networkResultStore struct {
 	attemptIDMtx *multimutex.Mutex[uint64]
 }
 
-func newNetworkResultStore(db kvdb.Backend,
-	externalLifecycle bool) (*networkResultStore, error) {
+// validateLifecycleMode checks that the database's lifecycle marker is
+// consistent with the current operating mode. In external mode the marker is
+// written on first use (CreateTopLevelBucket is idempotent). In local mode
+// the marker's presence is treated as a fatal mismatch to prevent data loss.
+func validateLifecycleMode(db kvdb.Backend,
+	externalLifecycle bool) error {
 
-	// Check for a state mismatch. If the payment lifecycle is managed
-	// locally but the database has been marked for external management,
-	// we must exit to prevent data loss.
-	if !externalLifecycle {
-		var isMarkedExternal bool
-		err := db.View(func(tx kvdb.RTx) error {
-			if tx.ReadBucket(externalLifecycleMarkerBucket) != nil {
-				isMarkedExternal = true
-			}
-
-			return nil
-		}, func() {
-			isMarkedExternal = false
-		})
-		if err != nil {
-			return nil, fmt.Errorf("unable to check for "+
-				"external lifecycle marker: %w", err)
-		}
-
-		if isMarkedExternal {
-			return nil, fmt.Errorf("the htlc attempt database is " +
-				"marked for external lifecycle management " +
-				"by a switchrpc build, but this binary is " +
-				"in local management mode. Halting to " +
-				"prevent data loss. To use this database, " +
-				"restart with an lnd build that includes " +
-				"the `switchrpc` build tag")
-		}
-	}
-
-	// If the payment lifecycle is managed externally, write the marker.
-	// This is placed after the check above to ensure we don't write and
-	// then immediately fail in a misconfigured dev environment.
 	if externalLifecycle {
-		err := db.Update(func(tx kvdb.RwTx) error {
+		// Record the marker. CreateTopLevelBucket is a no-op when
+		// the bucket already exists.
+		return db.Update(func(tx kvdb.RwTx) error {
 			_, err := tx.CreateTopLevelBucket(
 				externalLifecycleMarkerBucket,
 			)
 
 			return err
 		}, func() {})
-		if err != nil {
-			return nil, fmt.Errorf("unable to write external "+
-				"lifecycle marker: %w", err)
+	}
+
+	// Local mode: the marker must not be present.
+	var isMarkedExternal bool
+	err := db.View(func(tx kvdb.RTx) error {
+		if tx.ReadBucket(externalLifecycleMarkerBucket) != nil {
+			isMarkedExternal = true
 		}
+
+		return nil
+	}, func() {
+		isMarkedExternal = false
+	})
+	if err != nil {
+		return fmt.Errorf("unable to check lifecycle marker: %w",
+			err)
+	}
+
+	if isMarkedExternal {
+		return fmt.Errorf("database contains a marker set by a " +
+			"previous switchrpc build that manages payment " +
+			"lifecycles externally, but this binary is " +
+			"running in local mode. Refusing to start to " +
+			"prevent data loss. To clear the marker, restart " +
+			"with a switchrpc-enabled build and call " +
+			"DisableRemoteRouter")
+	}
+
+	return nil
+}
+
+func newNetworkResultStore(db kvdb.Backend,
+	externalLifecycle bool) (*networkResultStore, error) {
+
+	if err := validateLifecycleMode(db, externalLifecycle); err != nil {
+		return nil, err
 	}
 
 	return &networkResultStore{
