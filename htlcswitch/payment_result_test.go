@@ -1062,7 +1062,6 @@ func TestMarkerCollision(t *testing.T) {
 	// should fail because the DB is marked for external management.
 	_, err = newNetworkResultStore(db, false)
 	require.Error(t, err)
-	require.Contains(t, err.Error(),
-		"marked for external lifecycle management",
-	)
+	require.Contains(t, err.Error(), "marker")
+	require.Contains(t, err.Error(), "DisableRemoteRouter")
 }
