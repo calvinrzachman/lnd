@@ -50,11 +50,31 @@ const (
 	fakeHopHintCapacity = btcutil.Amount(10 * btcutil.SatoshiPerBitcoin)
 )
 
+// RouteOrigin determines where routes can originate from. The backward
+// Dijkstra terminates when it reaches any origin vertex. This is the
+// source-end counterpart to AdditionalEdge, which extends the graph at the
+// destination end. Standard lnd uses singleOrigin (one source node). A
+// multi-backend payment service can provide a multi-source implementation
+// that terminates at any of its gateway nodes.
+type RouteOrigin interface {
+	// IsOrigin reports whether the given vertex is a valid route starting
+	// point.
+	IsOrigin(v route.Vertex) bool
+}
+
+// singleOrigin is the default RouteOrigin: a single source vertex.
+type singleOrigin struct{ source route.Vertex }
+
+// IsOrigin reports whether v is the source vertex.
+func (s *singleOrigin) IsOrigin(v route.Vertex) bool {
+	return v == s.source
+}
+
 // pathFinder defines the interface of a path finding algorithm.
 type pathFinder = func(g *graphParams, r *RestrictParams,
-	cfg *PathFindingConfig, self, source, target route.Vertex,
-	amt lnwire.MilliSatoshi, timePref float64, finalHtlcExpiry int32) (
-	[]*unifiedEdge, float64, error)
+	cfg *PathFindingConfig, self route.Vertex, origin RouteOrigin,
+	target route.Vertex, amt lnwire.MilliSatoshi, timePref float64,
+	finalHtlcExpiry int32) ([]*unifiedEdge, float64, error)
 
 var (
 	// DefaultEstimator is the default estimator used for computing
@@ -601,7 +621,8 @@ func getOutgoingBalance(node route.Vertex, outgoingChans map[uint64]struct{},
 // path and accurately check the amount to forward at every node against the
 // available bandwidth.
 func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
-	self, source, target route.Vertex, amt lnwire.MilliSatoshi,
+	self route.Vertex, origin RouteOrigin, target route.Vertex,
+	amt lnwire.MilliSatoshi,
 	timePref float64, finalHtlcExpiry int32) ([]*unifiedEdge, float64,
 	error) {
 
@@ -666,7 +687,7 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 
 	// If we are routing from ourselves, check that we have enough local
 	// balance available.
-	if source == self {
+	if origin.IsOrigin(self) {
 		max, total, err := getOutgoingBalance(
 			self, outgoingChanMap, g.bandwidthHints, g.graph,
 		)
@@ -857,7 +878,7 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 			outboundFee   int64
 		)
 
-		if fromVertex != source {
+		if !origin.IsOrigin(fromVertex) {
 			outboundFee = int64(
 				edge.policy.ComputeFee(amountToSend),
 			)
@@ -956,7 +977,7 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 		// little inaccuracy here because we are over estimating by
 		// 1 hop.
 		var payloadSize uint64
-		if fromVertex != source {
+		if !origin.IsOrigin(fromVertex) {
 			// In case the unifiedEdge does not have a payload size
 			// function supplied we request a graceful shutdown
 			// because this should never happen.
@@ -1051,7 +1072,7 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 		return fromFeatures, nil
 	}
 
-	routeToSelf := source == target
+	routeToSelf := origin.IsOrigin(target)
 	for {
 		nodesVisited++
 
@@ -1148,12 +1169,19 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 		// from the heap.
 		partialPath = heap.Pop(&nodeHeap).(*nodeWithDist)
 
-		// If we've reached our source (or we don't have any incoming
-		// edges), then we're done here and can exit the graph
-		// traversal early.
-		if partialPath.node == source {
+		// If we've reached a valid origin (or we don't have any
+		// incoming edges), then we're done here and can exit the
+		// graph traversal early.
+		if origin.IsOrigin(partialPath.node) {
 			break
 		}
+	}
+
+	// The path finding loop exits either when it reaches a valid origin or
+	// when the heap empties. In the latter case, no path exists.
+	source := partialPath.node
+	if !origin.IsOrigin(source) {
+		return nil, 0, errNoPathFound
 	}
 
 	// Use the distance map to unravel the forward path from source to

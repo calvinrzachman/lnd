@@ -611,7 +611,8 @@ func (r *ChannelRouter) FindRoute(req *RouteRequest) (*route.Route, float64,
 			graph:           r.cfg.RoutingGraph,
 		},
 		req.Restrictions, &r.cfg.PathFindingConfig,
-		r.cfg.SelfNode, req.Source, req.Target, req.Amount,
+		r.cfg.SelfNode, &singleOrigin{req.Source}, req.Target,
+		req.Amount,
 		req.TimePreference, finalHtlcExpiry,
 	)
 	if err != nil {
