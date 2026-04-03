@@ -893,6 +893,9 @@ func TestPathFinding(t *testing.T) {
 		name: "multi origin",
 		fn:   runMultiOrigin,
 	}, {
+		name: "multi origin cheapest path",
+		fn:   runMultiOriginCheapestPath,
+	}, {
 		name: "with metadata",
 		fn:   runFindPathWithMetadata,
 	}, {
@@ -3089,21 +3092,24 @@ func (m *multiOrigin) IsOrigin(v route.Vertex) bool {
 }
 
 // findPathWithOrigin is a test helper that runs findPath with a given
-// RouteOrigin and returns the path.
+// RouteOrigin and returns the settled source vertex alongside the path.
 func findPathWithOrigin(t *testing.T, ctx *pathFindingTestContext,
 	origin RouteOrigin, target route.Vertex,
-	amt lnwire.MilliSatoshi) ([]*unifiedEdge, error) {
+	amt lnwire.MilliSatoshi) (route.Vertex, []*unifiedEdge, error) {
 
 	t.Helper()
 
 	sourceNode, err := ctx.v1Graph.SourceNode(t.Context())
 	require.NoError(t, err)
 
-	var path []*unifiedEdge
+	var (
+		source route.Vertex
+		path   []*unifiedEdge
+	)
 	err = ctx.v1Graph.GraphSession(
 		t.Context(),
 		func(graph graphdb.NodeTraverser) error {
-			path, _, err = findPath(
+			source, path, _, err = findPath(
 				&graphParams{
 					bandwidthHints: ctx.bandwidthHints,
 					graph:          graph,
@@ -3121,7 +3127,7 @@ func findPathWithOrigin(t *testing.T, ctx *pathFindingTestContext,
 		},
 	)
 
-	return path, err
+	return source, path, err
 }
 
 // runMultiOrigin tests that the pathfinder correctly terminates at the nearest
@@ -3180,10 +3186,11 @@ func runMultiOrigin(t *testing.T, useCache bool) {
 		gw1: {},
 		gw2: {},
 	}}
-	path, err := findPathWithOrigin(
+	source, path, err := findPathWithOrigin(
 		t, ctx, bothOrigins, target, paymentAmt,
 	)
 	require.NoError(t, err, "unable to find multi-origin path")
+	require.Equal(t, gw1, source, "expected gw1 as selected route source")
 	assertExpectedPath(
 		t, ctx.testGraphInstance.aliasMap, path, "alice", "dest",
 	)
@@ -3193,13 +3200,229 @@ func runMultiOrigin(t *testing.T, useCache bool) {
 	gw2Only := &multiOrigin{sources: map[route.Vertex]struct{}{
 		gw2: {},
 	}}
-	path, err = findPathWithOrigin(
+	source, path, err = findPathWithOrigin(
 		t, ctx, gw2Only, target, paymentAmt,
 	)
 	require.NoError(t, err, "unable to find path via gw2")
+	require.Equal(t, gw2, source, "expected gw2 as selected route source")
 	assertExpectedPath(
 		t, ctx.testGraphInstance.aliasMap, path, "bob", "dest",
 	)
+
+	// An empty origin set should return errNoPathFound, since the
+	// path-finding loop will exhaust the heap without reaching any origin.
+	emptyOrigin := &multiOrigin{sources: map[route.Vertex]struct{}{}}
+	_, _, err = findPathWithOrigin(
+		t, ctx, emptyOrigin, target, paymentAmt,
+	)
+	require.ErrorIs(t, err, errNoPathFound)
+
+	// When the target is also an origin (circular payment scenario), the
+	// pathfinder should still find a valid route.
+	targetIsOrigin := &multiOrigin{sources: map[route.Vertex]struct{}{
+		gw1:    {},
+		target: {},
+	}}
+	source, path, err = findPathWithOrigin(
+		t, ctx, targetIsOrigin, target, paymentAmt,
+	)
+	require.NoError(t, err, "unable to find path when target is origin")
+	require.Equal(t, gw1, source, "expected gw1 as selected route source")
+	assertExpectedPath(
+		t, ctx.testGraphInstance.aliasMap, path, "alice", "dest",
+	)
+}
+
+// runMultiOriginCheapestPath proves that multi-origin termination finds the
+// globally cheapest path by cross-validating against exhaustive single-origin
+// searches. This addresses the question: "is it enough to halt when you've
+// found one of the origin nodes?" The answer is yes, because Dijkstra's
+// min-heap ordering guarantees the first origin popped has the minimum cost.
+//
+// The test builds a network with three gateways at varying distances and fee
+// levels, runs findPath once with all three as a multi-origin set, then runs
+// findPath separately for each gateway as a single origin. The multi-origin
+// result must match the cheapest individual result.
+func runMultiOriginCheapestPath(t *testing.T, useCache bool) {
+	// Build a network where the cheapest origin is NOT the one with the
+	// fewest intermediate hops:
+	//
+	//   gw1 ---- cheap1 ---- cheap2 ---- dest    (2 intermediaries)
+	//   gw2 ---- expensive ---- dest              (1 intermediary)
+	//   gw3 ---- medium1 ---- medium2 ---- dest   (2 intermediaries)
+	//
+	// gw2's path has the fewest hops, but gw1's path is cheapest in fees.
+	// Origins are fee-exempt (the sender doesn't pay its own forwarding
+	// fee), so cost differentiation comes entirely from the intermediate
+	// hops. The cheap1/cheap2 edges each charge 100 msat base fee, the
+	// expensive edge charges 5000, and the medium edges charge 800 each.
+	testChannels := []*testChannel{
+		// gw1's path: cheap intermediaries.
+		symmetricTestChannel("gw1", "cheap1", 100000,
+			&testChannelPolicy{
+				Expiry:      144,
+				FeeBaseMsat: 100,
+			}, 1,
+		),
+		symmetricTestChannel("cheap1", "cheap2", 100000,
+			&testChannelPolicy{
+				Expiry:      144,
+				FeeBaseMsat: 100,
+			}, 2,
+		),
+		symmetricTestChannel("cheap2", "dest", 100000,
+			&testChannelPolicy{
+				Expiry:      144,
+				FeeBaseMsat: 100,
+			}, 3,
+		),
+		// gw2's path: fewest hops but expensive intermediary.
+		symmetricTestChannel("gw2", "expensive", 100000,
+			&testChannelPolicy{
+				Expiry:      144,
+				FeeBaseMsat: 5000,
+			}, 4,
+		),
+		symmetricTestChannel("expensive", "dest", 100000,
+			&testChannelPolicy{
+				Expiry:      144,
+				FeeBaseMsat: 5000,
+			}, 5,
+		),
+		// gw3's path: medium-cost intermediaries.
+		symmetricTestChannel("gw3", "medium1", 100000,
+			&testChannelPolicy{
+				Expiry:      144,
+				FeeBaseMsat: 800,
+			}, 6,
+		),
+		symmetricTestChannel("medium1", "medium2", 100000,
+			&testChannelPolicy{
+				Expiry:      144,
+				FeeBaseMsat: 800,
+			}, 7,
+		),
+		symmetricTestChannel("medium2", "dest", 100000,
+			&testChannelPolicy{
+				Expiry:      144,
+				FeeBaseMsat: 800,
+			}, 8,
+		),
+	}
+
+	ctx := newPathFindingTestContext(t, useCache, testChannels, "gw1")
+
+	gw1 := ctx.keyFromAlias("gw1")
+	gw2 := ctx.keyFromAlias("gw2")
+	gw3 := ctx.keyFromAlias("gw3")
+	target := ctx.keyFromAlias("dest")
+	paymentAmt := lnwire.NewMSatFromSatoshis(1000)
+
+	const (
+		startingHeight = 100
+		finalHopCLTV   = 1
+	)
+
+	// buildRoute converts a findPath result into a route so we can
+	// compare TotalFees across origins.
+	buildRoute := func(source route.Vertex,
+		path []*unifiedEdge) *route.Route {
+
+		r, err := newRoute(
+			source, path, startingHeight,
+			finalHopParams{
+				amt:       paymentAmt,
+				cltvDelta: finalHopCLTV,
+				records:   nil,
+			}, nil,
+		)
+		require.NoError(t, err)
+
+		return r
+	}
+
+	// Run multi-origin search with all three gateways.
+	allOrigins := &multiOrigin{sources: map[route.Vertex]struct{}{
+		gw1: {},
+		gw2: {},
+		gw3: {},
+	}}
+	multiSource, multiPath, err := findPathWithOrigin(
+		t, ctx, allOrigins, target, paymentAmt,
+	)
+	require.NoError(t, err, "multi-origin findPath failed")
+	multiRoute := buildRoute(multiSource, multiPath)
+
+	// Run single-origin search for each gateway independently
+	// and record the total fees for each.
+	type singleResult struct {
+		name   string
+		vertex route.Vertex
+		fees   lnwire.MilliSatoshi
+	}
+	gateways := []struct {
+		name   string
+		vertex route.Vertex
+	}{
+		{"gw1", gw1},
+		{"gw2", gw2},
+		{"gw3", gw3},
+	}
+
+	var results []singleResult
+	for _, gw := range gateways {
+		origin := &singleOrigin{source: gw.vertex}
+		src, path, err := findPathWithOrigin(
+			t, ctx, origin, target, paymentAmt,
+		)
+		require.NoError(t, err, "single-origin findPath failed for %s",
+			gw.name)
+
+		r := buildRoute(src, path)
+		results = append(results, singleResult{
+			name:   gw.name,
+			vertex: gw.vertex,
+			fees:   r.TotalFees(),
+		})
+	}
+
+	// Find the cheapest single-origin result.
+	cheapest := results[0]
+	for _, r := range results[1:] {
+		if r.fees < cheapest.fees {
+			cheapest = r
+		}
+	}
+
+	// Assert multi-origin picked the same gateway as the cheapest
+	// individual search. This is the core property: early termination in
+	// multi-origin Dijkstra finds the globally optimal origin.
+	require.Equal(t, cheapest.vertex, multiSource,
+		"multi-origin selected %s but cheapest individual origin is "+
+			"%s (fees: multi=%v, gw1=%v, gw2=%v, gw3=%v)",
+		multiSource, cheapest.name, multiRoute.TotalFees(),
+		results[0].fees, results[1].fees, results[2].fees,
+	)
+
+	// Assert the total fees match exactly.
+	require.Equal(t, cheapest.fees, multiRoute.TotalFees(),
+		"multi-origin fees should equal cheapest single-origin fees",
+	)
+
+	// Sanity check the expected winner and path.
+	require.Equal(t, gw1, multiSource,
+		"expected gw1 as cheapest origin")
+	assertExpectedPath(
+		t, ctx.testGraphInstance.aliasMap, multiPath,
+		"cheap1", "cheap2", "dest",
+	)
+
+	// Log the fee comparison for visibility.
+	t.Logf("Multi-origin fees: %v (via %s)", multiRoute.TotalFees(),
+		cheapest.name)
+	for _, r := range results {
+		t.Logf("  %s single-origin fees: %v", r.name, r.fees)
+	}
 }
 
 // runInboundFees tests whether correct routes are built when inbound fees
@@ -3456,7 +3679,7 @@ func dbFindPath(graph *graphdb.VersionedGraph,
 
 	var route []*unifiedEdge
 	err = graph.GraphSession(ctx, func(graph graphdb.NodeTraverser) error {
-		route, _, err = findPath(
+		_, route, _, err = findPath(
 			&graphParams{
 				additionalEdges: additionalEdges,
 				bandwidthHints:  bandwidthHints,
