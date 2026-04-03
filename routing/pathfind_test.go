@@ -890,6 +890,9 @@ func TestPathFinding(t *testing.T) {
 		name: "route to self",
 		fn:   runRouteToSelf,
 	}, {
+		name: "multi origin",
+		fn:   runMultiOrigin,
+	}, {
 		name: "with metadata",
 		fn:   runFindPathWithMetadata,
 	}, {
@@ -3073,6 +3076,132 @@ func runRouteToSelf(t *testing.T, useCache bool) {
 	ctx.assertPath(path, []uint64{1, 3, 2})
 }
 
+// multiOrigin is a RouteOrigin that terminates at any vertex in the set. This
+// is the multi-source variant for external payment controllers that dispatch
+// from multiple gateway nodes.
+type multiOrigin struct {
+	sources map[route.Vertex]struct{}
+}
+
+func (m *multiOrigin) IsOrigin(v route.Vertex) bool {
+	_, ok := m.sources[v]
+	return ok
+}
+
+// findPathWithOrigin is a test helper that runs findPath with a given
+// RouteOrigin and returns the path.
+func findPathWithOrigin(t *testing.T, ctx *pathFindingTestContext,
+	origin RouteOrigin, target route.Vertex,
+	amt lnwire.MilliSatoshi) ([]*unifiedEdge, error) {
+
+	t.Helper()
+
+	sourceNode, err := ctx.v1Graph.SourceNode(t.Context())
+	require.NoError(t, err)
+
+	var path []*unifiedEdge
+	err = ctx.v1Graph.GraphSession(
+		t.Context(),
+		func(graph graphdb.NodeTraverser) error {
+			path, _, err = findPath(
+				&graphParams{
+					bandwidthHints: ctx.bandwidthHints,
+					graph:          graph,
+				},
+				&ctx.restrictParams,
+				&ctx.pathFindingConfig,
+				sourceNode.PubKeyBytes,
+				origin, target,
+				amt, 0, 0,
+			)
+
+			return err
+		}, func() {
+			path = nil
+		},
+	)
+
+	return path, err
+}
+
+// runMultiOrigin tests that the pathfinder correctly terminates at the nearest
+// origin when given a RouteOrigin containing multiple valid source vertices.
+// This exercises the multi-source Dijkstra behavior needed by an external
+// payment controller that dispatches from multiple gateway nodes.
+func runMultiOrigin(t *testing.T, useCache bool) {
+	// Build a diamond-shaped network with two possible origins:
+	//
+	//   gw1 ---- alice ---- dest
+	//   gw2 ---- bob ------/
+	//
+	// Both gw1 and gw2 are valid origins. Since origins are fee-exempt
+	// (the sender doesn't pay its own forwarding fee), we differentiate
+	// the paths by the intermediate hop's fee: alice charges 500 msat
+	// while bob charges 2000 msat.
+	testChannels := []*testChannel{
+		symmetricTestChannel("gw1", "alice", 100000,
+			&testChannelPolicy{
+				Expiry:      144,
+				FeeBaseMsat: 500,
+			}, 1,
+		),
+		symmetricTestChannel("gw2", "bob", 100000,
+			&testChannelPolicy{
+				Expiry:      144,
+				FeeBaseMsat: 500,
+			}, 2,
+		),
+		// alice->dest is cheap (500 msat).
+		symmetricTestChannel("alice", "dest", 100000,
+			&testChannelPolicy{
+				Expiry:      144,
+				FeeBaseMsat: 500,
+			}, 3,
+		),
+		// bob->dest is expensive (2000 msat).
+		symmetricTestChannel("bob", "dest", 100000,
+			&testChannelPolicy{
+				Expiry:      144,
+				FeeBaseMsat: 2000,
+			}, 4,
+		),
+	}
+
+	ctx := newPathFindingTestContext(t, useCache, testChannels, "gw1")
+
+	gw1 := ctx.keyFromAlias("gw1")
+	gw2 := ctx.keyFromAlias("gw2")
+	target := ctx.keyFromAlias("dest")
+	paymentAmt := lnwire.NewMSatFromSatoshis(100)
+
+	// With both gateways available, the pathfinder should select
+	// gw1->alice->dest since alice charges less than bob.
+	bothOrigins := &multiOrigin{sources: map[route.Vertex]struct{}{
+		gw1: {},
+		gw2: {},
+	}}
+	path, err := findPathWithOrigin(
+		t, ctx, bothOrigins, target, paymentAmt,
+	)
+	require.NoError(t, err, "unable to find multi-origin path")
+	assertExpectedPath(
+		t, ctx.testGraphInstance.aliasMap, path, "alice", "dest",
+	)
+
+	// Simulate gw1 going offline by removing it from the origin set.
+	// The pathfinder should fall back to gw2->bob->dest.
+	gw2Only := &multiOrigin{sources: map[route.Vertex]struct{}{
+		gw2: {},
+	}}
+	path, err = findPathWithOrigin(
+		t, ctx, gw2Only, target, paymentAmt,
+	)
+	require.NoError(t, err, "unable to find path via gw2")
+	assertExpectedPath(
+		t, ctx.testGraphInstance.aliasMap, path, "bob", "dest",
+	)
+}
+
 // runInboundFees tests whether correct routes are built when inbound fees
 // apply.
 func runInboundFees(t *testing.T, useCache bool) {
@@ -3333,7 +3462,8 @@ func dbFindPath(graph *graphdb.VersionedGraph,
 				bandwidthHints:  bandwidthHints,
 				graph:           graph,
 			},
-			r, cfg, sourceNode.PubKeyBytes, source, target, amt,
+			r, cfg, sourceNode.PubKeyBytes,
+			&singleOrigin{source}, target, amt,
 			timePref, finalHtlcExpiry,
 		)
 

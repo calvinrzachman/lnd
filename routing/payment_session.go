@@ -331,7 +331,8 @@ func (p *paymentSession) RequestRoute(maxAmt, feeLimit lnwire.MilliSatoshi,
 				graph:           graph,
 			},
 			restrictions, &p.pathFindingConfig,
-			p.selfNode, p.selfNode, p.payment.Target,
+			p.selfNode, &singleOrigin{p.selfNode},
+			p.payment.Target,
 			maxAmt, p.payment.TimePref, finalHtlcExpiry,
 		)
 		if err != nil {

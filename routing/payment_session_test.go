@@ -209,7 +209,8 @@ func TestRequestRoute(t *testing.T) {
 
 	// Override pathfinder with a mock.
 	session.pathFinder = func(_ *graphParams, r *RestrictParams,
-		_ *PathFindingConfig, _, _, _ route.Vertex,
+		_ *PathFindingConfig, _ route.Vertex, _ RouteOrigin,
+		_ route.Vertex,
 		_ lnwire.MilliSatoshi, _ float64, _ int32) ([]*unifiedEdge,
 		float64, error) {
 
