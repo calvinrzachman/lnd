@@ -206,6 +206,11 @@ type sessionOptions struct {
 	// routeTransform is an optional transformation applied to every
 	// route created for this payment session.
 	routeTransform fn.Option[RouteTransformFunc]
+
+	// origin is an optional RouteOrigin that determines where routes can
+	// start. When set, the pathfinder terminates at any vertex for which
+	// IsOrigin returns true.
+	origin fn.Option[RouteOrigin]
 }
 
 // defaultSessionOptions returns sessionOptions with default values.
@@ -220,6 +225,16 @@ type sessionOption func(*sessionOptions)
 func withRouteTransform(rt RouteTransformFunc) sessionOption {
 	return func(o *sessionOptions) {
 		o.routeTransform = fn.Some(rt)
+	}
+}
+
+// withOrigin sets the RouteOrigin for this payment session.
+func withOrigin(o RouteOrigin) sessionOption {
+	return func(opts *sessionOptions) {
+		if o == nil {
+			return
+		}
+		opts.origin = fn.Some(o)
 	}
 }
 
@@ -343,7 +358,10 @@ func (p *paymentSession) RequestRoute(maxAmt, feeLimit lnwire.MilliSatoshi,
 		maxAmt = *p.payment.MaxShardAmt
 	}
 
-	var path []*unifiedEdge
+	var (
+		sourceVertex route.Vertex
+		path         []*unifiedEdge
+	)
 	findPath := func(graph graphdb.NodeTraverser) error {
 		// We'll also obtain a set of bandwidthHints from the lower
 		// layer for each of our outbound channels. This will allow the
@@ -358,16 +376,21 @@ func (p *paymentSession) RequestRoute(maxAmt, feeLimit lnwire.MilliSatoshi,
 
 		p.log.Debugf("pathfinding for amt=%v", maxAmt)
 
+		// Use the configured origin if one was provided,
+		// otherwise default to the session's own node.
+		origin := p.opts.origin.UnwrapOr(
+			&singleOrigin{p.selfNode},
+		)
+
 		// Find a route for the current amount.
-		path, _, err = p.pathFinder(
+		sourceVertex, path, _, err = p.pathFinder(
 			&graphParams{
 				additionalEdges: p.additionalEdges,
 				bandwidthHints:  bandwidthHints,
 				graph:           graph,
 			},
 			restrictions, &p.pathFindingConfig,
-			p.selfNode, &singleOrigin{p.selfNode},
-			p.payment.Target,
+			p.selfNode, origin, p.payment.Target,
 			maxAmt, p.payment.TimePref, finalHtlcExpiry,
 		)
 		if err != nil {
@@ -383,6 +406,7 @@ func (p *paymentSession) RequestRoute(maxAmt, feeLimit lnwire.MilliSatoshi,
 		err := p.graphSessFactory.GraphSession(
 			context.TODO(),
 			findPath, func() {
+				sourceVertex = route.Vertex{}
 				path = nil
 			},
 		)
@@ -476,7 +500,7 @@ func (p *paymentSession) RequestRoute(maxAmt, feeLimit lnwire.MilliSatoshi,
 		// this into a route by applying the time-lock and fee
 		// requirements.
 		route, err := newRoute(
-			p.selfNode, path, height,
+			sourceVertex, path, height,
 			finalHopParams{
 				amt:         maxAmt,
 				totalAmt:    p.payment.Amount,

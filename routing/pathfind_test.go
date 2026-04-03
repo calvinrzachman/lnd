@@ -3136,16 +3136,22 @@ func runMultiOrigin(t *testing.T, useCache bool) {
 	target := ctx.keyFromAlias("dest")
 	paymentAmt := lnwire.NewMSatFromSatoshis(100)
 
-	// Helper to run findPath with a given RouteOrigin.
-	find := func(origin RouteOrigin) ([]*unifiedEdge, error) {
+	// Helper to run findPath with a given RouteOrigin. Returns the
+	// settled source vertex alongside the path.
+	find := func(origin RouteOrigin) (route.Vertex, []*unifiedEdge,
+		error) {
+
 		sourceNode, err := ctx.v1Graph.SourceNode(t.Context())
 		require.NoError(t, err)
 
-		var path []*unifiedEdge
+		var (
+			source route.Vertex
+			path   []*unifiedEdge
+		)
 		err = ctx.v1Graph.GraphSession(
 			t.Context(),
 			func(graph graphdb.NodeTraverser) error {
-				path, _, err = findPath(
+				source, path, _, err = findPath(
 					&graphParams{
 						bandwidthHints: ctx.bandwidthHints,
 						graph:          graph,
@@ -3162,7 +3168,7 @@ func runMultiOrigin(t *testing.T, useCache bool) {
 			},
 		)
 
-		return path, err
+		return source, path, err
 	}
 
 	// With both gateways available, the pathfinder should select
@@ -3171,8 +3177,9 @@ func runMultiOrigin(t *testing.T, useCache bool) {
 		gw1: {},
 		gw2: {},
 	}}
-	path, err := find(bothOrigins)
+	source, path, err := find(bothOrigins)
 	require.NoError(t, err, "unable to find multi-origin path")
+	require.Equal(t, gw1, source, "expected gw1 as selected route source")
 	assertExpectedPath(
 		t, ctx.testGraphInstance.aliasMap, path, "alice", "dest",
 	)
@@ -3182,10 +3189,30 @@ func runMultiOrigin(t *testing.T, useCache bool) {
 	gw2Only := &multiOrigin{sources: map[route.Vertex]struct{}{
 		gw2: {},
 	}}
-	path, err = find(gw2Only)
+	source, path, err = find(gw2Only)
 	require.NoError(t, err, "unable to find path via gw2")
+	require.Equal(t, gw2, source, "expected gw2 as selected route source")
 	assertExpectedPath(
 		t, ctx.testGraphInstance.aliasMap, path, "bob", "dest",
+	)
+
+	// An empty origin set should return errNoPathFound, since the
+	// path-finding loop will exhaust the heap without reaching any origin.
+	emptyOrigin := &multiOrigin{sources: map[route.Vertex]struct{}{}}
+	_, _, err = find(emptyOrigin)
+	require.ErrorIs(t, err, errNoPathFound)
+
+	// When the target is also an origin (circular payment scenario), the
+	// pathfinder should still find a valid route.
+	targetIsOrigin := &multiOrigin{sources: map[route.Vertex]struct{}{
+		gw1:    {},
+		target: {},
+	}}
+	source, path, err = find(targetIsOrigin)
+	require.NoError(t, err, "unable to find path when target is origin")
+	require.Equal(t, gw1, source, "expected gw1 as selected route source")
+	assertExpectedPath(
+		t, ctx.testGraphInstance.aliasMap, path, "alice", "dest",
 	)
 }
 
@@ -3443,7 +3470,7 @@ func dbFindPath(graph *graphdb.VersionedGraph,
 
 	var route []*unifiedEdge
 	err = graph.GraphSession(ctx, func(graph graphdb.NodeTraverser) error {
-		route, _, err = findPath(
+		_, route, _, err = findPath(
 			&graphParams{
 				additionalEdges: additionalEdges,
 				bandwidthHints:  bandwidthHints,
