@@ -1088,10 +1088,13 @@ func findPath(g *graphParams, r *RestrictParams, cfg *PathFindingConfig,
 		return fromFeatures, nil
 	}
 
-	// Check whether the target is also an origin, which indicates a
-	// circular payment. This allows the Dijkstra to explore past the
-	// target on first visit rather than terminating immediately.
-	routeToSelf := origin.IsOrigin(target)
+	// Allow circular routes only for single-origin self-payments
+	// (e.g., rebalancing). This lets Dijkstra explore past the target
+	// on first visit rather than terminating immediately. For
+	// multi-origin, the target may happen to be in the origin set
+	// but we still want a direct route from another origin.
+	_, isSingle := origin.(*singleOrigin)
+	routeToSelf := isSingle && origin.IsOrigin(target)
 	for {
 		nodesVisited++
 
