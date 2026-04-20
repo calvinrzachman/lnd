@@ -162,6 +162,8 @@ func testRBFCoopCloseDisconnect(ht *lntest.HarnessTest) {
 // testCoopCloseRBFWithReorg tests that when a cooperative close transaction
 // is reorganized out during confirmation waiting, the system properly handles
 // RBF replacements and re-registration for any spend of the funding output.
+// It also verifies the blocks_til_close_confirmed field correctly tracks
+// remaining confirmations and resets appropriately after a reorg.
 func testCoopCloseRBFWithReorg(ht *lntest.HarnessTest) {
 	// Skip this test for neutrino backend as we can't trigger reorgs.
 	if ht.IsNeutrinoBackend() {
@@ -224,6 +226,22 @@ func testCoopCloseRBFWithReorg(ht *lntest.HarnessTest) {
 	require.NoError(ht, err)
 	firstRbfTx := ht.AssertTxInMempool(*firstRbfTxid)
 
+	// Verify blocks_til_close_confirmed equals requiredConfs and
+	// close_height is zero when the tx is unconfirmed.
+	waitingClose := ht.AssertNumWaitingClose(alice, 1)
+	blocksTilCloseConfirmed := waitingClose[0].BlocksTilCloseConfirmed
+	require.Equal(
+		ht, uint32(requiredConfs), blocksTilCloseConfirmed,
+		"expected blocks_til_close_confirmed to equal %d when "+
+			"unconfirmed, got %d", requiredConfs,
+		blocksTilCloseConfirmed,
+	)
+	require.Equal(
+		ht, uint32(0), waitingClose[0].CloseHeight,
+		"expected close_height=0 when unconfirmed, got %d",
+		waitingClose[0].CloseHeight,
+	)
+
 	_, bestHeight := ht.GetBestBlock()
 	ht.Logf("Current block height: %d", bestHeight)
 
@@ -235,9 +253,54 @@ func testCoopCloseRBFWithReorg(ht *lntest.HarnessTest) {
 
 	ht.Logf("Mined block %d with first RBF tx", bestHeight+1)
 
+	// Verify blocks_til_close_confirmed decremented to
+	// requiredConfs - 1 = 2, and close_height is set to the mined height.
+	_, closeHeight := ht.GetBestBlock()
+	err = wait.NoError(func() error {
+		resp := alice.RPC.PendingChannels()
+		if len(resp.WaitingCloseChannels) != 1 {
+			return fmt.Errorf("expected 1 waiting close channel, "+
+				"got %d", len(resp.WaitingCloseChannels))
+		}
+		wc := resp.WaitingCloseChannels[0]
+		expected := uint32(requiredConfs - 1)
+		if wc.BlocksTilCloseConfirmed != expected {
+			return fmt.Errorf("expected "+
+				"blocks_til_close_confirmed=%d, got %d",
+				expected, wc.BlocksTilCloseConfirmed)
+		}
+
+		return nil
+	}, defaultTimeout)
+	require.NoError(ht, err)
+
+	waitingClose = ht.AssertNumWaitingClose(alice, 1)
+	require.Equal(
+		ht, uint32(closeHeight), waitingClose[0].CloseHeight,
+		"expected close_height=%d, got %d",
+		closeHeight, waitingClose[0].CloseHeight,
+	)
+
 	block2 := ht.MineEmptyBlocks(1)[0]
 
 	ht.Logf("Mined block %d", bestHeight+2)
+
+	// Verify blocks_til_close_confirmed decremented to 1.
+	err = wait.NoError(func() error {
+		resp := alice.RPC.PendingChannels()
+		if len(resp.WaitingCloseChannels) != 1 {
+			return fmt.Errorf("expected 1 waiting close channel, "+
+				"got %d", len(resp.WaitingCloseChannels))
+		}
+		blocks := resp.WaitingCloseChannels[0].BlocksTilCloseConfirmed
+		if blocks != 1 {
+			return fmt.Errorf("expected "+
+				"blocks_til_close_confirmed=1, got %d", blocks)
+		}
+
+		return nil
+	}, defaultTimeout)
+	require.NoError(ht, err)
 
 	ht.Logf("Re-orging two blocks to remove first RBF tx")
 
@@ -257,11 +320,46 @@ func testCoopCloseRBFWithReorg(ht *lntest.HarnessTest) {
 
 	ht.Log("Mining blocks to surpass previous chain")
 
-	// Mine 2 empty blocks to trigger the reorg on the nodes.
-	ht.MineEmptyBlocks(2)
+	// Mine 3 empty blocks to create a longer chain without the closing tx.
+	// This ensures the reorg is fully processed by the nodes.
+	ht.MineEmptyBlocks(3)
 
 	_, bestHeight = ht.GetBestBlock()
 	ht.Logf("Mined blocks to reach height: %d", bestHeight)
+
+	// Wait for Alice to sync to the new chain.
+	ht.WaitForNodeBlockHeight(alice, bestHeight)
+
+	// After the reorg, the closing tx is no longer confirmed.
+	// blocks_til_close_confirmed should reset to requiredConfs.
+	err = wait.NoError(func() error {
+		resp := alice.RPC.PendingChannels()
+		if len(resp.WaitingCloseChannels) != 1 {
+			return fmt.Errorf("expected 1 waiting close channel, "+
+				"got %d", len(resp.WaitingCloseChannels))
+		}
+		wc := resp.WaitingCloseChannels[0]
+		if wc.BlocksTilCloseConfirmed != uint32(requiredConfs) {
+			return fmt.Errorf("expected "+
+				"blocks_til_close_confirmed=%d after reorg, "+
+				"got %d", requiredConfs,
+				wc.BlocksTilCloseConfirmed)
+		}
+
+		return nil
+	}, defaultTimeout)
+	require.NoError(ht, err)
+
+	// close_height should also be zero after the reorg.
+	waitingClose = ht.AssertNumWaitingClose(alice, 1)
+	require.Equal(
+		ht, uint32(0), waitingClose[0].CloseHeight,
+		"expected close_height=0 after reorg, got %d",
+		waitingClose[0].CloseHeight,
+	)
+
+	ht.Logf("blocks_til_close_confirmed correctly reset to %d after reorg",
+		requiredConfs)
 
 	// Now, instead of mining the second RBF, mine the INITIAL transaction
 	// to test that the system can handle any valid spend of the funding
@@ -270,6 +368,34 @@ func testCoopCloseRBFWithReorg(ht *lntest.HarnessTest) {
 		[]*btcutil.Tx{btcutil.NewTx(initialCloseTx)},
 	)
 	ht.AssertTxInBlock(block, *initialCloseTxid)
+
+	// Verify blocks_til_close_confirmed resumes countdown after re-mining
+	// and close_height is set to the new confirmation height.
+	_, reCloseHeight := ht.GetBestBlock()
+	err = wait.NoError(func() error {
+		resp := alice.RPC.PendingChannels()
+		if len(resp.WaitingCloseChannels) != 1 {
+			return fmt.Errorf("expected 1 waiting close channel, "+
+				"got %d", len(resp.WaitingCloseChannels))
+		}
+		blocks := resp.WaitingCloseChannels[0].BlocksTilCloseConfirmed
+		expected := uint32(requiredConfs - 1)
+		if blocks != expected {
+			return fmt.Errorf("expected "+
+				"blocks_til_close_confirmed=%d, got %d",
+				expected, blocks)
+		}
+
+		return nil
+	}, defaultTimeout)
+	require.NoError(ht, err)
+
+	waitingClose = ht.AssertNumWaitingClose(alice, 1)
+	require.Equal(
+		ht, uint32(reCloseHeight), waitingClose[0].CloseHeight,
+		"expected close_height=%d after re-mine, got %d",
+		reCloseHeight, waitingClose[0].CloseHeight,
+	)
 
 	// Mine additional blocks to reach the required confirmations (3 total).
 	ht.MineEmptyBlocks(requiredConfs - 1)

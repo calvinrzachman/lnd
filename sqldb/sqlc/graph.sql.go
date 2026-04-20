@@ -2271,9 +2271,11 @@ func (q *Queries) GetPruneTip(ctx context.Context) (GraphPruneLog, error) {
 const getPublicV1ChannelsBySCID = `-- name: GetPublicV1ChannelsBySCID :many
 SELECT id, version, scid, node_id_1, node_id_2, outpoint, capacity, bitcoin_key_1, bitcoin_key_2, node_1_signature, node_2_signature, bitcoin_1_signature, bitcoin_2_signature, signature, funding_pk_script, merkle_root_hash
 FROM graph_channels
-WHERE COALESCE(length(node_1_signature), 0) > 0
+WHERE version = 1
+  AND COALESCE(length(node_1_signature), 0) > 0
   AND scid >= $1
   AND scid < $2
+ORDER BY scid ASC
 `
 
 type GetPublicV1ChannelsBySCIDParams struct {
@@ -2283,6 +2285,61 @@ type GetPublicV1ChannelsBySCIDParams struct {
 
 func (q *Queries) GetPublicV1ChannelsBySCID(ctx context.Context, arg GetPublicV1ChannelsBySCIDParams) ([]GraphChannel, error) {
 	rows, err := q.db.QueryContext(ctx, getPublicV1ChannelsBySCID, arg.StartScid, arg.EndScid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GraphChannel
+	for rows.Next() {
+		var i GraphChannel
+		if err := rows.Scan(
+			&i.ID,
+			&i.Version,
+			&i.Scid,
+			&i.NodeID1,
+			&i.NodeID2,
+			&i.Outpoint,
+			&i.Capacity,
+			&i.BitcoinKey1,
+			&i.BitcoinKey2,
+			&i.Node1Signature,
+			&i.Node2Signature,
+			&i.Bitcoin1Signature,
+			&i.Bitcoin2Signature,
+			&i.Signature,
+			&i.FundingPkScript,
+			&i.MerkleRootHash,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getPublicV2ChannelsBySCID = `-- name: GetPublicV2ChannelsBySCID :many
+SELECT id, version, scid, node_id_1, node_id_2, outpoint, capacity, bitcoin_key_1, bitcoin_key_2, node_1_signature, node_2_signature, bitcoin_1_signature, bitcoin_2_signature, signature, funding_pk_script, merkle_root_hash
+FROM graph_channels
+WHERE version = 2
+  AND COALESCE(length(signature), 0) > 0
+  AND scid >= $1
+  AND scid < $2
+ORDER BY scid ASC
+`
+
+type GetPublicV2ChannelsBySCIDParams struct {
+	StartScid []byte
+	EndScid   []byte
+}
+
+func (q *Queries) GetPublicV2ChannelsBySCID(ctx context.Context, arg GetPublicV2ChannelsBySCIDParams) ([]GraphChannel, error) {
+	rows, err := q.db.QueryContext(ctx, getPublicV2ChannelsBySCID, arg.StartScid, arg.EndScid)
 	if err != nil {
 		return nil, err
 	}
@@ -2389,6 +2446,41 @@ HAVING COUNT(*) > 1
 // and so the query for V2 may differ.
 func (q *Queries) GetV1DisabledSCIDs(ctx context.Context) ([][]byte, error) {
 	rows, err := q.db.QueryContext(ctx, getV1DisabledSCIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items [][]byte
+	for rows.Next() {
+		var scid []byte
+		if err := rows.Scan(&scid); err != nil {
+			return nil, err
+		}
+		items = append(items, scid)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getV2DisabledSCIDs = `-- name: GetV2DisabledSCIDs :many
+SELECT c.scid
+FROM graph_channels c
+    JOIN graph_channel_policies cp ON cp.channel_id = c.id
+WHERE COALESCE(cp.disable_flags, 0) != 0
+AND c.version = 2
+GROUP BY c.scid
+HAVING COUNT(*) > 1
+`
+
+// NOTE: this is V2 specific since V2 uses a disable flag
+// bit vector instead of a single boolean.
+func (q *Queries) GetV2DisabledSCIDs(ctx context.Context) ([][]byte, error) {
+	rows, err := q.db.QueryContext(ctx, getV2DisabledSCIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -3288,6 +3380,48 @@ func (q *Queries) ListChannelsPaginated(ctx context.Context, arg ListChannelsPag
 	return items, nil
 }
 
+const listChannelsPaginatedV2 = `-- name: ListChannelsPaginatedV2 :many
+SELECT id, outpoint, funding_pk_script
+FROM graph_channels c
+WHERE c.version = 2 AND c.id > $1
+ORDER BY c.id
+LIMIT $2
+`
+
+type ListChannelsPaginatedV2Params struct {
+	ID    int64
+	Limit int32
+}
+
+type ListChannelsPaginatedV2Row struct {
+	ID              int64
+	Outpoint        string
+	FundingPkScript []byte
+}
+
+func (q *Queries) ListChannelsPaginatedV2(ctx context.Context, arg ListChannelsPaginatedV2Params) ([]ListChannelsPaginatedV2Row, error) {
+	rows, err := q.db.QueryContext(ctx, listChannelsPaginatedV2, arg.ID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListChannelsPaginatedV2Row
+	for rows.Next() {
+		var i ListChannelsPaginatedV2Row
+		if err := rows.Scan(&i.ID, &i.Outpoint, &i.FundingPkScript); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listChannelsWithPoliciesForCachePaginated = `-- name: ListChannelsWithPoliciesForCachePaginated :many
 SELECT
     c.id as id,
@@ -3299,6 +3433,7 @@ SELECT
     n2.pub_key AS node2_pubkey,
 
     -- Node 1 policy
+    cp1.version AS policy1_version,
     cp1.timelock AS policy_1_timelock,
     cp1.fee_ppm AS policy_1_fee_ppm,
     cp1.base_fee_msat AS policy_1_base_fee_msat,
@@ -3313,6 +3448,7 @@ SELECT
     cp1.disable_flags AS policy1_disable_flags,
 
     -- Node 2 policy
+    cp2.version AS policy2_version,
     cp2.timelock AS policy_2_timelock,
     cp2.fee_ppm AS policy_2_fee_ppm,
     cp2.base_fee_msat AS policy_2_base_fee_msat,
@@ -3350,6 +3486,7 @@ type ListChannelsWithPoliciesForCachePaginatedRow struct {
 	Capacity                       sql.NullInt64
 	Node1Pubkey                    []byte
 	Node2Pubkey                    []byte
+	Policy1Version                 sql.NullInt16
 	Policy1Timelock                sql.NullInt32
 	Policy1FeePpm                  sql.NullInt64
 	Policy1BaseFeeMsat             sql.NullInt64
@@ -3362,6 +3499,7 @@ type ListChannelsWithPoliciesForCachePaginatedRow struct {
 	Policy1ChannelFlags            sql.NullInt16
 	Policy1BlockHeight             sql.NullInt64
 	Policy1DisableFlags            sql.NullInt16
+	Policy2Version                 sql.NullInt16
 	Policy2Timelock                sql.NullInt32
 	Policy2FeePpm                  sql.NullInt64
 	Policy2BaseFeeMsat             sql.NullInt64
@@ -3391,6 +3529,7 @@ func (q *Queries) ListChannelsWithPoliciesForCachePaginated(ctx context.Context,
 			&i.Capacity,
 			&i.Node1Pubkey,
 			&i.Node2Pubkey,
+			&i.Policy1Version,
 			&i.Policy1Timelock,
 			&i.Policy1FeePpm,
 			&i.Policy1BaseFeeMsat,
@@ -3403,6 +3542,7 @@ func (q *Queries) ListChannelsWithPoliciesForCachePaginated(ctx context.Context,
 			&i.Policy1ChannelFlags,
 			&i.Policy1BlockHeight,
 			&i.Policy1DisableFlags,
+			&i.Policy2Version,
 			&i.Policy2Timelock,
 			&i.Policy2FeePpm,
 			&i.Policy2BaseFeeMsat,

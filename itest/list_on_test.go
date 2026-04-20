@@ -207,6 +207,10 @@ var allTestCases = []*lntest.TestCase{
 		TestFunc: testInvoiceSubscriptions,
 	},
 	{
+		Name:     "channel update subscription",
+		TestFunc: testChannelUpdateNotifications,
+	},
+	{
 		Name:     "streaming channel backup update",
 		TestFunc: testChannelBackupUpdates,
 	},
@@ -540,6 +544,10 @@ var allTestCases = []*lntest.TestCase{
 		TestFunc: testOnionMessage,
 	},
 	{
+		Name:     "onion message forwarding",
+		TestFunc: testOnionMessageForwarding,
+	},
+	{
 		Name:     "sign verify message with addr",
 		TestFunc: testSignVerifyMessageWithAddr,
 	},
@@ -720,6 +728,10 @@ var allTestCases = []*lntest.TestCase{
 		TestFunc: testGraphMigration,
 	},
 	{
+		Name:     "payment migration",
+		TestFunc: testPaymentMigration,
+	},
+	{
 		Name:     "payment address mismatch",
 		TestFunc: testWrongPaymentAddr,
 	},
@@ -774,6 +786,22 @@ var allTestCases = []*lntest.TestCase{
 	{
 		Name:     "estimate on chain fee auto selected inputs",
 		TestFunc: testEstimateOnChainFeeAutoSelectedInputs,
+	},
+	{
+		Name:     "send onion",
+		TestFunc: testSendOnion,
+	},
+	{
+		Name:     "send onion twice",
+		TestFunc: testSendOnionTwice,
+	},
+	{
+		Name:     "send onion concurrency",
+		TestFunc: testSendOnionConcurrency,
+	},
+	{
+		Name:     "track onion",
+		TestFunc: testTrackOnion,
 	},
 }
 

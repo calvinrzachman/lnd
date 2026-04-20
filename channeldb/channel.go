@@ -265,6 +265,13 @@ type openChannelTlvData struct {
 	// confirmationHeight records the block height at which the funding
 	// transaction was first confirmed.
 	confirmationHeight tlv.RecordT[tlv.TlvType8, uint32]
+
+	// closeConfirmationHeight records the block height at which the closing
+	// transaction was first confirmed. This is used to calculate the
+	// remaining confirmations until the channel is considered fully closed.
+	// Note: if not set, it means either the channel has not been
+	// closed yet, or it was closed before this field was introduced.
+	closeConfirmationHeight tlv.OptionalRecordT[tlv.TlvType9, uint32]
 }
 
 // encode serializes the openChannelTlvData to the given io.Writer.
@@ -287,6 +294,11 @@ func (c *openChannelTlvData) encode(w io.Writer) error {
 	c.customBlob.WhenSome(func(blob tlv.RecordT[tlv.TlvType7, tlv.Blob]) {
 		tlvRecords = append(tlvRecords, blob.Record())
 	})
+	c.closeConfirmationHeight.WhenSome(
+		func(h tlv.RecordT[tlv.TlvType9, uint32]) {
+			tlvRecords = append(tlvRecords, h.Record())
+		},
+	)
 
 	tlv.SortRecords(tlvRecords)
 
@@ -304,6 +316,7 @@ func (c *openChannelTlvData) decode(r io.Reader) error {
 	memo := c.memo.Zero()
 	tapscriptRoot := c.tapscriptRoot.Zero()
 	blob := c.customBlob.Zero()
+	closeConfHeight := c.closeConfirmationHeight.Zero()
 
 	// Create the tlv stream.
 	tlvStream, err := tlv.NewStream(
@@ -315,6 +328,7 @@ func (c *openChannelTlvData) decode(r io.Reader) error {
 		tapscriptRoot.Record(),
 		blob.Record(),
 		c.confirmationHeight.Record(),
+		closeConfHeight.Record(),
 	)
 	if err != nil {
 		return err
@@ -333,6 +347,9 @@ func (c *openChannelTlvData) decode(r io.Reader) error {
 	}
 	if _, ok := tlvs[c.customBlob.TlvType()]; ok {
 		c.customBlob = tlv.SomeRecordT(blob)
+	}
+	if _, ok := tlvs[closeConfHeight.TlvType()]; ok {
+		c.closeConfirmationHeight = tlv.SomeRecordT(closeConfHeight)
 	}
 
 	return nil
@@ -746,6 +763,33 @@ func (c *ChannelCommitment) extractTlvData() commitTlvData {
 	return auxData
 }
 
+// copy returns a deep copy of the channel commitment.
+func (c *ChannelCommitment) copy() ChannelCommitment {
+	c2 := *c
+	if c.CommitTx != nil {
+		c2.CommitTx = c.CommitTx.Copy()
+	}
+	if len(c.CommitSig) > 0 {
+		c2.CommitSig = make([]byte, len(c.CommitSig))
+		copy(c2.CommitSig, c.CommitSig)
+	}
+
+	c.CustomBlob.WhenSome(func(blob tlv.Blob) {
+		blobCopy := make([]byte, len(blob))
+		copy(blobCopy, blob)
+		c2.CustomBlob = fn.Some(blobCopy)
+	})
+
+	if len(c.Htlcs) > 0 {
+		c2.Htlcs = make([]HTLC, len(c.Htlcs))
+		for i, h := range c.Htlcs {
+			c2.Htlcs[i] = h.Copy()
+		}
+	}
+
+	return c2
+}
+
 // ChannelStatus is a bit vector used to indicate whether an OpenChannel is in
 // the default usable state, or a state where it shouldn't be used.
 type ChannelStatus uint64
@@ -917,6 +961,14 @@ type OpenChannel struct {
 	// ConfirmationHeight records the block height at which the funding
 	// transaction was first confirmed.
 	ConfirmationHeight uint32
+
+	// CloseConfirmationHeight records the block height at which the closing
+	// transaction was first confirmed. This is used to track remaining
+	// confirmations until the channel is considered fully closed. It is
+	// None if the closing transaction has not yet been confirmed, or if
+	// this data was not available (e.g. channels closed before this
+	// field was introduced).
+	CloseConfirmationHeight fn.Option[uint32]
 
 	// NumConfsRequired is the number of confirmations a channel's funding
 	// transaction must have received in order to be considered available
@@ -1230,6 +1282,9 @@ func (c *OpenChannel) amendTlvData(auxData openChannelTlvData) {
 	auxData.customBlob.WhenSomeV(func(blob tlv.Blob) {
 		c.CustomBlob = fn.Some(blob)
 	})
+	auxData.closeConfirmationHeight.WhenSomeV(func(h uint32) {
+		c.CloseConfirmationHeight = fn.Some(h)
+	})
 }
 
 // extractTlvData creates a new openChannelTlvData from the given channel.
@@ -1265,6 +1320,11 @@ func (c *OpenChannel) extractTlvData() openChannelTlvData {
 	c.CustomBlob.WhenSome(func(blob tlv.Blob) {
 		auxData.customBlob = tlv.SomeRecordT(
 			tlv.NewPrimitiveRecord[tlv.TlvType7](blob),
+		)
+	})
+	c.CloseConfirmationHeight.WhenSome(func(h uint32) {
+		auxData.closeConfirmationHeight = tlv.SomeRecordT(
+			tlv.NewPrimitiveRecord[tlv.TlvType9](h),
 		)
 	})
 
@@ -1544,6 +1604,45 @@ func (c *OpenChannel) MarkConfirmationHeight(height uint32) error {
 	}
 
 	c.ConfirmationHeight = height
+
+	return nil
+}
+
+// ResetCloseConfirmationHeight clears the channel's close confirmation height
+// when the spending transaction is reorged out.
+func (c *OpenChannel) ResetCloseConfirmationHeight() error {
+	return c.MarkCloseConfirmationHeight(fn.None[uint32]())
+}
+
+// MarkCloseConfirmationHeight updates the channel's close confirmation height
+// when the closing transaction is first detected in a block (spend height).
+func (c *OpenChannel) MarkCloseConfirmationHeight(
+	height fn.Option[uint32]) error {
+
+	c.Lock()
+	defer c.Unlock()
+
+	if err := kvdb.Update(c.Db.backend, func(tx kvdb.RwTx) error {
+		chanBucket, err := fetchChanBucketRw(
+			tx, c.IdentityPub, &c.FundingOutpoint, c.ChainHash,
+		)
+		if err != nil {
+			return err
+		}
+
+		channel, err := fetchOpenChannel(chanBucket, &c.FundingOutpoint)
+		if err != nil {
+			return err
+		}
+
+		channel.CloseConfirmationHeight = height
+
+		return putOpenChannel(chanBucket, channel)
+	}, func() {}); err != nil {
+		return err
+	}
+
+	c.CloseConfirmationHeight = height
 
 	return nil
 }
@@ -4064,6 +4163,78 @@ func (c *OpenChannel) Snapshot() *ChannelSnapshot {
 	}
 
 	return snapshot
+}
+
+// Copy returns a deep copy of the channel state.
+func (c *OpenChannel) Copy() *OpenChannel {
+	c.RLock()
+	defer c.RUnlock()
+
+	clone := &OpenChannel{
+		ChanType:                c.ChanType,
+		ChainHash:               c.ChainHash,
+		FundingOutpoint:         c.FundingOutpoint,
+		ShortChannelID:          c.ShortChannelID,
+		IsPending:               c.IsPending,
+		IsInitiator:             c.IsInitiator,
+		chanStatus:              c.chanStatus,
+		FundingBroadcastHeight:  c.FundingBroadcastHeight,
+		ConfirmationHeight:      c.ConfirmationHeight,
+		NumConfsRequired:        c.NumConfsRequired,
+		ChannelFlags:            c.ChannelFlags,
+		IdentityPub:             c.IdentityPub,
+		Capacity:                c.Capacity,
+		TotalMSatSent:           c.TotalMSatSent,
+		TotalMSatReceived:       c.TotalMSatReceived,
+		InitialLocalBalance:     c.InitialLocalBalance,
+		InitialRemoteBalance:    c.InitialRemoteBalance,
+		LocalChanCfg:            c.LocalChanCfg,
+		RemoteChanCfg:           c.RemoteChanCfg,
+		LocalCommitment:         c.LocalCommitment.copy(),
+		RemoteCommitment:        c.RemoteCommitment.copy(),
+		RemoteCurrentRevocation: c.RemoteCurrentRevocation,
+		RemoteNextRevocation:    c.RemoteNextRevocation,
+		RevocationProducer:      c.RevocationProducer,
+		RevocationStore:         c.RevocationStore,
+		Packager:                c.Packager,
+		ThawHeight:              c.ThawHeight,
+		LastWasRevoke:           c.LastWasRevoke,
+		RevocationKeyLocator:    c.RevocationKeyLocator,
+		confirmedScid:           c.confirmedScid,
+		TapscriptRoot:           c.TapscriptRoot,
+	}
+
+	if c.FundingTxn != nil {
+		clone.FundingTxn = c.FundingTxn.Copy()
+	}
+
+	if len(c.LocalShutdownScript) > 0 {
+		clone.LocalShutdownScript = make(
+			lnwire.DeliveryAddress,
+			len(c.LocalShutdownScript),
+		)
+		copy(clone.LocalShutdownScript, c.LocalShutdownScript)
+	}
+	if len(c.RemoteShutdownScript) > 0 {
+		clone.RemoteShutdownScript = make(
+			lnwire.DeliveryAddress,
+			len(c.RemoteShutdownScript),
+		)
+		copy(clone.RemoteShutdownScript, c.RemoteShutdownScript)
+	}
+
+	if len(c.Memo) > 0 {
+		clone.Memo = make([]byte, len(c.Memo))
+		copy(clone.Memo, c.Memo)
+	}
+
+	c.CustomBlob.WhenSome(func(blob tlv.Blob) {
+		blobCopy := make([]byte, len(blob))
+		copy(blobCopy, blob)
+		clone.CustomBlob = fn.Some(blobCopy)
+	})
+
+	return clone
 }
 
 // LatestCommitments returns the two latest commitments for both the local and

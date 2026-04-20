@@ -2,4 +2,9 @@
 
 package sqldb
 
+// migrationAdditions is a list of migrations that are added to the
+// migrationConfig slice.
+//
+// NOTE: This should always be empty as all migrations are now included in the
+// main line (see migrations.go).
 var migrationAdditions []MigrationConfig

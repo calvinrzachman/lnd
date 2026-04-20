@@ -19,6 +19,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btclog/v2"
+	"github.com/lightningnetwork/lnd/actor"
 	"github.com/lightningnetwork/lnd/aliasmgr"
 	"github.com/lightningnetwork/lnd/brontide"
 	"github.com/lightningnetwork/lnd/buffer"
@@ -52,6 +53,7 @@ import (
 	"github.com/lightningnetwork/lnd/pool"
 	"github.com/lightningnetwork/lnd/protofsm"
 	"github.com/lightningnetwork/lnd/queue"
+	"github.com/lightningnetwork/lnd/routing/route"
 	"github.com/lightningnetwork/lnd/subscribe"
 	"github.com/lightningnetwork/lnd/ticker"
 	"github.com/lightningnetwork/lnd/tlv"
@@ -301,9 +303,16 @@ type Config struct {
 	// the Brontide.
 	RoutingPolicy models.ForwardingPolicy
 
-	// Sphinx is used when setting up ChannelLinks so they can decode sphinx
-	// onion blobs.
-	Sphinx *hop.OnionProcessor
+	// SphinxPayment is used when setting up ChannelLinks so they can decode
+	// sphinx onion blobs.
+	SphinxPayment *hop.OnionProcessor
+
+	// SpawnOnionActor is a factory function that spawns a per-peer onion
+	// message actor. If nil, onion messaging is disabled.
+	SpawnOnionActor onionmessage.OnionActorFactory
+
+	// ActorSystem is the actor system tasked with managing actors.
+	ActorSystem *actor.ActorSystem
 
 	// WitnessBeacon is used when setting up ChannelLinks so they can add any
 	// preimages that they learn.
@@ -471,10 +480,6 @@ type Config struct {
 	// related wire messages.
 	AuxChannelNegotiator fn.Option[lnwallet.AuxChannelNegotiator]
 
-	// OnionMessageServer is an instance of a message server that dispatches
-	// onion messages to subscribers.
-	OnionMessageServer *subscribe.Server
-
 	// ShouldFwdExpAccountability is a closure that indicates whether
 	// experimental accountability signals should be set.
 	ShouldFwdExpAccountability func() bool
@@ -538,6 +543,11 @@ type Brontide struct {
 	// for any other purpose you should seriously consider whether or not
 	// this heuristic is good enough for your use case.
 	isTorConnection bool
+
+	// onionActorRef holds the reference to the onion peer actor spawned
+	// for this peer connection. The actor handles all incoming onion
+	// message processing for this peer.
+	onionActorRef fn.Option[onionmessage.OnionPeerActorRef]
 
 	pingManager *PingManager
 
@@ -910,19 +920,25 @@ func (p *Brontide) Start() error {
 		return fmt.Errorf("unable to load channels: %w", err)
 	}
 
-	onionMessageEndpoint := onionmessage.NewOnionEndpoint(
-		p.cfg.OnionMessageServer,
-	)
+	// If the remote peer supports onion messages and we have a factory
+	// configured, spawn the onion peer actor for this connection. The
+	// actor handles the full processing pipeline for incoming onion
+	// messages from this peer.
+	if p.remoteFeatures.HasFeature(lnwire.OnionMessagesOptional) &&
+		p.cfg.SpawnOnionActor != nil {
 
-	// We register the onion message endpoint with the message router.
-	err = fn.MapOptionZ(p.msgRouter, func(r msgmux.Router) error {
-		_ = r.UnregisterEndpoint(onionMessageEndpoint.Name())
+		p.log.Infof("Remote peer supports onion messages, " +
+			"spawning onion message actor")
 
-		return r.RegisterEndpoint(onionMessageEndpoint)
-	})
-	if err != nil {
-		return fmt.Errorf("unable to register endpoint for onion "+
-			"messaging: %w", err)
+		ref, spawnErr := p.cfg.SpawnOnionActor(
+			p.cfg.ActorSystem, p.PubKey(),
+		)
+		if spawnErr != nil {
+			return fmt.Errorf("unable to spawn onion peer "+
+				"actor: %w", spawnErr)
+		}
+
+		p.onionActorRef = fn.Some(ref)
 	}
 
 	p.startTime = time.Now()
@@ -1146,6 +1162,16 @@ func (p *Brontide) loadActiveChannels(chans []*channeldb.OpenChannel) (
 			},
 		)
 
+		p.cfg.AuxTrafficShaper.WhenSome(
+			func(ts htlcswitch.AuxTrafficShaper) {
+				val := p.createHtlcValidator(dbChan, ts)
+				chanOpts = append(
+					chanOpts,
+					lnwallet.WithAuxHtlcValidator(val),
+				)
+			},
+		)
+
 		lnChan, err := lnwallet.NewLightningChannel(
 			p.cfg.Signer, dbChan, p.cfg.SigPool, chanOpts...,
 		)
@@ -1217,7 +1243,7 @@ func (p *Brontide) loadActiveChannels(chans []*channeldb.OpenChannel) (
 		// the database.
 		graph := p.cfg.ChannelGraph
 		info, p1, p2, err := graph.FetchChannelEdgesByOutpoint(
-			&chanPoint,
+			context.TODO(), &chanPoint,
 		)
 		if err != nil && !errors.Is(err, graphdb.ErrEdgeNotFound) {
 			return nil, err
@@ -1446,8 +1472,8 @@ func (p *Brontide) addLink(chanPoint *wire.OutPoint,
 	//nolint:ll
 	linkCfg := htlcswitch.ChannelLinkConfig{
 		Peer:                   p,
-		DecodeHopIterators:     p.cfg.Sphinx.DecodeHopIterators,
-		ExtractErrorEncrypter:  p.cfg.Sphinx.ExtractErrorEncrypter,
+		DecodeHopIterators:     p.cfg.SphinxPayment.DecodeHopIterators,
+		ExtractErrorEncrypter:  p.cfg.SphinxPayment.ExtractErrorEncrypter,
 		FetchLastChannelUpdate: p.cfg.FetchLastChanUpdate,
 		HodlMask:               p.cfg.Hodl.Mask(),
 		Registry:               p.cfg.Invoices,
@@ -1480,6 +1506,7 @@ func (p *Brontide) addLink(chanPoint *wire.OutPoint,
 		NotifyActiveChannel:        p.cfg.ChannelNotifier.NotifyActiveChannelEvent,
 		NotifyInactiveChannel:      p.cfg.ChannelNotifier.NotifyInactiveChannelEvent,
 		NotifyInactiveLinkEvent:    p.cfg.ChannelNotifier.NotifyInactiveLinkEvent,
+		NotifyChannelUpdate:        p.cfg.ChannelNotifier.NotifyChannelUpdateEvent,
 		HtlcNotifier:               p.cfg.HtlcNotifier,
 		GetAliases:                 p.cfg.GetAliases,
 		PreviouslySentShutdown:     shutdownMsg,
@@ -1676,6 +1703,9 @@ func (p *Brontide) Disconnect(reason error) {
 	// Stop PingManager before closing TCP connection.
 	p.pingManager.Stop()
 
+	// Stop the onion peer actor if one was spawned.
+	p.StopOnionActorIfExists()
+
 	// Ensure that the TCP connection is properly closed before continuing.
 	p.cfg.Conn.Close()
 
@@ -1693,6 +1723,18 @@ func (p *Brontide) Disconnect(reason error) {
 // String returns the string representation of this peer.
 func (p *Brontide) String() string {
 	return fmt.Sprintf("%x@%s", p.cfg.PubKeyBytes, p.cfg.Conn.RemoteAddr())
+}
+
+// StopOnionActorIfExists stops the onion peer actor if one was spawned for
+// this peer. This is idempotent and safe to call multiple times.
+func (p *Brontide) StopOnionActorIfExists() {
+	p.onionActorRef.WhenSome(
+		func(ref onionmessage.OnionPeerActorRef) {
+			onionmessage.StopOnionActor(
+				p.cfg.ActorSystem, p.PubKey(), ref,
+			)
+		},
+	)
 }
 
 // readNextMessage reads, and returns the next message on the wire along with
@@ -2260,6 +2302,19 @@ out:
 
 			discStream.AddMsg(msg)
 
+		case *lnwire.OnionMessage:
+			p.onionActorRef.WhenSome(
+				func(ref onionmessage.OnionPeerActorRef) {
+					// TODO(elle): thread contexts through
+					// the peer system properly so that a
+					// parent context can be passed in here.
+					ctx := context.TODO()
+
+					req := onionmessage.NewRequest(*msg)
+					ref.Tell(ctx, req)
+				},
+			)
+
 		case *lnwire.Custom:
 			err := p.handleCustomMessage(msg)
 			if err != nil {
@@ -2574,6 +2629,15 @@ func messageSummary(msg lnwire.Message) string {
 			"stamp_range=%v", msg.ChainHash,
 			time.Unix(int64(msg.FirstTimestamp), 0),
 			msg.TimestampRange)
+
+	case *lnwire.OnionMessage:
+		var pathKey []byte
+		if msg.PathKey != nil {
+			pathKey = msg.PathKey.SerializeCompressed()
+		}
+
+		return fmt.Sprintf("path_key=%x, onion_len=%v", pathKey,
+			len(msg.OnionBlob))
 
 	case *lnwire.Stfu:
 		return fmt.Sprintf("chan_id=%v, initiator=%v", msg.ChanID,
@@ -4271,6 +4335,7 @@ func (p *Brontide) handleLocalCloseReq(req *htlcswitch.ChanClose) {
 			"unknown", chanID)
 		p.log.Errorf(err.Error())
 		req.Err <- err
+
 		return
 	}
 
@@ -5258,6 +5323,15 @@ func (p *Brontide) addActiveChannel(c *lnpeer.NewChannel) error {
 		chanOpts = append(chanOpts, lnwallet.WithAuxResolver(s))
 	})
 
+	p.cfg.AuxTrafficShaper.WhenSome(
+		func(ts htlcswitch.AuxTrafficShaper) {
+			val := p.createHtlcValidator(c.OpenChannel, ts)
+			chanOpts = append(
+				chanOpts, lnwallet.WithAuxHtlcValidator(val),
+			)
+		},
+	)
+
 	// If not already active, we'll add this channel to the set of active
 	// channels, so we can look it up later easily according to its channel
 	// ID.
@@ -5462,6 +5536,96 @@ func (p *Brontide) scaleTimeout(timeout time.Duration) time.Duration {
 	}
 
 	return timeout
+}
+
+// auxHtlcValidator implements lnwallet.AuxHtlcValidator by checking HTLC
+// bandwidth against the traffic shaper.
+type auxHtlcValidator struct {
+	peer   *Brontide
+	dbChan *channeldb.OpenChannel
+	ts     htlcswitch.AuxTrafficShaper
+}
+
+// ValidateHtlc performs final aux balance validation before an HTLC is added
+// to the channel state. It calls into the traffic shaper's PaymentBandwidth
+// method to check external balance against the most up-to-date channel state,
+// preventing race conditions where multiple HTLCs could be approved based on
+// stale bandwidth.
+func (v *auxHtlcValidator) ValidateHtlc(amount,
+	linkBandwidth lnwire.MilliSatoshi,
+	customRecords lnwire.CustomRecords,
+	view lnwallet.AuxHtlcView) error {
+
+	// Get the short channel ID for logging.
+	scid := v.dbChan.ShortChannelID
+
+	// Extract the HTLC custom records to pass to the traffic shaper.
+	var htlcBlob fn.Option[tlv.Blob]
+	if len(customRecords) > 0 {
+		blob, err := customRecords.Serialize()
+		if err != nil {
+			return fmt.Errorf("unable to serialize "+
+				"custom records: %w", err)
+		}
+		htlcBlob = fn.Some(blob)
+	}
+
+	// Get the funding and commitment blobs for this channel.
+	fundingBlob := v.dbChan.CustomBlob
+	commitmentBlob := v.dbChan.LocalCommitment.CustomBlob
+
+	// Check if this channel should be handled by the traffic shaper. If
+	// not, we skip the aux validation entirely and allow the HTLC to
+	// proceed through normal validation.
+	shouldHandle, err := v.ts.ShouldHandleTraffic(
+		scid, fundingBlob, htlcBlob,
+	)
+	if err != nil {
+		return fmt.Errorf("traffic shaper failed to decide "+
+			"whether to handle traffic: %w", err)
+	}
+	if !shouldHandle {
+		return nil
+	}
+
+	peer := route.NewVertex(v.peer.IdentityKey())
+
+	// Call the traffic shaper's PaymentBandwidth method with the current
+	// state. This performs the same bandwidth checks as during
+	// pathfinding/forwarding, but against the absolute latest channel
+	// state.
+	//
+	// The linkBandwidth is provided by the channel and represents the
+	// current available balance, which is used by the traffic shaper to
+	// ensure we don't dip below channel reserves.
+	bandwidth, err := v.ts.PaymentBandwidth(
+		fundingBlob, htlcBlob, commitmentBlob,
+		linkBandwidth, amount, view, peer,
+	)
+	if err != nil {
+		return fmt.Errorf("traffic shaper bandwidth check "+
+			"failed: %w", err)
+	}
+
+	if amount > bandwidth {
+		return fmt.Errorf("insufficient aux bandwidth: "+
+			"need %v, have %v (scid=%v)", amount,
+			bandwidth, scid)
+	}
+
+	return nil
+}
+
+// createHtlcValidator creates an HTLC validator that performs final aux balance
+// validation before HTLCs are added to the channel state.
+func (p *Brontide) createHtlcValidator(dbChan *channeldb.OpenChannel,
+	ts htlcswitch.AuxTrafficShaper) lnwallet.AuxHtlcValidator {
+
+	return &auxHtlcValidator{
+		peer:   p,
+		dbChan: dbChan,
+		ts:     ts,
+	}
 }
 
 // CoopCloseUpdates is a struct used to communicate updates for an active close

@@ -755,9 +755,20 @@ WHERE c.version = $1
 -- name: GetPublicV1ChannelsBySCID :many
 SELECT *
 FROM graph_channels
-WHERE COALESCE(length(node_1_signature), 0) > 0
+WHERE version = 1
+  AND COALESCE(length(node_1_signature), 0) > 0
   AND scid >= @start_scid
-  AND scid < @end_scid;
+  AND scid < @end_scid
+ORDER BY scid ASC;
+
+-- name: GetPublicV2ChannelsBySCID :many
+SELECT *
+FROM graph_channels
+WHERE version = 2
+  AND COALESCE(length(signature), 0) > 0
+  AND scid >= @start_scid
+  AND scid < @end_scid
+ORDER BY scid ASC;
 
 -- name: ListChannelsPaginated :many
 SELECT id, bitcoin_key_1, bitcoin_key_2, outpoint
@@ -765,6 +776,13 @@ FROM graph_channels c
 WHERE c.version = $1 AND c.id > $2
 ORDER BY c.id
 LIMIT $3;
+
+-- name: ListChannelsPaginatedV2 :many
+SELECT id, outpoint, funding_pk_script
+FROM graph_channels c
+WHERE c.version = 2 AND c.id > $1
+ORDER BY c.id
+LIMIT $2;
 
 -- name: ListChannelsWithPoliciesPaginated :many
 SELECT
@@ -834,6 +852,7 @@ SELECT
     n2.pub_key AS node2_pubkey,
 
     -- Node 1 policy
+    cp1.version AS policy1_version,
     cp1.timelock AS policy_1_timelock,
     cp1.fee_ppm AS policy_1_fee_ppm,
     cp1.base_fee_msat AS policy_1_base_fee_msat,
@@ -848,6 +867,7 @@ SELECT
     cp1.disable_flags AS policy1_disable_flags,
 
     -- Node 2 policy
+    cp2.version AS policy2_version,
     cp2.timelock AS policy_2_timelock,
     cp2.fee_ppm AS policy_2_fee_ppm,
     cp2.base_fee_msat AS policy_2_base_fee_msat,
@@ -1063,6 +1083,17 @@ FROM graph_channels c
 -- and so the query for V2 may differ.
 WHERE cp.disabled = true
 AND c.version = 1
+GROUP BY c.scid
+HAVING COUNT(*) > 1;
+
+-- name: GetV2DisabledSCIDs :many
+SELECT c.scid
+FROM graph_channels c
+    JOIN graph_channel_policies cp ON cp.channel_id = c.id
+-- NOTE: this is V2 specific since V2 uses a disable flag
+-- bit vector instead of a single boolean.
+WHERE COALESCE(cp.disable_flags, 0) != 0
+AND c.version = 2
 GROUP BY c.scid
 HAVING COUNT(*) > 1;
 

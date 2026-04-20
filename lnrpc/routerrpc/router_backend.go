@@ -614,6 +614,7 @@ func (r *RouterBackend) MarshallRoute(route *route.Route) (*lnrpc.Route, error) 
 		TotalAmtMsat:       int64(route.TotalAmount),
 		Hops:               make([]*lnrpc.Hop, len(route.Hops)),
 		FirstHopAmountMsat: int64(route.FirstHopAmount.Val.Int()),
+		SourcePubKey:       route.SourcePubKey.String(),
 	}
 
 	// Encode the route's custom channel data (if available).
@@ -655,16 +656,11 @@ func (r *RouterBackend) MarshallRoute(route *route.Route) (*lnrpc.Route, error) 
 	for i, hop := range route.Hops {
 		fee := route.HopFee(i)
 
-		// Channel capacity is not a defining property of a route. For
-		// backwards RPC compatibility, we retrieve it here from the
-		// graph.
-		chanCapacity, err := r.FetchChannelCapacity(hop.ChannelID)
-		if err != nil {
-			// If capacity cannot be retrieved, this may be a
-			// not-yet-received or private channel. Then report
-			// amount that is sent through the channel as capacity.
-			chanCapacity = incomingAmt.ToSatoshis()
-		}
+		// Avoid per-hop graph lookups by using the incoming amount as a
+		// lower bound for the capacity. This is not the actual channel
+		// capacity, but it is a reasonable approximation that avoids
+		// slow graph lookups and works for closed/private channels too.
+		chanCapacity := incomingAmt.ToSatoshis()
 
 		// Extract the MPP fields if present on this hop.
 		var mpp *lnrpc.MPPRecord
@@ -713,6 +709,7 @@ func (r *RouterBackend) MarshallRoute(route *route.Route) (*lnrpc.Route, error) 
 			blinding := hop.BlindingPoint.SerializeCompressed()
 			resp.Hops[i].BlindingPoint = blinding
 		}
+
 		incomingAmt = hop.AmtToForward
 	}
 
@@ -812,7 +809,25 @@ func (r *RouterBackend) UnmarshallHop(rpcHop *lnrpc.Hop,
 func (r *RouterBackend) UnmarshallRoute(rpcroute *lnrpc.Route) (
 	*route.Route, error) {
 
-	prevNodePubKey := r.SelfNode
+	var err error
+
+	// Most routes we construct are from our node's perspective.
+	sourcePubKey := r.SelfNode
+
+	// Optionally override with supplied public key.
+	if rpcroute.SourcePubKey != "" {
+		sourcePubKey, err = route.NewVertexFromStr(
+			rpcroute.SourcePubKey,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("invalid source pubkey: %w", err)
+		}
+	}
+
+	// The previous node starts as the source of the route. This is
+	// used for implicit hop pubkey resolution when hops only specify
+	// a channel ID.
+	prevNodePubKey := sourcePubKey
 
 	hops := make([]*route.Hop, len(rpcroute.Hops))
 	for i, hop := range rpcroute.Hops {
@@ -822,14 +837,13 @@ func (r *RouterBackend) UnmarshallRoute(rpcroute *lnrpc.Route) (
 		}
 
 		hops[i] = routeHop
-
 		prevNodePubKey = routeHop.PubKeyBytes
 	}
 
 	route, err := route.NewRouteFromHops(
 		lnwire.MilliSatoshi(rpcroute.TotalAmtMsat),
 		rpcroute.TotalTimeLock,
-		r.SelfNode,
+		sourcePubKey,
 		hops,
 	)
 	if err != nil {
@@ -1767,6 +1781,10 @@ func (r *RouterBackend) MarshallPayment(payment *paymentsdb.MPPayment) (
 		// If any of the htlcs have settled, extract a valid
 		// preimage.
 		if htlc.Settle != nil {
+			// For AMP payments all hashes will be different so we
+			// will only show the last htlc preimage, this is a
+			// current limitation for AMP payments because for
+			// MPP payments all hashes are the same.
 			preimage = htlc.Settle.Preimage
 			fee += htlc.Route.TotalFees()
 		}

@@ -16,6 +16,7 @@ run:
     - neutrinorpc
     - peersrpc
     - signrpc
+    - switchrpc
     - walletrpc
     - watchtowerrpc
     - kvdb_etcd
@@ -160,6 +161,7 @@ linters:
         - github.com/gogo/protobuf
         - google.golang.org/protobuf
         - github.com/lightningnetwork/lnd/sqldb
+        - github.com/lightningnetwork/lightning-onion 
       replace-local: true
 
     gosec:
@@ -302,7 +304,9 @@ linters:
       - "internal\\/musig2v040"
       - channeldb/migration_01_to_11
       - channeldb/migration/lnwire21
-      
+      - payments/db/migration1/lnwire
+      - payments/db/migration1/record
+
 issues:
   # Only show newly introduced problems.
   new-from-rev: 03eab4db64540aa5f789c617793e4459f4ba9e78

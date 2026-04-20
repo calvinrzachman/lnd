@@ -380,10 +380,9 @@ type Config struct {
 	FindChannel func(node *btcec.PublicKey, chanID lnwire.ChannelID) (
 		*channeldb.OpenChannel, error)
 
-	// IsStillZombieChannel takes the timestamps of the latest channel
-	// updates for a channel and returns true if the channel should be
-	// considered a zombie based on these timestamps.
-	IsStillZombieChannel func(time.Time, time.Time) bool
+	// IsStillZombieChannel returns true if the channel described by info
+	// should still be considered a zombie.
+	IsStillZombieChannel func(graphdb.ChannelUpdateInfo) bool
 
 	// AssumeChannelValid toggles whether the gossiper will check for
 	// spent-ness of channel outpoints. For neutrino, this saves long
@@ -2340,7 +2339,7 @@ func (d *AuthenticatedGossiper) processZombieUpdate(_ context.Context,
 	// With the signature valid, we'll proceed to mark the
 	// edge as live and wait for the channel announcement to
 	// come through again.
-	err = d.cfg.Graph.MarkEdgeLive(scid)
+	err = d.cfg.Graph.MarkEdgeLive(lnwire.GossipVersion1, scid)
 	switch {
 	case errors.Is(err, graphdb.ErrZombieEdgeNotFound):
 		log.Errorf("edge with chan_id=%v was not found in the "+
@@ -2724,7 +2723,7 @@ func (d *AuthenticatedGossiper) handleChanAnnouncement(ctx context.Context,
 
 	// Check if the channel is already closed in which case we can ignore
 	// it.
-	closed, err := d.cfg.ScidCloser.IsClosedScid(scid)
+	closed, err := d.cfg.ScidCloser.IsClosedScid(ctx, scid)
 	if err != nil {
 		log.Errorf("failed to check if scid %v is closed: %v", scid,
 			err)
@@ -2877,7 +2876,9 @@ func (d *AuthenticatedGossiper) handleChanAnnouncement(ctx context.Context,
 				// expensive validation checks on it again.
 				// TODO: Populate the ScidCloser by using closed
 				// channel notifications.
-				dbErr := d.cfg.ScidCloser.PutClosedScid(scid)
+				dbErr := d.cfg.ScidCloser.PutClosedScid(
+					ctx, scid,
+				)
 				if dbErr != nil {
 					log.Errorf("failed to mark scid(%v) "+
 						"as closed: %v", scid, dbErr)
@@ -3731,19 +3732,33 @@ func (d *AuthenticatedGossiper) handleAnnSig(ctx context.Context,
 	// We now have both halves of the channel announcement proof, then
 	// we'll reconstruct the initial announcement so we can validate it
 	// shortly below.
+	//
+	// NOTE: For now only V1 proofs are supported in the gossiper. V2
+	// support will be added when taproot channel announcements are wired
+	// up.
+	oppV1, ok := oppProof.WaitingProofInner.(*channeldb.V1WaitingProof)
+	if !ok {
+		err := fmt.Errorf("expected V1 waiting proof, got %T",
+			oppProof.WaitingProofInner)
+		log.Error(err)
+		nMsg.err <- err
+
+		return nil, false
+	}
+
 	var dbProof *models.ChannelAuthProof
 	if isFirstNode {
 		dbProof = models.NewV1ChannelAuthProof(
 			ann.NodeSignature.ToSignatureBytes(),
-			oppProof.NodeSignature.ToSignatureBytes(),
+			oppV1.NodeSignature.ToSignatureBytes(),
 			ann.BitcoinSignature.ToSignatureBytes(),
-			oppProof.BitcoinSignature.ToSignatureBytes(),
+			oppV1.BitcoinSignature.ToSignatureBytes(),
 		)
 	} else {
 		dbProof = models.NewV1ChannelAuthProof(
-			oppProof.NodeSignature.ToSignatureBytes(),
+			oppV1.NodeSignature.ToSignatureBytes(),
 			ann.NodeSignature.ToSignatureBytes(),
-			oppProof.BitcoinSignature.ToSignatureBytes(),
+			oppV1.BitcoinSignature.ToSignatureBytes(),
 			ann.BitcoinSignature.ToSignatureBytes(),
 		)
 	}

@@ -135,7 +135,7 @@ func createTestCtxFromGraphInstanceAssumeValid(t *testing.T,
 	sourceNode, err := graphInstance.v1Graph.SourceNode(t.Context())
 	require.NoError(t, err)
 	sessionSource := &SessionSource{
-		GraphSessionFactory: graphInstance.graph,
+		GraphSessionFactory: graphInstance.v1Graph,
 		SourceNode:          sourceNode,
 		GetLink:             graphInstance.getLink,
 		PathFindingConfig:   pathFindingConfig,
@@ -146,7 +146,7 @@ func createTestCtxFromGraphInstanceAssumeValid(t *testing.T,
 
 	router, err := New(Config{
 		SelfNode:       sourceNode.PubKeyBytes,
-		RoutingGraph:   graphInstance.graph,
+		RoutingGraph:   graphInstance.v1Graph,
 		Chain:          chain,
 		Payer:          &mockPaymentAttemptDispatcherOld{},
 		Control:        makeMockControlTower(),
@@ -328,7 +328,9 @@ func TestSendPaymentRouteFailureFallback(t *testing.T) {
 
 	// Send off the payment request to the router, route through pham nuwen
 	// should've been selected as a fall back and succeeded correctly.
-	paymentPreImage, route, err := ctx.router.SendPayment(payment)
+	paymentPreImage, route, err := ctx.router.SendPayment(
+		t.Context(), payment,
+	)
 	require.NoErrorf(t, err, "unable to send payment: %v",
 		payment.paymentHash)
 
@@ -407,7 +409,9 @@ func TestSendPaymentRouteInfiniteLoopWithBadHopHint(t *testing.T) {
 
 	// Send off the payment request to the router, should succeed
 	// ignoring the bad channel id hint.
-	paymentPreImage, route, paymentErr := ctx.router.SendPayment(payment)
+	paymentPreImage, route, paymentErr := ctx.router.SendPayment(
+		t.Context(), payment,
+	)
 	require.NoErrorf(t, paymentErr, "unable to send payment: %v",
 		payment.paymentHash)
 
@@ -454,7 +458,7 @@ func TestChannelUpdateValidation(t *testing.T) {
 
 	// Assert that the initially configured fee is retrieved correctly.
 	_, e1, e2, err := ctx.graph.FetchChannelEdgesByID(
-		lnwire.NewShortChanIDFromInt(1).ToUint64(),
+		t.Context(), lnwire.NewShortChanIDFromInt(1).ToUint64(),
 	)
 	require.NoError(t, err, "cannot retrieve channel")
 
@@ -522,11 +526,11 @@ func TestChannelUpdateValidation(t *testing.T) {
 	// Send off the payment request to the router. The specified route
 	// should be attempted and the channel update should be received by
 	// graph and ignored because it is missing a valid signature.
-	_, err = ctx.router.SendToRoute(payment, rt, nil)
+	_, err = ctx.router.SendToRoute(t.Context(), payment, rt, nil)
 	require.Error(t, err, "expected route to fail with channel update")
 
 	_, e1, e2, err = ctx.graph.FetchChannelEdgesByID(
-		lnwire.NewShortChanIDFromInt(1).ToUint64(),
+		t.Context(), lnwire.NewShortChanIDFromInt(1).ToUint64(),
 	)
 	require.NoError(t, err, "cannot retrieve channel")
 
@@ -542,13 +546,13 @@ func TestChannelUpdateValidation(t *testing.T) {
 	ctx.graphBuilder.setNextReject(false)
 
 	// Retry the payment using the same route as before.
-	_, err = ctx.router.SendToRoute(payment, rt, nil)
+	_, err = ctx.router.SendToRoute(t.Context(), payment, rt, nil)
 	require.Error(t, err, "expected route to fail with channel update")
 
 	// This time a valid signature was supplied and the policy change should
 	// have been applied to the graph.
 	_, e1, e2, err = ctx.graph.FetchChannelEdgesByID(
-		lnwire.NewShortChanIDFromInt(1).ToUint64(),
+		t.Context(), lnwire.NewShortChanIDFromInt(1).ToUint64(),
 	)
 	require.NoError(t, err, "cannot retrieve channel")
 
@@ -589,7 +593,7 @@ func TestSendPaymentErrorRepeatedFeeInsufficient(t *testing.T) {
 	// to sophon. We'll obtain this as we'll need to to generate the
 	// FeeInsufficient error that we'll send back.
 	_, _, edgeUpdateToFail, err := ctx.graph.FetchChannelEdgesByID(
-		songokuSophonChanID,
+		t.Context(), songokuSophonChanID,
 	)
 	require.NoError(t, err, "unable to fetch chan id")
 
@@ -638,7 +642,9 @@ func TestSendPaymentErrorRepeatedFeeInsufficient(t *testing.T) {
 
 	// Send off the payment request to the router, route through phamnuwen
 	// should've been selected as a fall back and succeeded correctly.
-	paymentPreImage, route, err := ctx.router.SendPayment(payment)
+	paymentPreImage, route, err := ctx.router.SendPayment(
+		t.Context(), payment,
+	)
 	require.NoErrorf(t, err, "unable to send payment: %v",
 		payment.paymentHash)
 
@@ -745,7 +751,9 @@ func TestSendPaymentErrorFeeInsufficientPrivateEdge(t *testing.T) {
 
 	// Send off the payment request to the router, route through son
 	// goku and then across the private channel to elst.
-	paymentPreImage, route, err := ctx.router.SendPayment(payment)
+	paymentPreImage, route, err := ctx.router.SendPayment(
+		t.Context(), payment,
+	)
 	require.NoErrorf(t, err, "unable to send payment: %v",
 		payment.paymentHash)
 
@@ -871,7 +879,9 @@ func TestSendPaymentPrivateEdgeUpdateFeeExceedsLimit(t *testing.T) {
 
 	// Send off the payment request to the router, route through son
 	// goku and then across the private channel to elst.
-	paymentPreImage, route, err := ctx.router.SendPayment(payment)
+	paymentPreImage, route, err := ctx.router.SendPayment(
+		t.Context(), payment,
+	)
 	require.NoErrorf(t, err, "unable to send payment: %v",
 		payment.paymentHash)
 
@@ -936,7 +946,9 @@ func TestSendPaymentErrorNonFinalTimeLockErrors(t *testing.T) {
 	chanID := ctx.getChannelIDFromAlias(t, "roasbeef", "songoku")
 	roasbeefSongoku := lnwire.NewShortChanIDFromInt(chanID)
 
-	_, _, edgeUpdateToFail, err := ctx.graph.FetchChannelEdgesByID(chanID)
+	_, _, edgeUpdateToFail, err := ctx.graph.FetchChannelEdgesByID(
+		t.Context(), chanID,
+	)
 	require.NoError(t, err, "unable to fetch chan id")
 
 	errChanUpdate := lnwire.ChannelUpdate1{
@@ -994,7 +1006,9 @@ func TestSendPaymentErrorNonFinalTimeLockErrors(t *testing.T) {
 	// Send off the payment request to the router, this payment should
 	// succeed as we should actually go through Pham Nuwen in order to get
 	// to Sophon, even though he has higher fees.
-	paymentPreImage, rt, err := ctx.router.SendPayment(payment)
+	paymentPreImage, rt, err := ctx.router.SendPayment(
+		t.Context(), payment,
+	)
 	require.NoErrorf(t, err, "unable to send payment: %v",
 		payment.paymentHash)
 
@@ -1020,7 +1034,9 @@ func TestSendPaymentErrorNonFinalTimeLockErrors(t *testing.T) {
 	// w.r.t to the block height, and instead go through Pham Nuwen. We
 	// flip a bit in the payment hash to allow resending this payment.
 	payment.paymentHash[1] ^= 1
-	paymentPreImage, rt, err = ctx.router.SendPayment(payment)
+	paymentPreImage, rt, err = ctx.router.SendPayment(
+		t.Context(), payment,
+	)
 	require.NoErrorf(t, err, "unable to send payment: %v",
 		payment.paymentHash)
 
@@ -1089,7 +1105,7 @@ func TestSendPaymentErrorPathPruning(t *testing.T) {
 
 	// When we try to dispatch that payment, we should receive an error as
 	// both attempts should fail and cause both routes to be pruned.
-	_, _, err = ctx.router.SendPayment(payment)
+	_, _, err = ctx.router.SendPayment(t.Context(), payment)
 	require.Error(t, err, "payment didn't return error")
 
 	// The final error returned should also indicate that the peer wasn't
@@ -1097,7 +1113,9 @@ func TestSendPaymentErrorPathPruning(t *testing.T) {
 	require.Equal(t, paymentsdb.FailureReasonNoRoute, err)
 
 	// Inspect the two attempts that were made before the payment failed.
-	p, err := ctx.router.cfg.Control.FetchPayment(*payment.paymentHash)
+	p, err := ctx.router.cfg.Control.FetchPayment(
+		t.Context(), *payment.paymentHash,
+	)
 	require.NoError(t, err)
 
 	htlcs := p.GetHTLCs()
@@ -1132,7 +1150,9 @@ func TestSendPaymentErrorPathPruning(t *testing.T) {
 	// This shouldn't return an error, as we'll make a payment attempt via
 	// the pham nuwen channel based on the assumption that there might be an
 	// intermittent issue with the songoku <-> sophon channel.
-	paymentPreImage, rt, err := ctx.router.SendPayment(payment)
+	paymentPreImage, rt, err := ctx.router.SendPayment(
+		t.Context(), payment,
+	)
 	require.NoErrorf(t, err, "unable to send payment: %v",
 		payment.paymentHash)
 
@@ -1172,7 +1192,9 @@ func TestSendPaymentErrorPathPruning(t *testing.T) {
 
 	// We flip a bit in the payment hash to allow resending this payment.
 	payment.paymentHash[1] ^= 1
-	paymentPreImage, rt, err = ctx.router.SendPayment(payment)
+	paymentPreImage, rt, err = ctx.router.SendPayment(
+		t.Context(), payment,
+	)
 	require.NoErrorf(t, err, "unable to send payment: %v",
 		payment.paymentHash)
 
@@ -1304,7 +1326,7 @@ func TestUnknownErrorSource(t *testing.T) {
 	// the route a->b->c is tried first. An unreadable faiure is returned
 	// which should pruning the channel a->b. We expect the payment to
 	// succeed via a->d.
-	_, _, err = ctx.router.SendPayment(payment)
+	_, _, err = ctx.router.SendPayment(t.Context(), payment)
 	require.NoErrorf(t, err, "unable to send payment: %v",
 		payment.paymentHash)
 
@@ -1329,7 +1351,7 @@ func TestUnknownErrorSource(t *testing.T) {
 	// Send off the payment request to the router. We expect the payment to
 	// fail because both routes have been pruned.
 	payment.paymentHash[1] ^= 1
-	_, _, err = ctx.router.SendPayment(payment)
+	_, _, err = ctx.router.SendPayment(t.Context(), payment)
 	if err == nil {
 		t.Fatalf("expected payment to fail")
 	}
@@ -1425,7 +1447,9 @@ func TestSendToRouteStructuredError(t *testing.T) {
 			// update should be received by router and ignored
 			// because it is missing a valid
 			// signature.
-			_, err = ctx.router.SendToRoute(payment, rt, nil)
+			_, err = ctx.router.SendToRoute(
+				t.Context(), payment, rt, nil,
+			)
 
 			fErr, ok := err.(*htlcswitch.ForwardingError)
 			require.True(
@@ -1504,7 +1528,7 @@ func TestSendToRouteMaxHops(t *testing.T) {
 	// Send off the payment request to the router. We expect an error back
 	// indicating that the route is too long.
 	var payHash lntypes.Hash
-	_, err = ctx.router.SendToRoute(payHash, rt, nil)
+	_, err = ctx.router.SendToRoute(t.Context(), payHash, rt, nil)
 	if err != route.ErrMaxRouteHopsExceeded {
 		t.Fatalf("expected ErrMaxRouteHopsExceeded, but got %v", err)
 	}
@@ -1644,17 +1668,21 @@ func TestBuildRoute(t *testing.T) {
 
 	noAmt := fn.None[lnwire.MilliSatoshi]()
 
+	selfNode := ctx.router.cfg.SelfNode
+
 	// Test that we can't build a route when no hops are given.
 	hops = []route.Vertex{}
 	_, err = ctx.router.BuildRoute(
-		noAmt, hops, nil, 40, fn.None[[32]byte](), fn.None[[]byte](),
+		selfNode, noAmt, hops, nil, 40,
+		fn.None[[32]byte](), fn.None[[]byte](),
 	)
 	require.Error(t, err)
 
 	// Create hop list for an unknown destination.
 	hops := []route.Vertex{ctx.aliases["b"], ctx.aliases["y"]}
 	_, err = ctx.router.BuildRoute(
-		noAmt, hops, nil, 40, fn.Some(payAddr), fn.None[[]byte](),
+		selfNode, noAmt, hops, nil, 40,
+		fn.Some(payAddr), fn.None[[]byte](),
 	)
 	noChanErr := ErrNoChannel{}
 	require.ErrorAs(t, err, &noChanErr)
@@ -1666,8 +1694,8 @@ func TestBuildRoute(t *testing.T) {
 
 	// Build the route for the given amount.
 	rt, err := ctx.router.BuildRoute(
-		fn.Some(amt), hops, nil, 40, fn.Some(payAddr),
-		fn.None[[]byte](),
+		selfNode, fn.Some(amt), hops, nil, 40,
+		fn.Some(payAddr), fn.None[[]byte](),
 	)
 	require.NoError(t, err)
 
@@ -1679,7 +1707,8 @@ func TestBuildRoute(t *testing.T) {
 
 	// Build the route for the minimum amount.
 	rt, err = ctx.router.BuildRoute(
-		noAmt, hops, nil, 40, fn.Some(payAddr), fn.None[[]byte](),
+		selfNode, noAmt, hops, nil, 40,
+		fn.Some(payAddr), fn.None[[]byte](),
 	)
 	require.NoError(t, err)
 
@@ -1697,7 +1726,8 @@ func TestBuildRoute(t *testing.T) {
 	// There is no amount that can pass through both channel 5 and 4.
 	hops = []route.Vertex{ctx.aliases["e"], ctx.aliases["c"]}
 	_, err = ctx.router.BuildRoute(
-		noAmt, hops, nil, 40, fn.None[[32]byte](), fn.None[[]byte](),
+		selfNode, noAmt, hops, nil, 40,
+		fn.None[[32]byte](), fn.None[[]byte](),
 	)
 	require.Error(t, err)
 	noChanErr = ErrNoChannel{}
@@ -1717,7 +1747,8 @@ func TestBuildRoute(t *testing.T) {
 	// policy of channel 3.
 	hops = []route.Vertex{ctx.aliases["b"], ctx.aliases["z"]}
 	rt, err = ctx.router.BuildRoute(
-		noAmt, hops, nil, 40, fn.Some(payAddr), fn.None[[]byte](),
+		selfNode, noAmt, hops, nil, 40,
+		fn.Some(payAddr), fn.None[[]byte](),
 	)
 	require.NoError(t, err)
 	checkHops(rt, []uint64{1, 8}, payAddr)
@@ -1731,8 +1762,8 @@ func TestBuildRoute(t *testing.T) {
 	hops = []route.Vertex{ctx.aliases["d"], ctx.aliases["f"]}
 	amt = lnwire.NewMSatFromSatoshis(100)
 	rt, err = ctx.router.BuildRoute(
-		fn.Some(amt), hops, nil, 40, fn.Some(payAddr),
-		fn.None[[]byte](),
+		selfNode, fn.Some(amt), hops, nil, 40,
+		fn.Some(payAddr), fn.None[[]byte](),
 	)
 	require.NoError(t, err)
 	checkHops(rt, []uint64{9, 10}, payAddr)
@@ -1748,11 +1779,24 @@ func TestBuildRoute(t *testing.T) {
 	// is a third pass through newRoute in which this gets corrected to end
 	hops = []route.Vertex{ctx.aliases["d"], ctx.aliases["f"]}
 	rt, err = ctx.router.BuildRoute(
-		noAmt, hops, nil, 40, fn.Some(payAddr), fn.None[[]byte](),
+		selfNode, noAmt, hops, nil, 40,
+		fn.Some(payAddr), fn.None[[]byte](),
 	)
 	require.NoError(t, err)
 	checkHops(rt, []uint64{9, 10}, payAddr)
 	require.EqualValues(t, 20180, rt.TotalAmount, "%v", rt.TotalAmount)
+
+	// Test a route built from an alternate source node (d --> f).
+	hops = []route.Vertex{ctx.aliases["f"]}
+	rt, err = ctx.router.BuildRoute(
+		ctx.aliases["d"], fn.Some(amt), hops, nil, 40,
+		fn.Some(payAddr), fn.None[[]byte](),
+	)
+	require.NoError(t, err)
+	require.Equal(t, ctx.aliases["d"], rt.SourcePubKey,
+		"expected 'd' as source")
+	checkHops(rt, []uint64{10}, payAddr)
+
 }
 
 // TestReceiverAmtForwardPass tests that the forward pass returns the expected
@@ -2219,7 +2263,9 @@ func TestSendToRouteSkipTempErrSuccess(t *testing.T) {
 	).Return(nil)
 
 	// Expect a successful send to route.
-	attempt, err := router.SendToRouteSkipTempErr(payHash, rt, nil)
+	attempt, err := router.SendToRouteSkipTempErr(
+		t.Context(), payHash, rt, nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, testAttempt, attempt)
 
@@ -2274,7 +2320,9 @@ func TestSendToRouteSkipTempErrNonMPP(t *testing.T) {
 	}}
 
 	// Expect an error to be returned.
-	attempt, err := router.SendToRouteSkipTempErr(payHash, rt, nil)
+	attempt, err := router.SendToRouteSkipTempErr(
+		t.Context(), payHash, rt, nil,
+	)
 	require.ErrorIs(t, ErrSkipTempErr, err)
 	require.Nil(t, attempt)
 
@@ -2354,7 +2402,9 @@ func TestSendToRouteSkipTempErrTempFailure(t *testing.T) {
 	).Return(nil, nil)
 
 	// Expect a failed send to route.
-	attempt, err := router.SendToRouteSkipTempErr(payHash, rt, nil)
+	attempt, err := router.SendToRouteSkipTempErr(
+		t.Context(), payHash, rt, nil,
+	)
 	require.Equal(t, tempErr, err)
 	require.Equal(t, testAttempt, attempt)
 
@@ -2438,7 +2488,9 @@ func TestSendToRouteSkipTempErrPermanentFailure(t *testing.T) {
 	).Return(&failureReason, nil)
 
 	// Expect a failed send to route.
-	attempt, err := router.SendToRouteSkipTempErr(payHash, rt, nil)
+	attempt, err := router.SendToRouteSkipTempErr(
+		t.Context(), payHash, rt, nil,
+	)
 	require.Equal(t, permErr, err)
 	require.Equal(t, testAttempt, attempt)
 
@@ -2527,7 +2579,7 @@ func TestSendToRouteTempFailure(t *testing.T) {
 	).Return(nil, nil)
 
 	// Expect a failed send to route.
-	attempt, err := router.SendToRoute(payHash, rt, nil)
+	attempt, err := router.SendToRoute(t.Context(), payHash, rt, nil)
 	require.Equal(t, tempErr, err)
 	require.Equal(t, testAttempt, attempt)
 
@@ -3273,4 +3325,41 @@ func TestFindBlindedPathsWithMC(t *testing.T) {
 	assertPaths(routes, []string{
 		"alice,bob,dave",
 	})
+}
+
+// TestResumePaymentsSkipsCleanStoreInExternalMode verifies that when
+// ExternalPaymentLifecycle is true, CleanStore is not called during
+// resumePayments. The external controller is responsible for cleaning the
+// attempt store.
+func TestResumePaymentsSkipsCleanStoreInExternalMode(t *testing.T) {
+	t.Parallel()
+
+	mockControl := &mockControlTower{}
+	mockPayer := &mockPaymentAttemptDispatcher{}
+
+	// resumePayments calls FetchInFlightPayments before deciding
+	// whether to run CleanStore. Return an empty slice so no payment
+	// goroutines are launched.
+	mockControl.On("FetchInFlightPayments").Return(
+		[]*paymentsdb.MPPayment{}, nil,
+	)
+
+	rt := &ChannelRouter{
+		cfg: &Config{
+			Control: mockControl,
+			Payer:   mockPayer,
+
+			// This is the key: external mode is active.
+			ExternalPaymentLifecycle: true,
+		},
+		quit: make(chan struct{}),
+	}
+
+	err := rt.resumePayments()
+	require.NoError(t, err)
+
+	// CleanStore should NOT have been called.
+	mockPayer.AssertNotCalled(t, "CleanStore", mock.Anything)
+
+	mockControl.AssertExpectations(t)
 }

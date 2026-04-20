@@ -1095,6 +1095,15 @@
             }
           }
         },
+        "parameters": [
+          {
+            "name": "include_log",
+            "description": "If set to true, the log file content will be included in the response.\nBy default, only the config information is returned.",
+            "in": "query",
+            "required": false,
+            "type": "boolean"
+          }
+        ],
         "tags": [
           "Lightning"
         ]
@@ -2308,13 +2317,13 @@
               "type": "object",
               "properties": {
                 "result": {
-                  "$ref": "#/definitions/lnrpcOnionMessage"
+                  "$ref": "#/definitions/lnrpcOnionMessageUpdate"
                 },
                 "error": {
                   "$ref": "#/definitions/rpcStatus"
                 }
               },
-              "title": "Stream result of lnrpcOnionMessage"
+              "title": "Stream result of lnrpcOnionMessageUpdate"
             }
           },
           "default": {
@@ -2440,6 +2449,13 @@
             "required": false,
             "type": "string",
             "format": "uint64"
+          },
+          {
+            "name": "omit_hops",
+            "description": "If set, omit hop-level route data for HTLC attempts to reduce query\ncost and response size.",
+            "in": "query",
+            "required": false,
+            "type": "boolean"
           }
         ],
         "tags": [
@@ -3125,7 +3141,8 @@
         "INACTIVE_CHANNEL",
         "PENDING_OPEN_CHANNEL",
         "FULLY_RESOLVED_CHANNEL",
-        "CHANNEL_FUNDING_TIMEOUT"
+        "CHANNEL_FUNDING_TIMEOUT",
+        "CHANNEL_UPDATE"
       ],
       "default": "OPEN_CHANNEL"
     },
@@ -3438,6 +3455,16 @@
         "closing_tx_hex": {
           "type": "string",
           "description": "The raw hex encoded bytes of the closing transaction. Included if\ninclude_raw_tx in the request is true."
+        },
+        "blocks_til_close_confirmed": {
+          "type": "integer",
+          "format": "int64",
+          "description": "Remaining number of confirmations until the channel closure is\nconsidered final and removed from waiting close. Channel closes\nrequire multiple confirmations for reorg protection — the exact\nnumber scales with channel capacity. A closing transaction that\ngets reorganized out of the chain resets this counter. When the\nclosing transaction is not yet confirmed, this value equals the\ntotal number of confirmations required."
+        },
+        "close_height": {
+          "type": "integer",
+          "format": "int64",
+          "description": "The block height at which the closing transaction was first confirmed.\nThis will be zero if the closing transaction has not yet confirmed, or\nif this information is not available for older channels."
         }
       }
     },
@@ -4478,6 +4505,14 @@
         }
       }
     },
+    "lnrpcChannelCommitUpdate": {
+      "type": "object",
+      "properties": {
+        "channel": {
+          "$ref": "#/definitions/lnrpcChannel"
+        }
+      }
+    },
     "lnrpcChannelConstraints": {
       "type": "object",
       "properties": {
@@ -4608,6 +4643,9 @@
         },
         "channel_funding_timeout": {
           "$ref": "#/definitions/lnrpcChannelPoint"
+        },
+        "updated_channel": {
+          "$ref": "#/definitions/lnrpcChannelCommitUpdate"
         },
         "type": {
           "$ref": "#/definitions/ChannelEventUpdateUpdateType"
@@ -6554,7 +6592,7 @@
         }
       }
     },
-    "lnrpcOnionMessage": {
+    "lnrpcOnionMessageUpdate": {
       "type": "object",
       "properties": {
         "peer": {
@@ -6571,6 +6609,23 @@
           "type": "string",
           "format": "byte",
           "description": "Serialized Sphinx onion packet (BOLT 4) containing the layered, per-hop\nencrypted payloads and routing instructions used to forward this message\nalong its designated path."
+        },
+        "reply_path": {
+          "$ref": "#/definitions/lnrpcBlindedPath",
+          "description": "reply_path is the blinded path that should be used when replying to a\nreceived message."
+        },
+        "encrypted_recipient_data": {
+          "type": "string",
+          "format": "byte",
+          "description": "encrypted_recipient_data is the encrypted data that contains the\nforwarding information for an onion message. It contains either\nnext_node_id or short_channel_id for each non-final node. It MAY contain\nthe path_id for the final node."
+        },
+        "custom_records": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "format": "byte"
+          },
+          "description": "Custom onion message tlv records. These are customized fields that are\nnot defined by LND and cannot be extracted."
         }
       }
     },
@@ -7474,6 +7529,10 @@
           "type": "string",
           "format": "byte",
           "description": "Custom channel data that might be populated in custom channels."
+        },
+        "source_pub_key": {
+          "type": "string",
+          "description": "The source node from whose perspective the route was built. Defaults to\nthe node's own public key."
         }
       },
       "description": "A path through the channel graph which runs over one or more channels in\nsuccession. This struct carries all the information required to craft the\nSphinx onion packet, and send the payment along the first hop in the path. A\nroute is only selected as valid if all the channels have sufficient capacity to\ncarry the initial payment amount after fees are accounted for."

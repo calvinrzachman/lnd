@@ -32,19 +32,6 @@
   sub-server is still starting. This allows clients to reliably detect the
   transient condition and retry without brittle string matching.
 
-- [Fixed an issue](https://github.com/lightningnetwork/lnd/pull/10399) where the
-  TLS manager would fail to start if only one of the TLS pair files (certificate
-  or key) existed. The manager now correctly regenerates both files when either
-  is missing, preventing "file not found" errors on startup.
-
-- [Fixed race conditions](https://github.com/lightningnetwork/lnd/pull/10420) in
-  the channel graph database. The `Node.PubKey()` and
-  `ChannelEdgeInfo.NodeKey1/NodeKey2()` methods had check-then-act races when
-  caching parsed public keys. Additionally, `DisconnectBlockAtHeight` was
-  accessing the reject and channel caches without proper locking. The caching
-  has been removed from the public key parsing methods, and proper mutex
-  protection has been added to the cache access in `DisconnectBlockAtHeight`.
-
 - [Fixed TLV decoders to reject malformed records with incorrect lengths](https://github.com/lightningnetwork/lnd/pull/10249).
   TLV decoders now strictly enforce fixed-length requirements for Fee (8 bytes),
   Musig2Nonce (66 bytes), ShortChannelID (8 bytes), Vertex (33 bytes), and
@@ -63,12 +50,6 @@
   millisecond if set to zero or a negative value, preventing `time.NewTicker`
   from panicking.
 
-- [Fixed a shutdown
-  deadlock](https://github.com/lightningnetwork/lnd/pull/10540) in the gossiper.
-  Certain gossip messages could cause multiple error messages to be sent on a
-  channel that was only expected to be used for a single message. The erring
-  goroutine would block on the second send, leading to a deadlock at shutdown.
-
 * [Fixed `lncli unlock` to wait until the wallet is ready to be
   unlocked](https://github.com/lightningnetwork/lnd/pull/10536)
   before sending the unlock request. The command now reports wallet state
@@ -77,14 +58,123 @@
 
 # New Features
 
-- Basic Support for [onion messaging forwarding](https://github.com/lightningnetwork/lnd/pull/9868) 
-  consisting of a new message type, `OnionMessage`. This includes the message's
-  definition, comprising a path key and an onion blob, along with the necessary
-  serialization and deserialization logic for peer-to-peer communication.
+- [Basic Support](https://github.com/lightningnetwork/lnd/pull/9868) for onion
+  [messaging forwarding](https://github.com/lightningnetwork/lnd/pull/10089).
+  This adds a new message type, `OnionMessage`, comprising a path key and an
+  onion blob. It includes the necessary serialization and deserialization logic
+  for peer-to-peer communication.
 
 ## Functional Enhancements
 
+* [Added reorg protection for channel
+  closes](https://github.com/lightningnetwork/lnd/pull/10331). Previously,
+  channel closes were considered final immediately on spend detection with no
+  confirmation waiting. Now, all channel closes require between 3 and 6
+  confirmations, scaled linearly with channel capacity up to the maximum
+  non-wumbo channel size (~0.168 BTC), with wumbo channels always requiring
+  6 confirmations.
+  
+* Introduced a new `AttemptStore` interface within `htlcswitch`, and expanded
+  its `kvdb` implementation, `networkResultStore`. A [new `InitAttempt` method](https://github.com/lightningnetwork/lnd/pull/10049),
+  which serves as a "durable write of intent" or "write-ahead log" to checkpoint
+  an attempt in a new `PENDING` state prior to dispatch, now provides the
+  foundational durable storage required for external tracking of the HTLC
+  attempt lifecycle. This is a preparatory step that enables a future
+  idempotent `switchrpc.SendOnion` RPC, which will offer "at most once"
+  processing of htlc dispatch requests for remote clients. Care was taken to
+  avoid modifications to the existing flows for dispatching local payments,
+  preserving the existing battle-tested logic.
+
+* Added a new [switchrpc RPC sub-system](https://github.com/lightningnetwork/lnd/pull/9489)
+  with `SendOnion`, `BuildOnion`, and `TrackOnion` endpoints. This allows the
+  daemon to offload path-finding, onion construction and payment life-cycle
+  management to an external entity and instead accept onion payments for direct
+  delivery to the network. The new gRPC server should be used with caution. It
+  is currently only safe to allow a *single* entity (either the local router or
+  *one* external router) to dispatch attempts via the Switch at any given time.
+  Running multiple controllers concurrently will lead to undefined behavior and
+  potential loss of funds. The compilation of the server is hidden behind the
+  non-default `switchrpc` build tag.
+
+* The `SendOnion` RPC is now fully [idempotent](
+  https://github.com/lightningnetwork/lnd/pull/10473), providing a critical
+  reliability improvement for external payment orchestrators (such as a remote
+  `ChannelRouter`). Callers can now safely retry a `SendOnion` request after a
+  network timeout or ambiguous error without risking a duplicate payment. If a
+  request with the same `attempt_id` has already been processed, the RPC will
+  now return a `DUPLICATE_HTLC` error, serving as a definitive acknowledgment
+  that the dispatch was received. This allows clients to build more resilient
+  payment-sending logic.
+
+* The `switchrpc.TrackOnion` RPC has been
+  [overhauled](https://github.com/lightningnetwork/lnd/pull/10472) to provide a
+  more robust and type-safe error handling mechanism. The `TrackOnionResponse`
+  message now uses a top-level `oneof` to enforce a compile-time guarantee that
+  a response contains either a `preimage` (for success) or structured
+  `FailureDetails` (for a payment failure). This replaces the previous
+  string-based error reporting. Application-level payment failures are now
+  clearly separated from RPC-level failures (e.g., attempt not found), which are
+  communicated via standard gRPC status codes. This is a **breaking change** for
+  any clients of the `TrackOnion` RPC.
+
+* The `switchrpc.SendOnion` RPC has been
+  [overhauled](https://github.com/lightningnetwork/lnd/pull/10545) to provide a
+  more robust, client-friendly, and forward-compatible API. The
+  `SendOnionResponse` is now an empty message; a gRPC status of `OK` indicates
+  successful dispatch. Application-level dispatch failures carry structured
+  `SendOnionFailureDetails` in the gRPC status details, classifying each failure
+  as either `DefiniteFailure` (safe to fail the attempt) or `IndefiniteFailure`
+  (client MUST retry). This is a **breaking change** for any clients of the
+  `SendOnion` RPC.
+  
+* To support scenarios where an external entity, such as a remote router,
+  manages the payment lifecycle via the Switch RPC server, the node must
+  preserve the history of HTLC attempts across restarts. This [behavior](https://github.com/lightningnetwork/lnd/pull/10178) is now
+  conditional on how the lnd binary is built. When compiled with the `switchrpc`
+  build tag, the local `routing.ChannelRouter`'s automatic cleanup of the
+  dispatcher's (Switch) attempt store on startup is disabled. This shifts the
+  responsibility of state cleanup to the external controller, which is expected
+  to use an RPC interface (e.g., switchrpc) to manage the lifecycle of attempts.
+  Tying this behavior to a build tag, rather than a runtime flag, makes the
+  binary's purpose explicit and prevents potential misconfigurations.
+
+* Add [`DisableRemoteRouter` rpc](https://github.com/lightningnetwork/lnd/pull/10178)
+  to `switchrpc` which marks the database as no longer being used by a remote
+  router. This is useful for migrating from a remote router setup back to the
+  default embedded router. The external controller should first clean its
+  results from the attempt store via `DeleteAttempts` (#10602); this RPC will
+  fail if there are any remaining attempt entries.
+
+* The `ChannelRouter` now supports a [configurable attempt reconciliation
+  hook](https://github.com/lightningnetwork/lnd/pull/10621) that runs for each
+  in-flight HTLC attempt during startup, before result collection begins. This
+  enables write-first crash recovery for deployments where the router and switch
+  run in separate processes (e.g. a remote `ChannelRouter` dispatching via
+  `switchrpc.SendOnion`). The callback lets the caller confirm dispatch status by
+  idempotently re-submitting each attempt, resolving the ambiguity that arises
+  when a crash occurs between persisting an attempt and receiving the switch's
+  acknowledgement. The default is a no-op, so existing single-process lnd
+  deployments are unaffected.
+
+* Added a new [`switchrpc.DeleteAttempts`](https://github.com/lightningnetwork/lnd/pull/10602)
+  RPC that allows an external router to clean up terminal (settled or failed)
+  attempt records from the `AttemptStore`. The RPC accepts a batch of attempt
+  IDs and returns per-ID results indicating whether each was deleted, already
+  deleted, still pending (in-flight), or not found. Deleting a terminal attempt
+  record removes the duplicate protection established by InitAttempt, allowing a
+  subsequent SendOnion call with the same attempt ID to succeed. Clients should
+  only delete attempt IDs they have fully finalized and will never reuse.
+
 ## RPC Additions
+
+* The `WaitingCloseChannel` response in `PendingChannels` now includes two
+  new fields via [#10509](https://github.com/lightningnetwork/lnd/pull/10509):
+  `blocks_til_close_confirmed`, showing the remaining confirmations until a
+  closed channel is considered fully resolved, and `close_height`, the block
+  height at which the closing transaction was first confirmed. These build on
+  the reorg-safe confirmation logic introduced in
+  [#10331](https://github.com/lightningnetwork/lnd/pull/10331), where the
+  required number of confirmations scales with channel capacity.
 
 * [Added support for coordinator-based MuSig2 signing
   patterns](https://github.com/lightningnetwork/lnd/pull/10436) with two new
@@ -106,6 +196,10 @@
 
 # Improvements
 ## Functional Updates
+
+* [Allow multiple read-only RPC middleware
+  interceptors](https://github.com/lightningnetwork/lnd/pull/10611) to be
+  registered simultaneously.
 
 * [Added support](https://github.com/lightningnetwork/lnd/pull/9432) for the
   `upfront-shutdown-address` configuration in `lnd.conf`, allowing users to
@@ -129,13 +223,76 @@
   composite `synced_to_chain` field which also considers router and blockbeat
   dispatcher states.
 
+* SubscribeChannelEvents [now emits channel update
+  events](https://github.com/lightningnetwork/lnd/pull/10543) to be able to
+  subscribe to state changes.
+
+* The [`GetDebugInfo`](https://github.com/lightningnetwork/lnd/pull/10613) RPC
+  request now accepts an `include_log` flag. By default, only the configuration
+  map is returned. When `include_log` is set to `true`, the log file content is
+  also included in the response.
+
+* [Add `source_pub_key` to `Route` proto message](https://github.com/lightningnetwork/lnd/pull/9153)
+  so that routes can be constructed and unmarshalled from the perspective of
+  different nodes. Defaults to the node's own public key.
+
 ## lncli Updates
+
+* The `getdebuginfo` command now supports an `--include_log` flag. By default,
+  only the daemon's configuration is returned. When set, the log file content is
+  also included in the response.
+
+* The `encryptdebugpackage` command now supports an `--include_log` flag. When
+  set, the log file content is included in the encrypted debug package.
 
 ## Breaking Changes
 
+* [Increased MinCLTVDelta from 18 to
+  24](https://github.com/lightningnetwork/lnd/pull/10331) to provide a larger
+  safety margin above the `DefaultFinalCltvRejectDelta` (19 blocks). This
+  affects users who create invoices with custom `cltv_expiry_delta` values
+  between 18-23, which will now require a minimum of 24. The default value of
+  80 blocks for invoice creation remains unchanged, so most users will not be
+  affected. Existing invoices created before the upgrade will continue to work
+  normally.
+
+* The [`GetDebugInfo`](https://github.com/lightningnetwork/lnd/pull/10613) RPC
+  no longer returns log file content by default. Clients that rely on the `log`
+  field must now explicitly set `include_log` to `true` in the request. The
+  `lncli getdebuginfo` and `lncli encryptdebugpackage` commands similarly
+  require the `--include_log` flag to include logs in the output.
+
 ## Performance Improvements
 
+* [Replace the catch-all `FilterInvoices` SQL query with five focused,
+  index-friendly queries](https://github.com/lightningnetwork/lnd/pull/10601)
+  (`FetchPendingInvoices`, `FilterInvoicesBySettleIndex`,
+  `FilterInvoicesByAddIndex`, `FilterInvoicesForward`,
+  `FilterInvoicesReverse`). The old query used `col >= $param OR $param IS
+  NULL` predicates and a `CASE`-based `ORDER BY` that prevented SQLite's query
+  planner from using indexes, causing full table scans. Each new query carries
+  only the parameters it actually needs and uses a direct `ORDER BY`, allowing
+  the planner to perform efficient index range scans on the invoice table.
+
+*  [Fix full table scans on the HTLC settlement 
+    hot path](https://github.com/lightningnetwork/lnd/pull/10619).
+    Replace the catch-all `GetInvoice` query (which used `OR $1 IS NULL`
+    predicates that forced full table scans) with three dedicated queries
+    targeting uniquely-constrained columns. Also drop four redundant indexes 
+    that duplicated UNIQUE constraints or were never used as query filters.
+
 ## Deprecations
+
+### ⚠️ **Warning:** Deprecated fields in `lnrpc.Hop` will be removed in release version **0.22**
+
+  The following deprecated fields in the [`lnrpc.Hop`](https://lightning.engineering/api-docs/api/lnd/lightning/send-to-route-sync/#lnrpchop)
+  message will be removed:
+
+  | Field | Deprecated Since | Replacement |
+  |-------|------------------|-------------|
+  | `chan_capacity` | 0.7.1 | None |
+  | `amt_to_forward` | 0.7.1 | `amt_to_forward_msat` |
+  | `fee` | 0.7.1 | `fee_msat` |
 
 ### ⚠️ **Warning:** The deprecated fee rate option `--sat_per_byte` will be removed in release version **0.22**
 
@@ -180,19 +337,70 @@
   nodes and channels [1](https://github.com/lightningnetwork/lnd/pull/10339)
     [2](https://github.com/lightningnetwork/lnd/pull/10379)
     [3](https://github.com/lightningnetwork/lnd/pull/10380)
-    [4](https://github.com/lightningnetwork/lnd/pull/10542).
+    [4](https://github.com/lightningnetwork/lnd/pull/10542),
+    [5](https://github.com/lightningnetwork/lnd/pull/10572),
+    [6](https://github.com/lightningnetwork/lnd/pull/10582).
+* Updated waiting proof persistence for gossip upgrades by introducing typed
+  waiting proof keys and payloads, with a DB migration to rewrite legacy
+  waiting proof records to the new key/value format
+  ([#10633](https://github.com/lightningnetwork/lnd/pull/10633)).
+
+* Payment Store SQL implementation and migration project:
+  * Introduce an [abstract payment 
+    store](https://github.com/lightningnetwork/lnd/pull/10153) interface and
+    refacotor the payment related LND code to make it more modular.
+  * Implement the SQL backend for the [payments 
+    database](https://github.com/lightningnetwork/lnd/pull/9147)
+  * Implement query methods (QueryPayments,FetchPayment) for the [payments db 
+    SQL Backend](https://github.com/lightningnetwork/lnd/pull/10287)
+  * Implement insert methods for the [payments db 
+    SQL Backend](https://github.com/lightningnetwork/lnd/pull/10291)
+  * Implement third(final) Part of SQL backend [payment
+  functions](https://github.com/lightningnetwork/lnd/pull/10368)
+  * Finalize SQL payments implementation [enabling unit and itests
+    for SQL backend](https://github.com/lightningnetwork/lnd/pull/10292)
+  * [Thread context through payment 
+    db functions Part 1](https://github.com/lightningnetwork/lnd/pull/10307)
+  * [Thread context through payment 
+    db functions Part 2](https://github.com/lightningnetwork/lnd/pull/10308)
+  * [Finalize SQL implementation for 
+    payments db](https://github.com/lightningnetwork/lnd/pull/10373)
+  * [Add the KV-to-SQL payment
+    migration](https://github.com/lightningnetwork/lnd/pull/10485) with
+    comprehensive tests. The migration is currently dev-only, compiled behind
+    the `test_db_postgres`, `test_db_sqlite`, or `test_native_sql` build tags.
+  * Various [SQL payment store
+    improvements](https://github.com/lightningnetwork/lnd/pull/10535):
+    optimize schema indexes, improve query performance for payment filtering
+    and failed attempt cleanup, fix cross-database timestamp handling, add
+    `omit_hops` option to `ListPayments` to reduce response size, and increase
+    the default SQLite cache size.
+  * The [SQL payments migration is promoted to production
+    code](https://github.com/lightningnetwork/lnd/pull/10627). Previously the
+    migration was hidden behind the `test_native_sql` build tag; it is now
+    compiled into mainline builds and available to all users who have the
+    `native-sql` setting enabled.
+
 
 ## Code Health
 
 ## Tooling and Documentation
 
+* [Overhauled Docker documentation and environment](https://github.com/lightningnetwork/lnd/pull/10461)
+  to modernize the developer onboarding flow. Key updates include migrating 
+  to Docker Compose V2, updating base images (btcd v0.25.0, Go 1.25.5), 
+  and transitioning the documentation to focus on a more reliable "Simnet" 
+  workflow while removing obsolete faucet references.
+
 # Contributors (Alphabetical Order)
 
+* bitromortac
 * Boris Nagaev
 * Elle Mouton
 * Erick Cestari
+* Gijs van Dam
 * hieblmi
-* Matt Morehouse
 * Mohamed Awnallah
 * Nishant Bansal
 * Pins
+* Ziggie

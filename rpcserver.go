@@ -708,7 +708,7 @@ func (r *rpcServer) addDeps(ctx context.Context, s *server,
 	if err != nil {
 		return err
 	}
-	graph := s.graphDB
+	graph := s.v1Graph
 
 	routerBackend := &routerrpc.RouterBackend{
 		SelfNode: selfNode.PubKeyBytes,
@@ -716,7 +716,9 @@ func (r *rpcServer) addDeps(ctx context.Context, s *server,
 		FetchChannelCapacity: func(chanID uint64) (btcutil.Amount,
 			error) {
 
-			info, _, _, err := graph.FetchChannelEdgesByID(chanID)
+			info, _, _, err := graph.FetchChannelEdgesByID(
+				ctx, chanID,
+			)
 			if err != nil {
 				return 0, err
 			}
@@ -734,7 +736,7 @@ func (r *rpcServer) addDeps(ctx context.Context, s *server,
 			route.Vertex, error) {
 
 			info, _, _, err := graph.FetchChannelEdgesByID(
-				chanID,
+				ctx, chanID,
 			)
 			if err != nil {
 				return route.Vertex{}, route.Vertex{},
@@ -3202,7 +3204,7 @@ func abandonChanFromGraph(chanGraph *graphdb.VersionedGraph,
 	// First, we'll obtain the channel ID. If we can't locate this, then
 	// it's the case that the channel may have already been removed from
 	// the graph, so we'll return a nil error.
-	chanID, err := chanGraph.ChannelID(chanPoint)
+	chanID, err := chanGraph.ChannelID(context.TODO(), chanPoint)
 	switch {
 	case errors.Is(err, graphdb.ErrEdgeNotFound):
 		return nil
@@ -3212,7 +3214,7 @@ func abandonChanFromGraph(chanGraph *graphdb.VersionedGraph,
 
 	// If the channel ID is still in the graph, then that means the channel
 	// is still open, so we'll now move to purge it from the graph.
-	return chanGraph.DeleteChannelEdges(false, true, chanID)
+	return chanGraph.DeleteChannelEdges(context.TODO(), false, true, chanID)
 }
 
 // abandonChan removes a channel from the database, graph and contract court.
@@ -3456,15 +3458,26 @@ func (r *rpcServer) GetInfo(_ context.Context,
 }
 
 // GetDebugInfo returns debug information concerning the state of the daemon
-// and its subsystems. This includes the full configuration and the latest log
-// entries from the log file.
+// and its subsystems. By default, this returns only the configuration. If the
+// `include_log` flag is set in the request, the latest log entries from the
+// log file are also included.
 func (r *rpcServer) GetDebugInfo(_ context.Context,
-	_ *lnrpc.GetDebugInfoRequest) (*lnrpc.GetDebugInfoResponse, error) {
+	req *lnrpc.GetDebugInfoRequest) (*lnrpc.GetDebugInfoResponse, error) {
 
 	flatConfig, _, err := configToFlatMap(*r.cfg)
 	if err != nil {
 		return nil, fmt.Errorf("error converting config to flat map: "+
 			"%w", err)
+	}
+
+	resp := &lnrpc.GetDebugInfoResponse{
+		Config: flatConfig,
+	}
+
+	// If the include_log flag is not set, we only return the config and
+	// skip the log file content which can be large.
+	if !req.IncludeLog {
+		return resp, nil
 	}
 
 	logFileName := filepath.Join(r.cfg.LogDir, defaultLogFilename)
@@ -3474,10 +3487,9 @@ func (r *rpcServer) GetDebugInfo(_ context.Context,
 			logFileName, err)
 	}
 
-	return &lnrpc.GetDebugInfoResponse{
-		Config: flatConfig,
-		Log:    strings.Split(string(logContent), "\n"),
-	}, nil
+	resp.Log = strings.Split(string(logContent), "\n")
+
+	return resp, nil
 }
 
 // GetRecoveryInfo returns a boolean indicating whether the wallet is started
@@ -4245,6 +4257,12 @@ func (r *rpcServer) fetchWaitingCloseChannels(
 		return nil, 0, err
 	}
 
+	// Get the current block height for calculating remaining confirmations.
+	_, currentHeight, err := r.server.cc.ChainIO.GetBestBlock()
+	if err != nil {
+		return nil, 0, err
+	}
+
 	result := make(waitingCloseChannels, 0)
 	limboBalance := int64(0)
 
@@ -4406,12 +4424,46 @@ func (r *rpcServer) fetchWaitingCloseChannels(
 			}
 		}
 
+		// Calculate remaining confirmations until the channel closure
+		// is considered resolved/confirmed.
+		requiredConfs := lnwallet.CloseConfsForCapacity(
+			waitingClose.Capacity,
+		)
+		if r.cfg.Dev != nil {
+			requiredConfs = r.cfg.Dev.ChannelCloseConfs().
+				UnwrapOr(requiredConfs)
+		}
+
+		blocksTilCloseConfirmed := fn.ElimOption(
+			waitingClose.CloseConfirmationHeight,
+			func() uint32 {
+				// The closing tx is not yet confirmed, show
+				// all required confirmations.
+				return requiredConfs
+			},
+			func(closeConfHeight uint32) uint32 {
+				// The closing tx has at least one
+				// confirmation. Calculate how many more are
+				// needed.
+				targetHeight := closeConfHeight +
+					requiredConfs - 1
+				if uint32(currentHeight) >= targetHeight {
+					return 0
+				}
+
+				return targetHeight - uint32(currentHeight)
+			},
+		)
+
 		waitingCloseResp := &lnrpc.PendingChannelsResponse_WaitingCloseChannel{
-			Channel:      channel,
-			LimboBalance: channel.LocalBalance,
-			Commitments:  &commitments,
-			ClosingTxid:  closingTxid,
-			ClosingTxHex: closingTxHex,
+			Channel:                 channel,
+			LimboBalance:            channel.LocalBalance,
+			Commitments:             &commitments,
+			ClosingTxid:             closingTxid,
+			ClosingTxHex:            closingTxHex,
+			BlocksTilCloseConfirmed: blocksTilCloseConfirmed,
+			CloseHeight: waitingClose.CloseConfirmationHeight.
+				UnwrapOr(0),
 		}
 
 		// A close tx has been broadcasted, all our balance will be in
@@ -5488,6 +5540,24 @@ func (r *rpcServer) SubscribeChannelEvents(req *lnrpc.ChannelEventSubscription,
 					},
 				}
 
+			case channelnotifier.ChannelUpdateEvent:
+				channel, err := createRPCOpenChannel(
+					updateStream.Context(),
+					r, event.Channel, true, false,
+				)
+				if err != nil {
+					return err
+				}
+
+				update = &lnrpc.ChannelEventUpdate{
+					Type: lnrpc.ChannelEventUpdate_CHANNEL_UPDATE,
+					Channel: &lnrpc.ChannelEventUpdate_UpdatedChannel{
+						UpdatedChannel: &lnrpc.ChannelCommitUpdate{
+							Channel: channel,
+						},
+					},
+				}
+
 			case channelnotifier.InactiveChannelEvent:
 				update = &lnrpc.ChannelEventUpdate{
 					Type: lnrpc.ChannelEventUpdate_INACTIVE_CHANNEL,
@@ -5563,8 +5633,9 @@ func (r *rpcServer) SubscribeChannelEvents(req *lnrpc.ChannelEventSubscription,
 // execute sendPayment. We use this struct as a sort of bridge to enable code
 // re-use between SendPayment and SendToRoute.
 type paymentStream struct {
-	recv func() (*rpcPaymentRequest, error)
-	send func(*lnrpc.SendResponse) error
+	getCtx func() context.Context
+	recv   func() (*rpcPaymentRequest, error)
+	send   func(*lnrpc.SendResponse) error
 }
 
 // rpcPaymentRequest wraps lnrpc.SendRequest so that routes from
@@ -5578,10 +5649,13 @@ type rpcPaymentRequest struct {
 // through the Lightning Network. A single RPC invocation creates a persistent
 // bi-directional stream allowing clients to rapidly send payments through the
 // Lightning Network with a single persistent connection.
-func (r *rpcServer) SendPayment(stream lnrpc.Lightning_SendPaymentServer) error {
+func (r *rpcServer) SendPayment(
+	stream lnrpc.Lightning_SendPaymentServer) error {
+
 	var lock sync.Mutex
 
 	return r.sendPayment(&paymentStream{
+		getCtx: stream.Context,
 		recv: func() (*rpcPaymentRequest, error) {
 			req, err := stream.Recv()
 			if err != nil {
@@ -5606,10 +5680,13 @@ func (r *rpcServer) SendPayment(stream lnrpc.Lightning_SendPaymentServer) error 
 // invocation creates a persistent bi-directional stream allowing clients to
 // rapidly send payments through the Lightning Network with a single persistent
 // connection.
-func (r *rpcServer) SendToRoute(stream lnrpc.Lightning_SendToRouteServer) error {
+func (r *rpcServer) SendToRoute(
+	stream lnrpc.Lightning_SendToRouteServer) error {
+
 	var lock sync.Mutex
 
 	return r.sendPayment(&paymentStream{
+		getCtx: stream.Context,
 		recv: func() (*rpcPaymentRequest, error) {
 			req, err := stream.Recv()
 			if err != nil {
@@ -5679,7 +5756,11 @@ type rpcPaymentIntent struct {
 // dispatch a client from the information presented by an RPC client. There are
 // three ways a client can specify their payment details: a payment request,
 // via manual details, or via a complete route.
-func (r *rpcServer) extractPaymentIntent(rpcPayReq *rpcPaymentRequest) (rpcPaymentIntent, error) {
+//
+//nolint:funlen
+func (r *rpcServer) extractPaymentIntent(
+	rpcPayReq *rpcPaymentRequest) (rpcPaymentIntent, error) {
+
 	payIntent := rpcPaymentIntent{}
 
 	// If a route was specified, then we can use that directly.
@@ -5951,7 +6032,7 @@ type paymentIntentResponse struct {
 // pre-built route. The first error this method returns denotes if we were
 // unable to save the payment. The second error returned denotes if the payment
 // didn't succeed.
-func (r *rpcServer) dispatchPaymentIntent(
+func (r *rpcServer) dispatchPaymentIntent(ctx context.Context,
 	payIntent *rpcPaymentIntent) (*paymentIntentResponse, error) {
 
 	// Construct a payment request to send to the channel router. If the
@@ -5993,12 +6074,12 @@ func (r *rpcServer) dispatchPaymentIntent(
 		}
 
 		preImage, route, routerErr = r.server.chanRouter.SendPayment(
-			payment,
+			ctx, payment,
 		)
 	} else {
 		var attempt *paymentsdb.HTLCAttempt
 		attempt, routerErr = r.server.chanRouter.SendToRoute(
-			payIntent.rHash, payIntent.route, nil,
+			ctx, payIntent.rHash, payIntent.route, nil,
 		)
 
 		if routerErr == nil {
@@ -6171,7 +6252,7 @@ sendLoop:
 				}()
 
 				resp, saveErr := r.dispatchPaymentIntent(
-					payIntent,
+					stream.getCtx(), payIntent,
 				)
 
 				switch {
@@ -6249,7 +6330,7 @@ sendLoop:
 func (r *rpcServer) SendPaymentSync(ctx context.Context,
 	nextPayment *lnrpc.SendRequest) (*lnrpc.SendResponse, error) {
 
-	return r.sendPaymentSync(&rpcPaymentRequest{
+	return r.sendPaymentSync(ctx, &rpcPaymentRequest{
 		SendRequest: nextPayment,
 	})
 }
@@ -6270,12 +6351,12 @@ func (r *rpcServer) SendToRouteSync(ctx context.Context,
 		return nil, err
 	}
 
-	return r.sendPaymentSync(paymentRequest)
+	return r.sendPaymentSync(ctx, paymentRequest)
 }
 
 // sendPaymentSync is the synchronous variant of sendPayment. It will block and
 // wait until the payment has been fully completed.
-func (r *rpcServer) sendPaymentSync(
+func (r *rpcServer) sendPaymentSync(ctx context.Context,
 	nextPayment *rpcPaymentRequest) (*lnrpc.SendResponse, error) {
 
 	// We don't allow payments to be sent while the daemon itself is still
@@ -6294,7 +6375,7 @@ func (r *rpcServer) sendPaymentSync(
 
 	// With the payment validated, we'll now attempt to dispatch the
 	// payment.
-	resp, saveErr := r.dispatchPaymentIntent(&payIntent)
+	resp, saveErr := r.dispatchPaymentIntent(ctx, &payIntent)
 	switch {
 	case saveErr != nil:
 		return nil, saveErr
@@ -6421,7 +6502,7 @@ func (r *rpcServer) AddInvoice(ctx context.Context,
 		NodeSigner:        r.server.nodeSigner,
 		DefaultCLTVExpiry: defaultDelta,
 		ChanDB:            r.server.chanStateDB,
-		Graph:             r.server.graphDB,
+		Graph:             r.server.v1Graph,
 		GenInvoiceFeatures: func() *lnwire.FeatureVector {
 			v := r.server.featureMgr.Get(feature.SetInvoice)
 
@@ -7048,10 +7129,11 @@ func (r *rpcServer) GetNodeMetrics(ctx context.Context,
 		BetweennessCentrality: make(map[string]*lnrpc.FloatMetric),
 	}
 
-	// Obtain the pointer to the global singleton channel graph, this will
-	// provide a consistent view of the graph due to bolt db's
-	// transactional model.
-	graph := r.server.graphDB
+	// Obtain the pointer to the V1 channel graph, this will provide a
+	// consistent view of the graph due to bolt db's transactional model.
+	//
+	// TODO(elle): switch to a cross-version graph view when available.
+	graph := r.server.v1Graph
 
 	// Calculate betweenness centrality if requested. Note that depending on the
 	// graph size, this may take up to a few minutes.
@@ -7088,7 +7170,7 @@ func (r *rpcServer) GetNodeMetrics(ctx context.Context,
 // uniquely identify the location of transaction's funding output within the
 // blockchain. The former is an 8-byte integer, while the latter is a string
 // formatted as funding_txid:output_index.
-func (r *rpcServer) GetChanInfo(_ context.Context,
+func (r *rpcServer) GetChanInfo(ctx context.Context,
 	in *lnrpc.ChanInfoRequest) (*lnrpc.ChannelEdge, error) {
 
 	graph := r.server.graphDB
@@ -7102,7 +7184,7 @@ func (r *rpcServer) GetChanInfo(_ context.Context,
 	switch {
 	case in.ChanId != 0:
 		edgeInfo, edge1, edge2, err = graph.FetchChannelEdgesByID(
-			in.ChanId,
+			ctx, in.ChanId,
 		)
 
 	case in.ChanPoint != "":
@@ -7112,7 +7194,7 @@ func (r *rpcServer) GetChanInfo(_ context.Context,
 			return nil, err
 		}
 		edgeInfo, edge1, edge2, err = graph.FetchChannelEdgesByOutpoint(
-			chanPoint,
+			ctx, chanPoint,
 		)
 
 	default:
@@ -7265,7 +7347,8 @@ func (r *rpcServer) QueryRoutes(ctx context.Context,
 func (r *rpcServer) GetNetworkInfo(ctx context.Context,
 	_ *lnrpc.NetworkInfoRequest) (*lnrpc.NetworkInfo, error) {
 
-	graph := r.server.graphDB
+	// TODO(elle): switch to a cross-version graph view when available.
+	graph := r.server.v1Graph
 
 	var (
 		numNodes             uint32
@@ -7358,7 +7441,7 @@ func (r *rpcServer) GetNetworkInfo(ctx context.Context,
 	}
 
 	// Query the graph for the current number of zombie channels.
-	numZombies, err := graph.NumZombies()
+	numZombies, err := graph.NumZombies(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -7627,6 +7710,7 @@ func (r *rpcServer) ListPayments(ctx context.Context,
 		CountTotal:        req.CountTotalPayments,
 		CreationDateStart: int64(req.CreationDateStart),
 		CreationDateEnd:   int64(req.CreationDateEnd),
+		OmitHops:          req.OmitHops,
 	}
 
 	// If the maximum number of payments wasn't specified, we default to
@@ -7723,7 +7807,7 @@ func (r *rpcServer) DeletePayment(ctx context.Context,
 	rpcsLog.Infof("[DeletePayment] payment_identifier=%v, "+
 		"failed_htlcs_only=%v", hash, req.FailedHtlcsOnly)
 
-	err = r.server.paymentsDB.DeletePayment(hash, req.FailedHtlcsOnly)
+	err = r.server.paymentsDB.DeletePayment(ctx, hash, req.FailedHtlcsOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -7764,7 +7848,7 @@ func (r *rpcServer) DeleteAllPayments(ctx context.Context,
 		req.FailedHtlcsOnly)
 
 	numDeletedPayments, err := r.server.paymentsDB.DeletePayments(
-		req.FailedPaymentsOnly, req.FailedHtlcsOnly,
+		ctx, req.FailedPaymentsOnly, req.FailedHtlcsOnly,
 	)
 	if err != nil {
 		return nil, err
@@ -9416,10 +9500,30 @@ func (r *rpcServer) SubscribeOnionMessages(
 					"failed type assertion: %T", update)
 			}
 
-			err := server.Send(&lnrpc.OnionMessage{
-				Peer:    oMsg.Peer[:],
-				PathKey: oMsg.PathKey[:],
-				Onion:   oMsg.OnionBlob,
+			bp := &lnrpc.BlindedPath{}
+
+			//nolint:ll
+			if oMsg.ReplyPath != nil {
+				bp.IntroductionNode = oMsg.ReplyPath.IntroductionPoint.SerializeCompressed()
+				bp.BlindingPoint = oMsg.ReplyPath.BlindingPoint.SerializeCompressed()
+
+				for _, hop := range oMsg.ReplyPath.BlindedHops {
+					rpcHop := &lnrpc.BlindedHop{
+						BlindedNode:   hop.BlindedNodePub.SerializeCompressed(),
+						EncryptedData: hop.CipherText,
+					}
+					bp.BlindedHops = append(bp.BlindedHops, rpcHop)
+				}
+			}
+
+			//nolint:ll
+			err := server.Send(&lnrpc.OnionMessageUpdate{
+				Peer:                   oMsg.Peer[:],
+				PathKey:                oMsg.PathKey[:],
+				Onion:                  oMsg.OnionBlob,
+				ReplyPath:              bp,
+				EncryptedRecipientData: oMsg.EncryptedRecipientData,
+				CustomRecords:          oMsg.CustomRecords,
 			})
 			if err != nil {
 				return err

@@ -185,6 +185,34 @@ type MissionControlQuerier interface {
 		amt lnwire.MilliSatoshi, capacity btcutil.Amount) float64
 }
 
+// ReconcileFunc defines the callback invoked for each in-flight HTLC attempt
+// during startup before result collection begins.
+//
+// When the ChannelRouter runs in a separate process from the Switch, a crash
+// can occur after the router persists an attempt but before the dispatch call
+// is confirmed by the switch. On restart, the router cannot tell whether the
+// HTLC is actually in-flight. This callback resolves that ambiguity by letting
+// the caller re-dispatch the attempt idempotently: the switch either accepts
+// the HTLC (newly dispatched) or returns a duplicate error (already in-flight).
+// Either outcome confirms the attempt is live and result collection can
+// proceed safely.
+//
+// Implementations should handle transient failures internally (e.g. retry with
+// backoff) and only return an error when reconciliation cannot be completed. A
+// returned error causes the lifecycle to skip result collection for that
+// attempt; it will be retried on the next restart.
+type ReconcileFunc func(a paymentsdb.HTLCAttempt) error
+
+// noOpReconcile is the default ReconcileFunc used in standard lnd where the
+// ChannelRouter and Switch run in the same process. Because they share a crash
+// domain — if lnd crashes, both restart together — the dispatch hand-off
+// (RegisterAttempt to CommitCircuits) is synchronous and in-process. On
+// restart, result collection from the Switch unambiguously reveals whether
+// each attempt was dispatched, so no reconciliation is needed.
+func noOpReconcile(_ paymentsdb.HTLCAttempt) error {
+	return nil
+}
+
 // FeeSchema is the set fee configuration for a Lightning Node on the network.
 // Using the coefficients described within the schema, the required fee to
 // forward outgoing payments can be derived.
@@ -295,6 +323,26 @@ type Config struct {
 	// TrafficShaper is an optional traffic shaper that can be used to
 	// control the outgoing channel of a payment.
 	TrafficShaper fn.Option[htlcswitch.AuxTrafficShaper]
+
+	// KeepFailedPaymentAttempts indicates whether to keep failed payment
+	// attempts in the database.
+	KeepFailedPaymentAttempts bool
+
+	// ReconcileAttempt is the strategy executed for each in-flight
+	// HTLC attempt during startup before result collection begins.
+	// Callers running the ChannelRouter in a separate process from
+	// the Switch should provide an implementation that idempotently
+	// confirms dispatch status for each attempt (e.g. via SendOnion).
+	// See ReconcileFunc for the full contract.
+	//
+	// Defaults to noOpReconcile when not set, preserving standard
+	// lnd behavior where the router and switch share a crash domain.
+	ReconcileAttempt ReconcileFunc
+
+	// ExternalPaymentLifecycle indicates that the payment lifecycle is
+	// managed by an external entity, and the dispatcher's payment store
+	// should not be cleaned on startup.
+	ExternalPaymentLifecycle bool
 }
 
 // EdgeLocator is a struct used to identify a specific edge.
@@ -338,6 +386,13 @@ type ChannelRouter struct {
 // channel graph is a subset of the UTXO set) set, then the router will proceed
 // to fully sync to the latest state of the UTXO set.
 func New(cfg Config) (*ChannelRouter, error) {
+	// Default to a no-op reconciliation callback, preserving
+	// standard lnd behavior where the router and switch share a
+	// crash domain.
+	if cfg.ReconcileAttempt == nil {
+		cfg.ReconcileAttempt = noOpReconcile
+	}
+
 	return &ChannelRouter{
 		cfg:  &cfg,
 		quit: make(chan struct{}),
@@ -725,9 +780,9 @@ func (r *ChannelRouter) FindBlindedPaths(destination route.Vertex,
 	return bestRoutes, nil
 }
 
-// generateNewSessionKey generates a new ephemeral private key to be used for a
+// GenerateNewSessionKey generates a new ephemeral private key to be used for a
 // payment attempt.
-func generateNewSessionKey() (*btcec.PrivateKey, error) {
+func GenerateNewSessionKey() (*btcec.PrivateKey, error) {
 	// Generate a new random session key to ensure that we don't trigger
 	// any replay.
 	//
@@ -896,8 +951,8 @@ func (l *LightningPayment) Identifier() [32]byte {
 // will be returned which describes the path the successful payment traversed
 // within the network to reach the destination. Additionally, the payment
 // preimage will also be returned.
-func (r *ChannelRouter) SendPayment(payment *LightningPayment) ([32]byte,
-	*route.Route, error) {
+func (r *ChannelRouter) SendPayment(ctx context.Context,
+	payment *LightningPayment) ([32]byte, *route.Route, error) {
 
 	paySession, shardTracker, err := r.PreparePayment(payment)
 	if err != nil {
@@ -908,7 +963,7 @@ func (r *ChannelRouter) SendPayment(payment *LightningPayment) ([32]byte,
 		spewPayment(payment))
 
 	return r.sendPayment(
-		context.Background(), payment.FeeLimit, payment.Identifier(),
+		ctx, payment.FeeLimit, payment.Identifier(),
 		payment.PayAttemptTimeout, paySession, shardTracker,
 		payment.FirstHopCustomRecords,
 	)
@@ -966,6 +1021,8 @@ func spewPayment(payment *LightningPayment) lnutils.LogClosure {
 // control tower.
 func (r *ChannelRouter) PreparePayment(payment *LightningPayment) (
 	PaymentSession, shards.ShardTracker, error) {
+
+	ctx := context.TODO()
 
 	// Assemble any custom data we want to send to the first hop only.
 	var firstHopData fn.Option[tlv.Blob]
@@ -1026,7 +1083,7 @@ func (r *ChannelRouter) PreparePayment(payment *LightningPayment) (
 		)
 	}
 
-	err = r.cfg.Control.InitPayment(payment.Identifier(), info)
+	err = r.cfg.Control.InitPayment(ctx, payment.Identifier(), info)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1036,7 +1093,8 @@ func (r *ChannelRouter) PreparePayment(payment *LightningPayment) (
 
 // SendToRoute sends a payment using the provided route and fails the payment
 // when an error is returned from the attempt.
-func (r *ChannelRouter) SendToRoute(htlcHash lntypes.Hash, rt *route.Route,
+func (r *ChannelRouter) SendToRoute(_ context.Context, htlcHash lntypes.Hash,
+	rt *route.Route,
 	firstHopCustomRecords lnwire.CustomRecords) (*paymentsdb.HTLCAttempt,
 	error) {
 
@@ -1045,8 +1103,8 @@ func (r *ChannelRouter) SendToRoute(htlcHash lntypes.Hash, rt *route.Route,
 
 // SendToRouteSkipTempErr sends a payment using the provided route and fails
 // the payment ONLY when a terminal error is returned from the attempt.
-func (r *ChannelRouter) SendToRouteSkipTempErr(htlcHash lntypes.Hash,
-	rt *route.Route,
+func (r *ChannelRouter) SendToRouteSkipTempErr(_ context.Context,
+	htlcHash lntypes.Hash, rt *route.Route,
 	firstHopCustomRecords lnwire.CustomRecords) (*paymentsdb.HTLCAttempt,
 	error) {
 
@@ -1064,13 +1122,20 @@ func (r *ChannelRouter) sendToRoute(htlcHash lntypes.Hash, rt *route.Route,
 	firstHopCustomRecords lnwire.CustomRecords) (*paymentsdb.HTLCAttempt,
 	error) {
 
+	// TODO(ziggie): We cannot easily thread the context from the caller
+	// of this method because the payment lifecycle depends on the context
+	// to update the db. The Sending and Receiving of results is currently
+	// not cleanly separated which is the reason that we cannot easily
+	// cancel the context and therefore cancel the ongoing payment.
+	ctx := context.TODO()
+
 	// Helper function to fail a payment. It makes sure the payment is only
 	// failed once so that the failure reason is not overwritten.
 	failPayment := func(paymentIdentifier lntypes.Hash,
 		reason paymentsdb.FailureReason) error {
 
 		payment, fetchErr := r.cfg.Control.FetchPayment(
-			paymentIdentifier,
+			ctx, paymentIdentifier,
 		)
 		if fetchErr != nil {
 			return fetchErr
@@ -1084,7 +1149,9 @@ func (r *ChannelRouter) sendToRoute(htlcHash lntypes.Hash, rt *route.Route,
 			return nil
 		}
 
-		return r.cfg.Control.FailPayment(paymentIdentifier, reason)
+		return r.cfg.Control.FailPayment(
+			ctx, paymentIdentifier, reason,
+		)
 	}
 
 	log.Debugf("SendToRoute for payment %v with skipTempErr=%v",
@@ -1129,7 +1196,7 @@ func (r *ChannelRouter) sendToRoute(htlcHash lntypes.Hash, rt *route.Route,
 		FirstHopCustomRecords: firstHopCustomRecords,
 	}
 
-	err := r.cfg.Control.InitPayment(paymentIdentifier, info)
+	err := r.cfg.Control.InitPayment(ctx, paymentIdentifier, info)
 	switch {
 	// If this is an MPP attempt and the hash is already registered with
 	// the database, we can go on to launch the shard.
@@ -1173,7 +1240,7 @@ func (r *ChannelRouter) sendToRoute(htlcHash lntypes.Hash, rt *route.Route,
 	// NOTE: we use zero `remainingAmt` here to simulate the same effect of
 	// setting the lastShard to be false, which is used by previous
 	// implementation.
-	attempt, err := p.registerAttempt(rt, 0)
+	attempt, err := p.registerAttempt(ctx, rt, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -1182,7 +1249,7 @@ func (r *ChannelRouter) sendToRoute(htlcHash lntypes.Hash, rt *route.Route,
 	// the `err` returned here has already been processed by
 	// `handleSwitchErr`, which means if there's a terminal failure, the
 	// payment has been failed.
-	result, err := p.sendAttempt(attempt)
+	result, err := p.sendAttempt(ctx, attempt)
 	if err != nil {
 		return nil, err
 	}
@@ -1210,7 +1277,7 @@ func (r *ChannelRouter) sendToRoute(htlcHash lntypes.Hash, rt *route.Route,
 
 	// The attempt was successfully sent, wait for the result to be
 	// available.
-	result, err = p.collectAndHandleResult(attempt)
+	result, err = p.collectAndHandleResult(ctx, attempt)
 	if err != nil {
 		return nil, err
 	}
@@ -1322,15 +1389,18 @@ func (e ErrNoChannel) Error() string {
 		"node index %v", e.position)
 }
 
-// BuildRoute returns a fully specified route based on a list of pubkeys. If
-// amount is nil, the minimum routable amount is used. To force a specific
-// outgoing channel, use the outgoingChan parameter.
-func (r *ChannelRouter) BuildRoute(amt fn.Option[lnwire.MilliSatoshi],
-	hops []route.Vertex, outgoingChan *uint64, finalCltvDelta int32,
+// BuildRoute builds a fully specified route based on a list of pubkeys from
+// the perspective of the provided source node. If amount is nil, the minimum
+// routable amount is used. To force a specific outgoing channel, use the
+// outgoingChan parameter.
+func (r *ChannelRouter) BuildRoute(sourceNode route.Vertex,
+	amt fn.Option[lnwire.MilliSatoshi], hops []route.Vertex,
+	outgoingChan *uint64, finalCltvDelta int32,
 	payAddr fn.Option[[32]byte], firstHopBlob fn.Option[[]byte]) (
 	*route.Route, error) {
 
-	log.Tracef("BuildRoute called: hopsCount=%v, amt=%v", len(hops), amt)
+	log.Tracef("BuildRoute called: sourceNode=%v, hopsCount=%v, amt=%v",
+		sourceNode, len(hops), amt)
 
 	var outgoingChans map[uint64]struct{}
 	if outgoingChan != nil {
@@ -1349,12 +1419,10 @@ func (r *ChannelRouter) BuildRoute(amt fn.Option[lnwire.MilliSatoshi],
 		return nil, err
 	}
 
-	sourceNode := r.cfg.SelfNode
-
 	// We check that each node in the route has a connection to others that
 	// can forward in principle.
 	unifiers, err := getEdgeUnifiers(
-		r.cfg.SelfNode, hops, outgoingChans, r.cfg.RoutingGraph,
+		sourceNode, hops, outgoingChans, r.cfg.RoutingGraph,
 	)
 	if err != nil {
 		return nil, err
@@ -1415,15 +1483,22 @@ func (r *ChannelRouter) BuildRoute(amt fn.Option[lnwire.MilliSatoshi],
 // resumePayments fetches inflight payments and resumes their payment
 // lifecycles.
 func (r *ChannelRouter) resumePayments() error {
+	ctx := context.TODO()
+
 	// Get all payments that are inflight.
 	log.Debugf("Scanning for inflight payments")
-	payments, err := r.cfg.Control.FetchInFlightPayments()
+	payments, err := r.cfg.Control.FetchInFlightPayments(ctx)
 	if err != nil {
 		return err
 	}
 
 	log.Debugf("Scanning finished, found %d inflight payments",
 		len(payments))
+
+	// TODO(ziggie): Also check for payments which have no HTLCs at all
+	// this can happen because we register an attempt after initializing the
+	// payment, so there is a small chance that we init a payment but never
+	// register an attempt for it.
 
 	// Before we restart existing payments and start accepting more
 	// payments to be made, we clean the network result store of the
@@ -1441,9 +1516,19 @@ func (r *ChannelRouter) resumePayments() error {
 		}
 	}
 
-	log.Debugf("Cleaning network result store.")
-	if err := r.cfg.Payer.CleanStore(toKeep); err != nil {
-		return err
+	// When the payment life-cycle is managed by an external entity, we
+	// must not clean the attempt store on startup. The external controller
+	// relies on HTLC attempt information persisted by the dispatcher to
+	// resume its payment lifecycle and will need to coordinate all cleanup
+	// operations itself.
+	if !r.cfg.ExternalPaymentLifecycle {
+		log.Debugf("Cleaning network result store.")
+		if err := r.cfg.Payer.CleanStore(toKeep); err != nil {
+			return err
+		}
+	} else {
+		log.Infof("Dispatcher attempt store cleanup disabled. " +
+			"Attempt information must be cleaned remotely.")
 	}
 
 	// launchPayment is a helper closure that handles resuming the payment.
@@ -1524,6 +1609,8 @@ func (r *ChannelRouter) resumePayments() error {
 // - https://github.com/lightningnetwork/lnd/pull/8174
 func (r *ChannelRouter) failStaleAttempt(a paymentsdb.HTLCAttempt,
 	payHash lntypes.Hash) {
+
+	ctx := context.TODO()
 
 	// We can only fail inflight HTLCs so we skip the settled/failed ones.
 	if a.Failure != nil || a.Settle != nil {
@@ -1608,7 +1695,7 @@ func (r *ChannelRouter) failStaleAttempt(a paymentsdb.HTLCAttempt,
 		Reason:   paymentsdb.HTLCFailUnknown,
 		FailTime: r.cfg.Clock.Now(),
 	}
-	_, err = r.cfg.Control.FailAttempt(payHash, a.AttemptID, failInfo)
+	_, err = r.cfg.Control.FailAttempt(ctx, payHash, a.AttemptID, failInfo)
 	if err != nil {
 		log.Errorf("Fail attempt=%v got error: %v", a.AttemptID, err)
 	}

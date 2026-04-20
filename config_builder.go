@@ -51,6 +51,8 @@ import (
 	"github.com/lightningnetwork/lnd/macaroons"
 	"github.com/lightningnetwork/lnd/msgmux"
 	paymentsdb "github.com/lightningnetwork/lnd/payments/db"
+	paymentsmig1 "github.com/lightningnetwork/lnd/payments/db/migration1"
+	paymentsmig1sqlc "github.com/lightningnetwork/lnd/payments/db/migration1/sqlc"
 	"github.com/lightningnetwork/lnd/rpcperms"
 	"github.com/lightningnetwork/lnd/signal"
 	"github.com/lightningnetwork/lnd/sqldb"
@@ -76,6 +78,10 @@ const (
 	// graphMigration is the version number for the graph migration
 	// that migrates the KV graph to the native SQL schema.
 	graphMigration = 10
+
+	// paymentMigration is the version number for the payments migration
+	// that migrates KV payments to the native SQL schema.
+	paymentMigration = 14
 )
 
 // GrpcRegistrar is an interface that must be satisfied by an external subserver
@@ -1128,6 +1134,16 @@ func (d *DefaultDatabaseBuilder) BuildDatabase(
 
 				// Set the invoice bucket tombstone to indicate
 				// that the migration has been completed.
+				//
+				// TODO(ziggie): The tombstone is currently
+				// set inside the SQL transaction callback,
+				// which is fragile: if the SQL transaction
+				// is retried (e.g. on a serialization
+				// error), the KV tombstone is written before
+				// the SQL commit is confirmed. Move this to
+				// run after ApplyAllMigrations returns so
+				// the tombstone is only set once the
+				// migration is durably committed.
 				d.logger.Debugf("Setting invoice bucket " +
 					"tombstone")
 
@@ -1153,6 +1169,23 @@ func (d *DefaultDatabaseBuilder) BuildDatabase(
 				return nil
 			}
 
+			paymentMig := func(tx *sqlc.Queries) error {
+				err := paymentsmig1.MigratePaymentsKVToSQL(
+					ctx,
+					dbs.ChanStateDB.Backend,
+					paymentsmig1sqlc.New(tx.GetTx()),
+					&paymentsmig1.SQLStoreConfig{
+						QueryCfg: queryCfg,
+					},
+				)
+				if err != nil {
+					return fmt.Errorf("failed to migrate "+
+						"payments to SQL: %w", err)
+				}
+
+				return nil
+			}
+
 			// Make sure we attach the custom migration function to
 			// the correct migration version.
 			for i := 0; i < len(migrations); i++ {
@@ -1162,8 +1195,14 @@ func (d *DefaultDatabaseBuilder) BuildDatabase(
 					migrations[i].MigrationFn = invoiceMig
 
 					continue
+
 				case graphMigration:
 					migrations[i].MigrationFn = graphMig
+
+					continue
+
+				case paymentMigration:
+					migrations[i].MigrationFn = paymentMig
 
 					continue
 
@@ -1223,17 +1262,44 @@ func (d *DefaultDatabaseBuilder) BuildDatabase(
 			graphExecutor, graphDBOptions...,
 		)
 		if err != nil {
+			cleanUp()
 			err = fmt.Errorf("unable to get graph store: %w", err)
 			d.logger.Error(err)
 
 			return nil, nil, err
 		}
+
+		paymentsExecutor := sqldb.NewTransactionExecutor(
+			baseDB, func(tx *sql.Tx) paymentsdb.SQLQueries {
+				return baseDB.WithTx(tx)
+			},
+		)
+
+		sqlPaymentsDB, err := paymentsdb.NewSQLStore(
+			&paymentsdb.SQLStoreConfig{
+				QueryCfg: queryCfg,
+			},
+			paymentsExecutor,
+		)
+		if err != nil {
+			cleanUp()
+			err = fmt.Errorf("unable to get payments store: %w",
+				err)
+
+			return nil, nil, err
+		}
+
+		dbs.PaymentsDB = sqlPaymentsDB
 	} else {
 		// Check if the invoice bucket tombstone is set. If it is, we
 		// need to return and ask the user switch back to using the
 		// native SQL store.
+		//
+		// NOTE: The invoice bucket tombstone acts as the system-wide
+		// guard against switching back to KV mode.
 		ripInvoices, err := dbs.ChanStateDB.GetInvoiceBucketTombstone()
 		if err != nil {
+			cleanUp()
 			err = fmt.Errorf("unable to check invoice bucket "+
 				"tombstone: %w", err)
 			d.logger.Error(err)
@@ -1241,6 +1307,7 @@ func (d *DefaultDatabaseBuilder) BuildDatabase(
 			return nil, nil, err
 		}
 		if ripInvoices {
+			cleanUp()
 			err = fmt.Errorf("invoices bucket tombstoned, please " +
 				"switch back to native SQL")
 			d.logger.Error(err)
@@ -1254,8 +1321,25 @@ func (d *DefaultDatabaseBuilder) BuildDatabase(
 			databaseBackends.GraphDB, graphDBOptions...,
 		)
 		if err != nil {
+			cleanUp()
+
 			return nil, nil, err
 		}
+
+		// Create the payments DB.
+		kvPaymentsDB, err := paymentsdb.NewKVStore(
+			dbs.ChanStateDB,
+		)
+		if err != nil {
+			cleanUp()
+
+			err = fmt.Errorf("unable to open payments DB: %w", err)
+			d.logger.Error(err)
+
+			return nil, nil, err
+		}
+
+		dbs.PaymentsDB = kvPaymentsDB
 	}
 
 	dbs.GraphDB, err = graphdb.NewChannelGraph(graphStore, chanGraphOpts...)
@@ -1267,29 +1351,6 @@ func (d *DefaultDatabaseBuilder) BuildDatabase(
 
 		return nil, nil, err
 	}
-
-	// Mount the payments DB which is only KV for now.
-	//
-	// TODO(ziggie): Add support for SQL payments DB.
-	// Mount the payments DB for the KV store.
-	paymentsDBOptions := []paymentsdb.OptionModifier{
-		paymentsdb.WithKeepFailedPaymentAttempts(
-			cfg.KeepFailedPaymentAttempts,
-		),
-	}
-	kvPaymentsDB, err := paymentsdb.NewKVStore(
-		dbs.ChanStateDB,
-		paymentsDBOptions...,
-	)
-	if err != nil {
-		cleanUp()
-
-		err = fmt.Errorf("unable to open payments DB: %w", err)
-		d.logger.Error(err)
-
-		return nil, nil, err
-	}
-	dbs.PaymentsDB = kvPaymentsDB
 
 	// Wrap the watchtower client DB and make sure we clean up.
 	if cfg.WtClient.Active {
@@ -1739,7 +1800,7 @@ func initNeutrinoBackend(ctx context.Context, cfg *Config, chainDir string,
 			"client: %v", err)
 	}
 
-	if err := neutrinoCS.Start(); err != nil {
+	if err := neutrinoCS.Start(ctx); err != nil {
 		db.Close()
 		return nil, nil, err
 	}

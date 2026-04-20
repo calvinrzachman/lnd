@@ -348,8 +348,10 @@ func TestPopulateDBs(t *testing.T) {
 	// graph.
 	countNodes := func(graph *ChannelGraph) int {
 		numNodes := 0
-		err := graph.ForEachNode(
-			ctx, func(node *models.Node) error {
+		v1Graph := NewVersionedGraph(graph, lnwire.GossipVersion1)
+		err := v1Graph.ForEachNode(
+			ctx,
+			func(node *models.Node) error {
 				numNodes++
 
 				return nil
@@ -455,7 +457,8 @@ func syncGraph(t *testing.T, src, dest *ChannelGraph) {
 	}
 
 	var wgNodes sync.WaitGroup
-	err := src.ForEachNode(ctx, func(node *models.Node) error {
+	v1Src := NewVersionedGraph(src, lnwire.GossipVersion1)
+	err := v1Src.ForEachNode(ctx, func(node *models.Node) error {
 		wgNodes.Add(1)
 		go func() {
 			defer wgNodes.Done()
@@ -621,7 +624,7 @@ func BenchmarkGraphReadMethods(b *testing.B) {
 			name: "ForEachNode",
 			fn: func(b testing.TB, store Store) {
 				err := store.ForEachNode(
-					ctx,
+					ctx, lnwire.GossipVersion1,
 					func(_ *models.Node) error {
 						// Increment the counter to
 						// ensure the callback is doing
@@ -659,7 +662,7 @@ func BenchmarkGraphReadMethods(b *testing.B) {
 			name: "NodeUpdatesInHorizon",
 			fn: func(b testing.TB, store Store) {
 				iter := store.NodeUpdatesInHorizon(
-					time.Unix(0, 0), time.Now(),
+					ctx, time.Unix(0, 0), time.Now(),
 				)
 				_, err := fn.CollectErr(iter)
 				require.NoError(b, err)
@@ -669,7 +672,8 @@ func BenchmarkGraphReadMethods(b *testing.B) {
 			name: "ForEachNodeCacheable",
 			fn: func(b testing.TB, store Store) {
 				err := store.ForEachNodeCacheable(
-					ctx, func(_ route.Vertex,
+					ctx, lnwire.GossipVersion1,
+					func(_ route.Vertex,
 						_ *lnwire.FeatureVector) error {
 
 						// Increment the counter to
@@ -688,7 +692,8 @@ func BenchmarkGraphReadMethods(b *testing.B) {
 			fn: func(b testing.TB, store Store) {
 				//nolint:ll
 				err := store.ForEachNodeCached(
-					ctx, false, func(context.Context,
+					ctx, lnwire.GossipVersion1, false,
+					func(context.Context,
 						route.Vertex,
 						[]net.Addr,
 						map[uint64]*DirectedChannel) error {
@@ -708,7 +713,7 @@ func BenchmarkGraphReadMethods(b *testing.B) {
 			name: "ChanUpdatesInHorizon",
 			fn: func(b testing.TB, store Store) {
 				iter := store.ChanUpdatesInHorizon(
-					time.Unix(0, 0), time.Now(),
+					ctx, time.Unix(0, 0), time.Now(),
 				)
 				_, err := fn.CollectErr(iter)
 				require.NoError(b, err)
@@ -812,7 +817,7 @@ func BenchmarkFindOptimalSQLQueryConfig(b *testing.B) {
 					)
 
 					err := store.ForEachNode(
-						ctx,
+						ctx, lnwire.GossipVersion1,
 						func(_ *models.Node) error {
 							numNodes++
 

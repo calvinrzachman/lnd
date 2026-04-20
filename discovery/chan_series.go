@@ -40,7 +40,7 @@ type ChannelGraphTimeSeries interface {
 	// passed superSet.
 	FilterKnownChanIDs(chain chainhash.Hash,
 		superSet []graphdb.ChannelUpdateInfo,
-		isZombieChan func(time.Time, time.Time) bool) (
+		isZombieChan func(graphdb.ChannelUpdateInfo) bool) (
 		[]lnwire.ShortChannelID, error)
 
 	// FilterChannelRange returns the set of channels that we created
@@ -73,12 +73,12 @@ type ChannelGraphTimeSeries interface {
 // in-protocol channel range queries to quickly and efficiently synchronize our
 // channel state with all peers.
 type ChanSeries struct {
-	graph *graphdb.ChannelGraph
+	graph *graphdb.VersionedGraph
 }
 
 // NewChanSeries constructs a new ChanSeries backed by a channeldb.ChannelGraph.
 // The returned ChanSeries implements the ChannelGraphTimeSeries interface.
-func NewChanSeries(graph *graphdb.ChannelGraph) *ChanSeries {
+func NewChanSeries(graph *graphdb.VersionedGraph) *ChanSeries {
 	return &ChanSeries{
 		graph: graph,
 	}
@@ -115,7 +115,7 @@ func (c *ChanSeries) UpdatesInHorizon(chain chainhash.Hash,
 		// First, we'll query for all the set of channels that have an
 		// update that falls within the specified horizon.
 		chansInHorizon := c.graph.ChanUpdatesInHorizon(
-			startTime, endTime,
+			context.TODO(), startTime, endTime,
 		)
 
 		for channel, err := range chansInHorizon {
@@ -181,7 +181,8 @@ func (c *ChanSeries) UpdatesInHorizon(chain chainhash.Hash,
 		// update within the horizon as well. We send these second to
 		// ensure that they follow any active channels they have.
 		nodeAnnsInHorizon := c.graph.NodeUpdatesInHorizon(
-			startTime, endTime, graphdb.WithIterPublicNodesOnly(),
+			context.TODO(), startTime, endTime,
+			graphdb.WithIterPublicNodesOnly(),
 		)
 		for nodeAnn, err := range nodeAnnsInHorizon {
 			if err != nil {
@@ -211,10 +212,12 @@ func (c *ChanSeries) UpdatesInHorizon(chain chainhash.Hash,
 // NOTE: This is part of the ChannelGraphTimeSeries interface.
 func (c *ChanSeries) FilterKnownChanIDs(_ chainhash.Hash,
 	superSet []graphdb.ChannelUpdateInfo,
-	isZombieChan func(time.Time, time.Time) bool) (
+	isZombieChan func(graphdb.ChannelUpdateInfo) bool) (
 	[]lnwire.ShortChannelID, error) {
 
-	newChanIDs, err := c.graph.FilterKnownChanIDs(superSet, isZombieChan)
+	newChanIDs, err := c.graph.FilterKnownChanIDs(
+		context.TODO(), superSet, isZombieChan,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -240,7 +243,7 @@ func (c *ChanSeries) FilterChannelRange(_ chainhash.Hash, startHeight,
 	error) {
 
 	return c.graph.FilterChannelRange(
-		startHeight, endHeight, withTimestamps,
+		context.TODO(), startHeight, endHeight, withTimestamps,
 	)
 }
 
@@ -260,7 +263,7 @@ func (c *ChanSeries) FetchChanAnns(chain chainhash.Hash,
 		chanIDs = append(chanIDs, chanID.ToUint64())
 	}
 
-	channels, err := c.graph.FetchChanInfos(chanIDs)
+	channels, err := c.graph.FetchChanInfos(context.TODO(), chanIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -353,7 +356,7 @@ func (c *ChanSeries) FetchChanUpdates(chain chainhash.Hash,
 	shortChanID lnwire.ShortChannelID) ([]*lnwire.ChannelUpdate1, error) {
 
 	chanInfo, e1, e2, err := c.graph.FetchChannelEdgesByID(
-		shortChanID.ToUint64(),
+		context.TODO(), shortChanID.ToUint64(),
 	)
 	if err != nil {
 		return nil, err
