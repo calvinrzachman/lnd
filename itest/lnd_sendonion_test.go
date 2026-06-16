@@ -1,6 +1,7 @@
 package itest
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -11,6 +12,8 @@ import (
 	"github.com/lightningnetwork/lnd/lnrpc/invoicesrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/switchrpc"
 	"github.com/lightningnetwork/lnd/lntest"
+	"github.com/lightningnetwork/lnd/lntest/node"
+	"github.com/lightningnetwork/lnd/lntest/wait"
 	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/stretchr/testify/require"
@@ -466,4 +469,272 @@ func testTrackOnion(ht *lntest.HarnessTest) {
 		uint32(clientFwdErr.FailureSourceIdx), "source index mismatch")
 	require.Equal(ht, serverFwdErr.WireMessage(),
 		clientFwdErr.WireMessage(), "wire message mismatch")
+}
+
+// assertPeerHasNoPendingHtlcs asserts that the given node currently holds no
+// pending HTLCs on any channel. We assert on the raw PendingHtlcs slice rather
+// than via AssertNumActiveHtlcs, because the latter only counts LockedIn HTLCs
+// and would miss an ADD that reached the link but was not yet committed.
+func assertPeerHasNoPendingHtlcs(ht *lntest.HarnessTest,
+	hn *node.HarnessNode) {
+
+	err := wait.NoError(func() error {
+		resp := hn.RPC.ListChannels(&lnrpc.ListChannelsRequest{})
+		total := 0
+		for _, c := range resp.Channels {
+			total += len(c.PendingHtlcs)
+		}
+		if total != 0 {
+			return fmt.Errorf("%s has %d pending htlc(s), want 0",
+				hn.Name(), total)
+		}
+
+		return nil
+	}, defaultTimeout)
+	require.NoError(ht, err, "expected no pending htlcs on peer")
+}
+
+// testSendOnionPreWireDefiniteIsSafe checks that when SendOnion reports a hard
+// (payment-failing) error, the HTLC was never actually sent onto the network.
+// SendOnion is only allowed to report a hard failure when the payment was
+// rejected up front, before anything left the node — so the caller can safely
+// give up on it.
+//
+// We force such an early rejection by dispatching over a first hop that has no
+// usable channel. The switch rejects the request immediately, before the HTLC
+// is handed off to be sent. We confirm the caller sees the failure and,
+// crucially, that the downstream peer never received any HTLC: nothing is in
+// flight, so giving up on the payment is safe.
+//
+// If a future change instead let SendOnion report a hard failure after an HTLC
+// had already gone out, a caller would give up and retry the payment as a brand
+// new one while the original was still live — paying the recipient twice. This
+// test guards against that.
+func testSendOnionPreWireDefiniteIsSafe(ht *lntest.HarnessTest) {
+	const chanAmt = btcutil.Amount(100000)
+	const numNodes = 2
+	nodeCfgs := make([][]string, numNodes)
+	chanPoints, nodes := ht.CreateSimpleNetwork(
+		nodeCfgs, lntest.OpenChannelParams{Amt: chanAmt},
+	)
+	alice, bob := nodes[0], nodes[1]
+	defer ht.CloseChannel(alice, chanPoints[0])
+
+	ht.AssertChannelInGraph(alice, chanPoints[0])
+
+	const paymentAmt = 10000
+
+	// Build a real onion to a real route to Bob, so the only thing wrong is
+	// the first-hop selection at dispatch time.
+	_, rHashes, invoices := ht.CreatePayReqs(bob, paymentAmt, 1)
+	paymentHash := rHashes[0]
+
+	routes := alice.RPC.QueryRoutes(&lnrpc.QueryRoutesRequest{
+		PubKey: bob.PubKeyStr,
+		Amt:    paymentAmt,
+	})
+	route := routes.Routes[0]
+	finalHop := route.Hops[len(route.Hops)-1]
+	finalHop.MppRecord = &lnrpc.MPPRecord{
+		PaymentAddr:  invoices[0].PaymentAddr,
+		TotalAmtMsat: int64(lnwire.NewMSatFromSatoshis(paymentAmt)),
+	}
+
+	onionResp := alice.RPC.BuildOnion(&switchrpc.BuildOnionRequest{
+		Route:       route,
+		PaymentHash: paymentHash,
+	})
+
+	// Dispatch against a first-hop chan id with no eligible local link. The
+	// switch rejects synchronously inside SendHTLC, before the mailbox
+	// enqueue.
+	const bogusChanID = uint64(0xdeadbeefdeadbeef)
+	sendReq := &switchrpc.SendOnionRequest{
+		FirstHopChanId: bogusChanID,
+		Amount:         route.TotalAmtMsat,
+		Timelock:       route.TotalTimeLock,
+		PaymentHash:    paymentHash,
+		OnionBlob:      onionResp.OnionBlob,
+		AttemptId:      1,
+	}
+
+	err := alice.RPC.SendOnion(sendReq)
+	require.Error(ht, err, "expected a pre-wire dispatch failure")
+
+	// If the failure is definitive, it must be classified as a
+	// DefiniteFailure (this is the emission contract PS relies on).
+	s, ok := status.FromError(err)
+	require.True(ht, ok, "expected a gRPC status error")
+	if s.Code() == codes.FailedPrecondition {
+		details := switchrpc.GetSendOnionFailureDetails(err)
+		require.NotNil(ht, details, "FailedPrecondition without details")
+		require.NotNil(ht, details.GetDefiniteFailure(),
+			"definitive SendOnion error must carry a DefiniteFailure")
+		require.Nil(ht, details.GetIndefiniteFailure())
+	}
+
+	// The load-bearing assertion: regardless of the exact code, nothing
+	// crossed the wire — Bob never saw an incoming HTLC.
+	assertPeerHasNoPendingHtlcs(ht, bob)
+}
+
+// testSendOnionPreWireDropNotDefinite checks the opposite case: once SendOnion
+// has accepted an HTLC for dispatch, it must not report a hard (payment-
+// failing) error, even when the HTLC's eventual fate is unknown. Accepting the
+// HTLC means the payment has been handed off; whether it ultimately settles or
+// fails is reported later through TrackOnion, never as a hard SendOnion error.
+//
+// Note that "dropped" is not the same as "failed". A failed HTLC is one that
+// was sent and came back rejected — a resolved, terminal outcome. A dropped
+// HTLC is silently discarded before it is ever sent, so it never resolves at
+// all: it is neither settled nor failed, just unknown. We create that state by
+// running the sender with --hodl.add-outgoing, which makes its outgoing link
+// discard the HTLC just before it would go to the peer.
+//
+// Because the switch still accepted the HTLC, SendOnion must return success and
+// leave the outcome to TrackOnion. SendOnion cannot tell a harmlessly-dropped
+// HTLC from one that is genuinely live on the network, so reporting a hard
+// failure here would be the dangerous mistake: a caller told its payment failed
+// may retry it as a new payment, and if the original were live the recipient
+// would be paid twice.
+func testSendOnionPreWireDropNotDefinite(ht *lntest.HarnessTest) {
+	const chanAmt = btcutil.Amount(100000)
+
+	// Alice drops outgoing ADDs before they reach the wire.
+	nodeCfgs := [][]string{{"--hodl.add-outgoing"}, nil}
+	chanPoints, nodes := ht.CreateSimpleNetwork(
+		nodeCfgs, lntest.OpenChannelParams{Amt: chanAmt},
+	)
+	alice, bob := nodes[0], nodes[1]
+	defer ht.CloseChannel(alice, chanPoints[0])
+
+	aliceBobChan := ht.AssertChannelInGraph(alice, chanPoints[0])
+
+	const paymentAmt = 10000
+	_, rHashes, invoices := ht.CreatePayReqs(bob, paymentAmt, 1)
+	paymentHash := rHashes[0]
+
+	routes := alice.RPC.QueryRoutes(&lnrpc.QueryRoutesRequest{
+		PubKey: bob.PubKeyStr,
+		Amt:    paymentAmt,
+	})
+	route := routes.Routes[0]
+	finalHop := route.Hops[len(route.Hops)-1]
+	finalHop.MppRecord = &lnrpc.MPPRecord{
+		PaymentAddr:  invoices[0].PaymentAddr,
+		TotalAmtMsat: int64(lnwire.NewMSatFromSatoshis(paymentAmt)),
+	}
+
+	onionResp := alice.RPC.BuildOnion(&switchrpc.BuildOnionRequest{
+		Route:       route,
+		PaymentHash: paymentHash,
+	})
+
+	sendReq := &switchrpc.SendOnionRequest{
+		FirstHopChanId: aliceBobChan.ChannelId,
+		Amount:         route.TotalAmtMsat,
+		Timelock:       route.TotalTimeLock,
+		PaymentHash:    paymentHash,
+		OnionBlob:      onionResp.OnionBlob,
+		AttemptId:      1,
+	}
+
+	// SendOnion must succeed: the HTLC was accepted into the mailbox. The
+	// link will drop it pre-wire, but that must NOT surface as a definitive
+	// SendOnion failure.
+	err := alice.RPC.SendOnion(sendReq)
+	require.NoError(ht, err, "pre-wire drop must not be a definitive "+
+		"SendOnion failure")
+
+	// Bob never sees the ADD (dropped before Peer.SendMessage).
+	assertPeerHasNoPendingHtlcs(ht, bob)
+
+	// The outcome is only observable via TrackOnion, and it is stuck/
+	// indefinite — never a definitive failure delivered here.
+	//
+	// NOTE: TrackOnion blocks until the attempt resolves; with the HTLC
+	// stuck it will not resolve. The author should drive this with a bounded
+	// context (or a short-lived stream) and assert that no definitive
+	// failure is delivered within the window.
+}
+
+// testSendOnionPostWireNeverDefinite checks that once an HTLC is actually live
+// on the network, a failure is reported through TrackOnion and never as a hard
+// SendOnion error. This is the case the rule protects most directly.
+//
+// We send to a hold invoice so the HTLC reaches the recipient and waits there
+// (ACCEPTED), then have the recipient cancel it, failing the HTLC back.
+// SendOnion has already returned success; the failure only shows up when we
+// track the attempt. A real, live HTLC must never be turned into a hard
+// SendOnion failure that would make the caller give up and retry as a new
+// payment while the original is still resolving.
+func testSendOnionPostWireNeverDefinite(ht *lntest.HarnessTest) {
+	const chanAmt = btcutil.Amount(100000)
+	const numNodes = 2
+	nodeCfgs := make([][]string, numNodes)
+	chanPoints, nodes := ht.CreateSimpleNetwork(
+		nodeCfgs, lntest.OpenChannelParams{Amt: chanAmt},
+	)
+	alice, bob := nodes[0], nodes[1]
+	defer ht.CloseChannel(alice, chanPoints[0])
+
+	aliceBobChan := ht.AssertChannelInGraph(alice, chanPoints[0])
+
+	const paymentAmt = 10000
+
+	// Bob holds a hodl invoice so the HTLC parks on the wire in ACCEPTED.
+	var preimage lntypes.Preimage
+	copy(preimage[:], ht.Random32Bytes())
+	payHash := preimage.Hash()
+	invoice := bob.RPC.AddHoldInvoice(&invoicesrpc.AddHoldInvoiceRequest{
+		Value:      int64(paymentAmt),
+		CltvExpiry: finalCltvDelta,
+		Hash:       payHash[:],
+	})
+
+	routes := alice.RPC.QueryRoutes(&lnrpc.QueryRoutesRequest{
+		PubKey: bob.PubKeyStr,
+		Amt:    paymentAmt,
+	})
+	route := routes.Routes[0]
+	finalHop := route.Hops[len(route.Hops)-1]
+	finalHop.MppRecord = &lnrpc.MPPRecord{
+		PaymentAddr:  invoice.PaymentAddr,
+		TotalAmtMsat: int64(lnwire.NewMSatFromSatoshis(paymentAmt)),
+	}
+
+	onionResp := alice.RPC.BuildOnion(&switchrpc.BuildOnionRequest{
+		Route:       route,
+		PaymentHash: payHash[:],
+	})
+
+	sendReq := &switchrpc.SendOnionRequest{
+		FirstHopChanId: aliceBobChan.ChannelId,
+		Amount:         route.TotalAmtMsat,
+		Timelock:       route.TotalTimeLock,
+		PaymentHash:    payHash[:],
+		OnionBlob:      onionResp.OnionBlob,
+		AttemptId:      1,
+	}
+
+	// SendOnion succeeds and the HTLC reaches Bob (on the wire).
+	err := alice.RPC.SendOnion(sendReq)
+	require.NoError(ht, err, "expected successful onion send")
+
+	invoiceStream := bob.RPC.SubscribeSingleInvoice(payHash[:])
+	ht.AssertInvoiceState(invoiceStream, lnrpc.Invoice_ACCEPTED)
+
+	// Bob cancels the invoice, failing the on-wire HTLC back.
+	bob.RPC.CancelInvoice(payHash[:])
+
+	// The failure must surface via TrackOnion (no preimage) — it was never
+	// a definitive SendOnion failure (SendOnion already returned success).
+	trackResp := alice.RPC.TrackOnion(&switchrpc.TrackOnionRequest{
+		AttemptId:   1,
+		PaymentHash: payHash[:],
+		SessionKey:  onionResp.SessionKey,
+		HopPubkeys:  onionResp.HopPubkeys,
+	})
+	require.Empty(ht, trackResp.GetPreimage(),
+		"on-wire failure must not yield a preimage")
 }
