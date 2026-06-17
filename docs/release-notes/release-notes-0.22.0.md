@@ -146,6 +146,13 @@
   subsequent SendOnion call with the same attempt ID to succeed. Clients should
   only delete attempt IDs they have fully finalized and will never reuse.
 
+* Updated `switchrpc.DeleteAttempts` RPC to internally use a tombstone-based
+  model: deleted records are replaced with a lightweight sentinel that preserves
+  idempotency protection (preventing duplicate HTLC dispatch) until the next
+  server restart, at which point tombstones are swept automatically. This is a
+  precautionary measure which prevents interaction between htlc dispatch via
+  SendOnion and cleanup via DeleteAttempts which may result from client mis-use.
+
 ## RPC Additions
 
 * The `routerrpc.EstimateRouteFee` RPC now supports [restricting fee estimates
