@@ -213,6 +213,11 @@ docker-tools:
 	@$(call print, "Building tools docker image.")
 	docker build -q -t lnd-tools $(TOOLS_DIR)
 
+#? docker-dev-images: Build+push multi-arch PS lnd dev images (switchrpc on+off) via scripts/build-ps-lnd-images.sh. Override REGISTRY/BASE_VERSION/VARIANTS/PLATFORMS via env.
+docker-dev-images:
+	@$(call print, "Building PS lnd dev images (switchrpc on/off).")
+	./scripts/build-ps-lnd-images.sh
+
 scratch: build
 
 
@@ -551,4 +556,5 @@ clean-docker-volumes:
 	android \
 	mobile \
 	clean \
-	clean-docker-volumes
+	clean-docker-volumes \
+	docker-dev-images
