@@ -18,9 +18,18 @@ RUN apk add --no-cache --update alpine-sdk \
 COPY . /go/src/github.com/lightningnetwork/lnd
 
 #  Install/build lnd.
+# BUILD_TAGS selects the Go build tags. Default includes `switchrpc`; override
+# with `--build-arg BUILD_TAGS="..."` (omit switchrpc for a tag-off build).
+ARG BUILD_TAGS="autopilotrpc signrpc switchrpc walletrpc chainrpc invoicesrpc watchtowerrpc neutrinorpc monitoring peersrpc kvdb_postgres kvdb_etcd kvdb_sqlite"
 RUN cd /go/src/github.com/lightningnetwork/lnd \
     &&  make \
-    &&  make install-all tags="signrpc walletrpc chainrpc invoicesrpc peersrpc kvdb_sqlite"
+    # NOTE(calvin): This build contains `switchrpc`, for use with the external
+    # router (payment service). Only a *single* router may dispatch at a time.
+    # A switchrpc build refuses the local payment-sending RPCs by default, so
+    # the embedded router cannot collide with the external one; pass
+    # --enable-local-payment-dispatch to override that. Allow all in-flight
+    # attempts to complete before swapping back to a local-router build.
+    &&  make install-all tags="${BUILD_TAGS}"
 
 # Start a new, final image to reduce size.
 FROM alpine AS final
