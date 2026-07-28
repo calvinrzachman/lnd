@@ -5620,9 +5620,15 @@ func TestSwitchOrphanCleanup(t *testing.T) {
 	testCases := []struct {
 		name        string
 		setupOrphan func(t *testing.T, s *Switch, cdb *channeldb.DB)
+
+		// sweptOnStartup is whether the janitor should fail this
+		// attempt on startup. An attempt whose circuit carries a
+		// keystone is live on the wire and must be left alone.
+		sweptOnStartup bool
 	}{
 		{
-			name: "pre-commit orphan",
+			name:           "pre-commit orphan",
+			sweptOnStartup: true,
 			setupOrphan: func(t *testing.T, s *Switch,
 				_ *channeldb.DB) {
 
@@ -5634,7 +5640,8 @@ func TestSwitchOrphanCleanup(t *testing.T) {
 			},
 		},
 		{
-			name: "half-open circuit orphan",
+			name:           "half-open circuit orphan",
+			sweptOnStartup: true,
 			setupOrphan: func(t *testing.T, s *Switch,
 				_ *channeldb.DB) {
 
@@ -5671,6 +5678,54 @@ func TestSwitchOrphanCleanup(t *testing.T) {
 				)
 				_, err = s.circuits.CommitCircuits(circuit)
 				require.NoError(t, err, "commit failed")
+			},
+		},
+		{
+			// This is the case the janitor must not act on. A
+			// keystone is the switch's record that the outgoing
+			// link accepted the HTLC, so the add is irrevocably
+			// on the wire and only the remote peer can resolve
+			// it.
+			name:           "keystoned circuit is in flight",
+			sweptOnStartup: false,
+			setupOrphan: func(t *testing.T, s *Switch,
+				_ *channeldb.DB) {
+
+				err := s.attemptStore.InitAttempt(attemptID)
+				require.NoError(t, err, "unable to init")
+
+				htlc := &lnwire.UpdateAddHTLC{
+					PaymentHash: lntypes.Hash{0x01},
+				}
+
+				const outgoingChanID = 123
+				outChanID := lnwire.NewShortChanIDFromInt(
+					outgoingChanID,
+				)
+				packet := &htlcPacket{
+					incomingChanID: hop.Source,
+					incomingHTLCID: attemptID,
+					outgoingChanID: outChanID,
+					htlc:           htlc,
+					amount:         htlc.Amount,
+				}
+
+				circuit := newPaymentCircuit(
+					&htlc.PaymentHash, packet,
+				)
+				_, err = s.circuits.CommitCircuits(circuit)
+				require.NoError(t, err, "commit failed")
+
+				// Assigning the keystone is what moves this
+				// past the point of no return.
+				err = s.circuits.OpenCircuits(Keystone{
+					InKey: circuit.Incoming,
+					OutKey: CircuitKey{
+						ChanID: outChanID,
+						HtlcID: 1,
+					},
+				})
+				require.NoError(t, err, "open failed")
 			},
 		},
 	}
@@ -5715,6 +5770,19 @@ func TestSwitchOrphanCleanup(t *testing.T) {
 			// attempt ID. We expect to find a final FAILED
 			// result, as the janitor should have cleaned it up.
 			result, err := s2.attemptStore.GetResult(attemptID)
+
+			// Unless the attempt was already on the wire, in
+			// which case it must still be pending. Failing a
+			// keystoned attempt would report a live HTLC as dead
+			// and invite a second payment for the same hash.
+			if !tc.sweptOnStartup {
+				require.ErrorIs(t, err, ErrAttemptResultPending,
+					"a keystoned attempt must stay in "+
+						"flight across a restart")
+
+				return
+			}
+
 			require.NoError(t, err, "expected final result")
 			require.NotNil(t, result, "result should not be nil")
 
