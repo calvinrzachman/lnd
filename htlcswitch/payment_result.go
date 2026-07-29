@@ -962,15 +962,33 @@ func newInternalFailureResult(linkErr *LinkError) (*networkResult, error) {
 
 // DisableRemoteRouter checks for attempt entries in the network result store
 // and if none are found, deletes the remote router marker from the database.
+//
+// Tombstones do not count as entries. They hold no state an external router
+// owns, so counting them would make the operator restart mid migration purely
+// to have them swept.
 func (store *networkResultStore) DisableRemoteRouter() error {
 	return store.backend.Update(func(tx kvdb.RwTx) error {
 		// First, check if there are any attempt entries.
 		bucket := tx.ReadBucket(networkResultStoreBucketKey)
 		if bucket != nil {
 			cursor := bucket.ReadCursor()
-			k, _ := cursor.First()
-			if k != nil {
-				return ErrAttemptEntriesExist
+			for k, v := cursor.First(); k != nil; k, v =
+				cursor.Next() {
+
+				// Treat a record we cannot decode as a live
+				// entry. Refusing to clear the marker is the
+				// safe direction when the contents are in
+				// doubt.
+				result, err := deserializeNetworkResult(
+					bytes.NewReader(v),
+				)
+				if err != nil {
+					return ErrAttemptEntriesExist
+				}
+
+				if result.msg.MsgType() != deletedHtlcMsgType {
+					return ErrAttemptEntriesExist
+				}
 			}
 		}
 
