@@ -1130,7 +1130,66 @@ func TestDisableRemoteRouter(t *testing.T) {
 		require.False(t, checkMarker(t, db))
 	})
 
-	// Test case 3: No in-flight payments and no marker.
+	// Test case 3: Only tombstones remain. These hold no state the external
+	// router owns, so they must not hold the marker open.
+	t.Run("tombstones only", func(t *testing.T) {
+		t.Parallel()
+
+		db := channeldb.OpenForTesting(t, t.TempDir())
+		store, err := newNetworkResultStore(db, true)
+		require.NoError(t, err)
+
+		// Store a terminal result, then delete it so the key is left
+		// behind as a tombstone rather than removed.
+		const attemptID = 7
+		require.NoError(t, store.InitAttempt(attemptID))
+		require.NoError(t, store.storeResult(attemptID, &networkResult{
+			msg:         &lnwire.UpdateFulfillHTLC{},
+			unencrypted: true,
+		}))
+
+		results, err := store.DeleteAttempts([]uint64{attemptID})
+		require.NoError(t, err)
+		require.Equal(t, DeletionOK, results[attemptID])
+
+		// The tombstone still guards the ID against reuse.
+		require.ErrorIs(
+			t, store.InitAttempt(attemptID),
+			ErrPaymentIDAlreadyExists,
+		)
+
+		// And it does not block the migration back to local.
+		require.NoError(t, store.DisableRemoteRouter())
+		require.False(t, checkMarker(t, db))
+	})
+
+	// Test case 4: A live entry alongside a tombstone still blocks.
+	t.Run("tombstone plus live entry", func(t *testing.T) {
+		t.Parallel()
+
+		db := channeldb.OpenForTesting(t, t.TempDir())
+		store, err := newNetworkResultStore(db, true)
+		require.NoError(t, err)
+
+		require.NoError(t, store.InitAttempt(1))
+		require.NoError(t, store.storeResult(1, &networkResult{
+			msg:         &lnwire.UpdateFulfillHTLC{},
+			unencrypted: true,
+		}))
+		results, err := store.DeleteAttempts([]uint64{1})
+		require.NoError(t, err)
+		require.Equal(t, DeletionOK, results[1])
+
+		// A second, undeleted attempt is a real entry.
+		require.NoError(t, store.InitAttempt(2))
+
+		require.ErrorIs(
+			t, store.DisableRemoteRouter(), ErrAttemptEntriesExist,
+		)
+		require.True(t, checkMarker(t, db))
+	})
+
+	// Test case 5: No in-flight payments and no marker.
 	t.Run("no marker", func(t *testing.T) {
 		t.Parallel()
 
