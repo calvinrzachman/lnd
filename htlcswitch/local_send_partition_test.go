@@ -61,9 +61,11 @@ type localSendCase struct {
 // because an earlier call for the same attempt id may still be live.
 //
 // NOTE: any error SendHTLC can return that is missing from this table is a gap
-// in the specification, not a passing case. TestLocalSendPartitionIsExhaustive
-// pins the table against the source so that adding a return path without adding
-// a row here is a build-time conversation rather than a silent one.
+// in the specification, not a passing case. Nothing here detects such a gap
+// automatically. TestLocalSendPartitionRowCountIsPinned only makes adding a
+// return path without a row fail a count assertion, which is a prompt rather
+// than a proof. This table is reviewed specification; the executable evidence
+// is TestSendHTLCCommitBoundaryProperty and switch_fund_safety_test.go.
 var localSendPartition = []localSendCase{
 	// Phase 1: before CommitCircuits. Nothing has been persisted or
 	// queued.
@@ -229,14 +231,17 @@ func TestLocalSendCompletenessGaps(t *testing.T) {
 		"say why the caller cannot be given a wire failure")
 }
 
-// TestLocalSendPartitionIsExhaustive pins the table against the source. It does
-// not parse switch.go; it asserts the count, so that adding a return path to
-// SendHTLC without adding a row here fails and forces the author to decide
-// which side of CommitCircuits the new error falls on.
+// TestLocalSendPartitionRowCountIsPinned is a specification sentinel.
 //
-// A count check is weak on its own, which is why the failure message carries
-// the instruction rather than just the number.
-func TestLocalSendPartitionIsExhaustive(t *testing.T) {
+// It asserts a manually maintained row count. It does not inspect switch.go and
+// cannot prove the table is exhaustive: a source change that preserves the
+// count while altering behaviour passes. What it buys is that adding a return
+// path to SendHTLC without adding a row here fails, which puts the question in
+// front of the author.
+//
+// Do not cite this as evidence of exhaustiveness. Cite it as the reason someone
+// had to think about it.
+func TestLocalSendPartitionRowCountIsPinned(t *testing.T) {
 	t.Parallel()
 
 	// SendHTLC returns errors from exactly these points, in order:
@@ -277,21 +282,25 @@ func TestLocalSendPartitionIsExhaustive(t *testing.T) {
 	}
 }
 
-// TestErrorReturnNeverFollowsDispatch pins the SendHTLC contract that both
-// callers rely on: an error return never means the current call put an HTLC on
-// the wire, so the caller may always record the attempt as failed.
+// TestEveryRowJustifiesTheSendContract is a review guard, not a proof.
 //
-// This is what makes the switchrpc server's unconditional failPendingAttempt
-// correct, and what makes the in-process router's failAttempt correct on the
-// non-ClearTextError branch, where it fails the payment as well. If the
-// contract broke, vanilla lnd would mark attempts failed with HTLCs live, with
-// no remote dispatcher involved.
+// The property it guards is the SendHTLC contract both callers rely on: an
+// error return never means the current call put an HTLC on the wire, so the
+// caller may always record the attempt as failed. That is what makes the
+// switchrpc server's failPendingAttempt correct and the in-process router's
+// failAttempt correct on the non-ClearTextError branch.
 //
-// The property is a claim about the source rather than something the table can
-// observe, so this test asserts the reasoning is recorded rather than deriving
-// it. The enumeration and the justifications are the evidence; the failure
-// message says where to check.
-func TestErrorReturnNeverFollowsDispatch(t *testing.T) {
+// This test does NOT observe that property. It cannot: the table holds error
+// values, not executions, so nothing here watches mailbox admission. All it
+// enforces is that every row carries a written justification, which forces the
+// contract into review when a row is added.
+//
+// The executable evidence lives elsewhere and should be cited instead of this
+// test: TestSendHTLCCommitBoundaryProperty drives the real switch and uses
+// circuit ownership as its oracle, and switch_fund_safety_test.go drives real
+// HTLCs across the boundary. If you need to prove the contract rather than
+// document it, extend those.
+func TestEveryRowJustifiesTheSendContract(t *testing.T) {
 	t.Parallel()
 
 	// Every error return in SendHTLC precedes the packet reaching the
