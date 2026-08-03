@@ -23,6 +23,17 @@ type localSendCase struct {
 	// A pre-commit error means the HTLC provably never left this node.
 	preCommit bool
 
+	// priorMayBeLive records whether the error implies that an HTLC for
+	// this attempt id may already be in flight from an *earlier* dispatch.
+	//
+	// This is a different question from preCommit. No error return from
+	// SendHTLC ever means the current call put an HTLC on the wire, which
+	// is why a caller may always record the attempt as failed. But two
+	// errors are raised precisely because something for this id already
+	// exists, and if the caller can reach them after an earlier dispatch
+	// succeeded then recording a terminal failure would bury a live HTLC.
+	priorMayBeLive bool
+
 	// why explains why preCommit holds, in terms of the code path rather
 	// than the error value, so a reader can check the claim against the
 	// source instead of trusting the table.
@@ -33,10 +44,21 @@ type localSendCase struct {
 // together with the physical fact about whether the switch had taken ownership
 // when it was raised.
 //
-// The organising principle is CommitCircuits in switch.go, the point at which
-// the switch takes ownership of an attempt. Errors raised before it mean the
-// HTLC provably never left this node; errors raised at or after it mean an HTLC
-// for this attempt may be in flight.
+// Two distinct properties live here and confusing them is the mistake this
+// comment exists to prevent.
+//
+// The first is the SendHTLC contract: no error return ever means the current
+// call put an HTLC on the wire. Every error is raised before the packet reaches
+// the link's mailbox, and AddPacket returns nil once it has enqueued, so there
+// is no enqueue-then-fail path. Both callers depend on this. The in-process
+// router marks the attempt failed on every error, via failAttempt for a
+// ClearTextError and via failPaymentAndAttempt otherwise, and the switchrpc
+// server records the pending attempt terminal for the same reason.
+//
+// The second is CommitCircuits in switch.go, the point at which the switch takes
+// ownership. That governs whether the caller may treat the failure as definite
+// and route elsewhere, which is a stronger claim than "this call sent nothing",
+// because an earlier call for the same attempt id may still be live.
 //
 // NOTE: any error SendHTLC can return that is missing from this table is a gap
 // in the specification, not a passing case. TestLocalSendPartitionIsExhaustive
@@ -81,12 +103,14 @@ var localSendPartition = []localSendCase{
 			"carries no wire failure we could hand the caller",
 	},
 	{
-		name:      "duplicate add",
-		err:       ErrDuplicateAdd,
-		preCommit: false,
-		why: "the circuit map already held this circuit, either " +
-			"keystoned or still in memory, so an HTLC for this " +
-			"attempt may be in flight",
+		name:           "duplicate add",
+		err:            ErrDuplicateAdd,
+		preCommit:      false,
+		priorMayBeLive: true,
+		why: "this call queued nothing, but the circuit map already " +
+			"held this circuit, either keystoned or still in " +
+			"memory, so an HTLC from an earlier dispatch of this " +
+			"attempt id may be in flight",
 	},
 	{
 		name:      "local add failed",
@@ -97,12 +121,15 @@ var localSendPartition = []localSendCase{
 			"packet and the HTLC never entered a commitment",
 	},
 	{
-		name:      "mailbox already holds the packet",
-		err:       ErrPacketAlreadyExists,
-		preCommit: false,
-		why: "the packet is already queued on the link and may go " +
-			"out; the circuit was committed before handleSwitchPacket " +
-			"was reached",
+		name:           "mailbox already holds the packet",
+		err:            ErrPacketAlreadyExists,
+		preCommit:      false,
+		priorMayBeLive: true,
+		why: "AddPacket returns this before enqueuing, so this call " +
+			"queued nothing, but the packet an earlier dispatch " +
+			"left on the link may still go out. Unreachable while " +
+			"InitAttempt gates a second dispatch of the same " +
+			"attempt id; deleting a live record reopens it",
 	},
 	{
 		name:      "switch exiting",
@@ -248,4 +275,92 @@ func TestLocalSendPartitionIsExhaustive(t *testing.T) {
 		require.Falsef(t, dup, "duplicate row name %q", tc.name)
 		seen[tc.name] = struct{}{}
 	}
+}
+
+// TestErrorReturnNeverFollowsDispatch pins the SendHTLC contract that both
+// callers rely on: an error return never means the current call put an HTLC on
+// the wire, so the caller may always record the attempt as failed.
+//
+// This is what makes the switchrpc server's unconditional failPendingAttempt
+// correct, and what makes the in-process router's failAttempt correct on the
+// non-ClearTextError branch, where it fails the payment as well. If the
+// contract broke, vanilla lnd would mark attempts failed with HTLCs live, with
+// no remote dispatcher involved.
+//
+// The property is a claim about the source rather than something the table can
+// observe, so this test asserts the reasoning is recorded rather than deriving
+// it. The enumeration and the justifications are the evidence; the failure
+// message says where to check.
+func TestErrorReturnNeverFollowsDispatch(t *testing.T) {
+	t.Parallel()
+
+	// Every error return in SendHTLC precedes the packet reaching the
+	// link's mailbox:
+	//
+	//   getLocalLink failure          - before the circuit exists
+	//   dustExceedsFeeThreshold       - before the circuit exists
+	//   CommitCircuits failure        - before the packet is queued
+	//   actions.Drops / actions.Fails - read from the circuit map, nothing
+	//                                   queued
+	//   handleSwitchPacket            - AddPacket returns every error
+	//                                   before PushBack and returns nil
+	//                                   once it has enqueued
+	//
+	// so no row in this table represents a state where the current call
+	// dispatched.
+	for _, tc := range localSendPartition {
+		require.NotEmptyf(t, tc.why,
+			"%q must record why the current call dispatched "+
+				"nothing, because the caller is entitled to "+
+				"record the attempt as failed on this error",
+			tc.name)
+	}
+}
+
+// TestPriorDispatchRowsAreGatedOrIntercepted records the two errors that do not
+// prove the attempt id is free, and why recording a terminal failure for them is
+// nonetheless safe today.
+//
+// Neither means the current call sent an HTLC. Both mean an earlier dispatch of
+// the same attempt id may still be live, so burying them under a terminal record
+// would hide a live HTLC from the caller.
+//
+// They are safe today for different reasons, and both reasons are load bearing:
+//
+//   - ErrDuplicateAdd is intercepted by the switchrpc server before any terminal
+//     write and reported as AlreadyExists, which sends the caller to track the
+//     existing attempt.
+//   - ErrPacketAlreadyExists is unreachable while InitAttempt gates a second
+//     dispatch of the same attempt id.
+//
+// If a deletion API ever lets a live attempt's record be removed and the id
+// reused, the second reason evaporates and the terminal write becomes unsafe.
+// That is the coupling between deletion retention and this contract.
+func TestPriorDispatchRowsAreGatedOrIntercepted(t *testing.T) {
+	t.Parallel()
+
+	var prior []string
+	for _, tc := range localSendPartition {
+		if tc.priorMayBeLive {
+			prior = append(prior, tc.name)
+		}
+
+		// A row that may have a live prior dispatch can never be a
+		// definite rejection: the caller must not route elsewhere.
+		if tc.priorMayBeLive {
+			require.Falsef(t, tc.preCommit,
+				"%q claims both that an earlier dispatch may "+
+					"be live and that the error is "+
+					"pre-commit. Those cannot both hold",
+				tc.name)
+		}
+	}
+
+	require.ElementsMatch(t, []string{
+		"duplicate add",
+		"mailbox already holds the packet",
+	}, prior, "the set of errors that may hide a live earlier dispatch "+
+		"changed. Each one needs either an interception before the "+
+		"terminal write or a gate making it unreachable, and the "+
+		"reason belongs in this test's doc comment")
 }
