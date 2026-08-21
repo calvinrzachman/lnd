@@ -593,23 +593,23 @@ type AttemptStore interface {
 	// method should be called before the HTLC is dispatched to the network.
 	//
 	// NOTE: This method provides a guarantee that only one HTLC can be
-	// initialized for a given attempt ID until the ID is explicitly cleaned
-	// from the store.
-	InitAttempt(attemptID uint64) error
+	// initialized for a given attempt key until the key is explicitly
+	// cleaned from the store.
+	InitAttempt(key AttemptKey) error
 
 	// StoreResult stores the result of a given payment attempt (identified
-	// by attemptID). This will be called when a result is received from the
-	// network.
-	StoreResult(attemptID uint64, result *networkResult) error
+	// by its attempt key). This will be called when a result is received
+	// from the network.
+	StoreResult(key AttemptKey, result *networkResult) error
 
 	// FailPendingAttempt transitions an initialized attempt from an
 	// initialized to a failed state and records the provided reason. This
 	// is the synchronous rollback mechanism for attempts that fail before
 	// being committed to the forwarding engine. It returns an error if the
 	// underlying storage fails.
-	FailPendingAttempt(attemptID uint64, reason *LinkError) error
+	FailPendingAttempt(key AttemptKey, reason *LinkError) error
 
-	// FetchPendingAttempts returns a list of all attempt IDs that are
+	// FetchPendingAttempts returns a list of all attempt keys that are
 	// currently in the pending state.
 	//
 	// NOTE: This function is primarily used by the Switch's startup logic
@@ -620,36 +620,36 @@ type AttemptStore interface {
 	// can transition their state to FAILED, preventing external callers
 	// from indefinitely hanging on GetAttemptResult for an un-dispatched
 	// attempt.
-	FetchPendingAttempts() ([]uint64, error)
+	FetchPendingAttempts() ([]AttemptKey, error)
 
-	// GetResult returns the network result for the specified attempt ID if
+	// GetResult returns the network result for the specified attempt key if
 	// it's available.
 	//
 	// NOTE: This method should return ErrAttemptResultPending for attempts
 	// that have been initialized via InitAttempt but for which a final
 	// result (settle/fail) has not yet been stored. ErrPaymentIDNotFound is
 	// returned for attempts that are unknown.
-	GetResult(attemptID uint64) (*networkResult, error)
+	GetResult(key AttemptKey) (*networkResult, error)
 
 	// SubscribeResult subscribes to be notified when a result for a
-	// specific attempt ID becomes available. It returns a channel that will
-	// receive the result.
+	// specific attempt key becomes available. It returns a channel that
+	// will receive the result.
 	//
 	// NOTE: For backwards compatibility, the returned channel should only
 	// receive a value for attempts that have a final result (settle/fail).
 	// Subscribers should *not* be notified of the initial pending state
 	// created by InitAttempt.
-	SubscribeResult(attemptID uint64) (<-chan *networkResult, error)
+	SubscribeResult(key AttemptKey) (<-chan *networkResult, error)
 
 	// CleanStore removes all attempt results from the store except for
-	// those listed in the keepPids map. This allows for a "delete all
-	// except" approach to cleanup.
-	CleanStore(keepPids map[uint64]struct{}) error
+	// those listed in the keep map. This allows for a "delete all except"
+	// approach to cleanup.
+	CleanStore(keep map[AttemptKey]struct{}) error
 
 	// DeleteAttempts removes terminal (settled or failed) attempt results
 	// from the store. The returned map reports the outcome for each
-	// requested attempt ID.
-	DeleteAttempts(attemptIDs []uint64) (map[uint64]DeletionStatus, error)
+	// requested attempt key.
+	DeleteAttempts(keys []AttemptKey) (map[AttemptKey]DeletionStatus, error)
 
 	// DisableRemoteRouter checks for attempt entries and, if none are
 	// found, deletes the remote router marker from the database. The

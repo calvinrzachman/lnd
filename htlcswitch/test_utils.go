@@ -807,7 +807,7 @@ func preparePayment(sendingPeer, receivingPeer lnpeer.Peer,
 	// Send payment and expose err channel.
 	return invoice, func() error {
 		err := sender.htlcSwitch.SendHTLC(
-			firstHop, pid, htlc,
+			firstHop, pid, lntypes.Hash(htlc.PaymentHash), htlc,
 		)
 		if err != nil {
 			return err
@@ -1374,7 +1374,9 @@ func (n *twoHopNetwork) makeHoldPayment(sendingPeer, receivingPeer lnpeer.Peer,
 	}
 
 	// Send payment and expose err channel.
-	err = sender.htlcSwitch.SendHTLC(firstHop, pid, htlc)
+	err = sender.htlcSwitch.SendHTLC(
+		firstHop, pid, lntypes.Hash(htlc.PaymentHash), htlc,
+	)
 	if err != nil {
 		paymentErr <- err
 		return paymentErr

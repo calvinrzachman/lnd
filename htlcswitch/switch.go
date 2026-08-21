@@ -450,8 +450,8 @@ func (s *Switch) ProcessContractResolution(msg contractcourt.ResolutionMsg) erro
 
 // HasAttemptResult reads the network result store to fetch the specified
 // attempt. Returns true if the attempt result exists.
-func (s *Switch) HasAttemptResult(attemptID uint64) (bool, error) {
-	_, err := s.attemptStore.GetResult(attemptID)
+func (s *Switch) HasAttemptResult(key AttemptKey) (bool, error) {
+	_, err := s.attemptStore.GetResult(key)
 	if err == nil {
 		return true, nil
 	}
@@ -487,13 +487,17 @@ func (s *Switch) GetAttemptResult(attemptID uint64, paymentHash lntypes.Hash,
 			ChanID: hop.Source,
 			HtlcID: attemptID,
 		}
+		key = AttemptKey{
+			Identifier: paymentHash,
+			Seq:        attemptID,
+		}
 	)
 
 	// If the HTLC is not found in the circuit map, check whether a result
 	// is already available.
 	// Assumption: no one will add this attempt ID other than the caller.
 	if s.circuits.LookupCircuit(inKey) == nil {
-		res, err := s.attemptStore.GetResult(attemptID)
+		res, err := s.attemptStore.GetResult(key)
 		switch {
 		// We have a final result, we can send it immediately.
 		case err == nil:
@@ -519,7 +523,7 @@ func (s *Switch) GetAttemptResult(attemptID uint64, paymentHash lntypes.Hash,
 	if nChan == nil {
 		// The HTLC was committed to the circuits, subscribe for a
 		// result.
-		nChan, err = s.attemptStore.SubscribeResult(attemptID)
+		nChan, err = s.attemptStore.SubscribeResult(key)
 		if err != nil {
 			return nil, err
 		}
@@ -570,8 +574,8 @@ func (s *Switch) GetAttemptResult(attemptID uint64, paymentHash lntypes.Hash,
 // all entries except the ones in the keepPids map. This should be called
 // preiodically to let the switch clean up payment results that we have
 // handled.
-func (s *Switch) CleanStore(keepPids map[uint64]struct{}) error {
-	return s.attemptStore.CleanStore(keepPids)
+func (s *Switch) CleanStore(keep map[AttemptKey]struct{}) error {
+	return s.attemptStore.CleanStore(keep)
 }
 
 // AttemptStore provides access to the Switch's underlying attempt store.
@@ -591,7 +595,7 @@ func (s *Switch) DisableRemoteRouter() error {
 // for this HTLC, and MUST be used only once, otherwise the switch might reject
 // it.
 func (s *Switch) SendHTLC(firstHop lnwire.ShortChannelID, attemptID uint64,
-	htlc *lnwire.UpdateAddHTLC) error {
+	identifier lntypes.Hash, htlc *lnwire.UpdateAddHTLC) error {
 
 	// Generate and send new update packet, if error will be received on
 	// this stage it means that packet haven't left boundaries of our
@@ -650,6 +654,13 @@ func (s *Switch) SendHTLC(firstHop lnwire.ShortChannelID, attemptID uint64,
 	}
 
 	circuit := newPaymentCircuit(&htlc.PaymentHash, packet)
+
+	// Record the payment-level identifier on the circuit so the return
+	// path can key the attempt result by it. For non-AMP payments this is
+	// the payment hash; for AMP it is the SetID, which differs from the
+	// per-shard hash carried by the HTLC.
+	circuit.PaymentIdentifier = identifier
+
 	actions, err := s.circuits.CommitCircuits(circuit)
 	if err != nil {
 		log.Errorf("unable to commit circuit in switch: %v", err)
@@ -994,10 +1005,15 @@ func (s *Switch) getLocalLink(pkt *htlcPacket, htlc *lnwire.UpdateAddHTLC) (
 //  4. Teardown the closing circuit in the circuit map
 //
 // NOTE: This method MUST be spawned as a goroutine.
-func (s *Switch) handleLocalResponse(pkt *htlcPacket) {
+func (s *Switch) handleLocalResponse(pkt *htlcPacket, circuit *PaymentCircuit) {
 	defer s.wg.Done()
 
-	attemptID := pkt.incomingHTLCID
+	// Key the attempt result by the payment identifier recorded on the
+	// circuit paired with the attempt's sequence (its incoming HTLC ID).
+	attemptKey := AttemptKey{
+		Identifier: circuit.PaymentIdentifier,
+		Seq:        pkt.incomingHTLCID,
+	}
 
 	// The error reason will be unencypted in case this a local
 	// failure or a converted error.
@@ -1010,9 +1026,9 @@ func (s *Switch) handleLocalResponse(pkt *htlcPacket) {
 
 	// Store the result to the db. This will also notify subscribers about
 	// the result.
-	if err := s.attemptStore.StoreResult(attemptID, n); err != nil {
-		log.Errorf("Unable to store attempt result for pid=%v: %v",
-			attemptID, err)
+	if err := s.attemptStore.StoreResult(attemptKey, n); err != nil {
+		log.Errorf("Unable to store attempt result for key=%v: %v",
+			attemptKey, err)
 		return
 	}
 
@@ -1902,12 +1918,12 @@ func (s *Switch) cleanupOrphanedAttempts() error {
 	log.Infof("Found %d pending HTLC attempts, checking for orphans",
 		len(pending))
 
-	for _, attemptID := range pending {
+	for _, key := range pending {
 		// For each pending attempt, we check if a corresponding circuit
-		// exists.
+		// exists. The attempt's sequence equals the circuit's HTLC ID.
 		inKey := CircuitKey{
 			ChanID: hop.Source,
-			HtlcID: attemptID,
+			HtlcID: key.Seq,
 		}
 		circuit := s.circuits.LookupCircuit(inKey)
 
@@ -1915,18 +1931,18 @@ func (s *Switch) cleanupOrphanedAttempts() error {
 		// between InitAttempt and CommitCircuits. We'll fail it with
 		// a temporary node failure.
 		if circuit == nil {
-			log.Warnf("Found orphaned HTLC attempt with id %d "+
-				"(no circuit), failing", attemptID)
+			log.Warnf("Found orphaned HTLC attempt with key %v "+
+				"(no circuit), failing", key)
 
 			err := s.attemptStore.FailPendingAttempt(
-				attemptID,
+				key,
 				NewLinkError(
 					&lnwire.FailTemporaryNodeFailure{},
 				),
 			)
 			if err != nil {
 				log.Errorf("Unable to fail orphaned attempt "+
-					"%d: %v", attemptID, err)
+					"%v: %v", key, err)
 			}
 
 			continue
@@ -1942,18 +1958,18 @@ func (s *Switch) cleanupOrphanedAttempts() error {
 		// initated payments as described here:
 		// https://github.com/lightningnetwork/lnd/issues/10423.
 		if !circuit.HasKeystone() {
-			log.Warnf("Found orphaned HTLC attempt with id %d "+
-				"(half-open circuit), failing", attemptID)
+			log.Warnf("Found orphaned HTLC attempt with key %v "+
+				"(half-open circuit), failing", key)
 
 			err := s.attemptStore.FailPendingAttempt(
-				attemptID,
+				key,
 				NewLinkError(
 					&lnwire.FailTemporaryNodeFailure{},
 				),
 			)
 			if err != nil {
 				log.Errorf("Unable to fail orphaned attempt "+
-					"%d: %v", attemptID, err)
+					"%v: %v", key, err)
 			}
 
 			continue
@@ -3324,7 +3340,7 @@ func (s *Switch) handlePacketSettle(packet *htlcPacket) error {
 	if localHTLC {
 		// TODO(yy): remove the goroutine and send back the error here.
 		s.wg.Add(1)
-		go s.handleLocalResponse(packet)
+		go s.handleLocalResponse(packet, circuit)
 
 		// If this is a locally initiated HTLC, there's no need to
 		// forward it so we exit.
@@ -3386,7 +3402,7 @@ func (s *Switch) handlePacketFail(packet *htlcPacket,
 	if packet.incomingChanID == hop.Source {
 		// TODO(yy): remove the goroutine and send back the error here.
 		s.wg.Add(1)
-		go s.handleLocalResponse(packet)
+		go s.handleLocalResponse(packet, circuit)
 
 		// If this is a locally initiated HTLC, there's no need to
 		// forward it so we exit.

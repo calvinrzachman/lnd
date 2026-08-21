@@ -23,6 +23,12 @@ var EmptyCircuitKey CircuitKey
 // circuit key after the HTLC has been forwarded via the outgoing link.
 type CircuitKey = models.CircuitKey
 
+// AttemptKey is the composite key identifying an HTLC attempt in the switch's
+// result store: a payment identifier paired with a per-identifier sequence
+// number. Keying attempts this way keeps attempts from different payments in
+// disjoint subspaces so independent dispatchers cannot collide.
+type AttemptKey = models.AttemptKey
+
 // PaymentCircuit is used by the switch as placeholder between when the
 // switch makes a forwarding decision and the outgoing link determines the
 // proper HTLC ID for the local log. After the outgoing HTLC ID has been
