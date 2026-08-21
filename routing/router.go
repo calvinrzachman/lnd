@@ -108,7 +108,7 @@ type PaymentAttemptDispatcher interface {
 	// denoted by its public key. A non-nil error is to be returned if the
 	// payment was unsuccessful.
 	SendHTLC(firstHop lnwire.ShortChannelID,
-		attemptID uint64,
+		attemptID uint64, identifier lntypes.Hash,
 		htlcAdd *lnwire.UpdateAddHTLC) error
 
 	// GetAttemptResult returns the result of the payment attempt with
@@ -130,9 +130,9 @@ type PaymentAttemptDispatcher interface {
 	// delete all entries except the ones in the keepPids map. This should
 	// be called periodically to let the switch clean up payment results
 	// that we have handled.
-	// NOTE: New payment attempts MUST NOT be made after the keepPids map
+	// NOTE: New payment attempts MUST NOT be made after the keep map
 	// has been created and this method has returned.
-	CleanStore(keepPids map[uint64]struct{}) error
+	CleanStore(keep map[htlcswitch.AttemptKey]struct{}) error
 
 	// HasAttemptResult reads the network result store to fetch the
 	// specified attempt. Returns true if the attempt result exists.
@@ -142,7 +142,7 @@ type PaymentAttemptDispatcher interface {
 	// `GetAttemptResult` in terms of its functionality, and can be removed
 	// once we move the construction of `UpdateAddHTLC` and
 	// `ErrorDecrypter` into `htlcswitch`.
-	HasAttemptResult(attemptID uint64) (bool, error)
+	HasAttemptResult(key htlcswitch.AttemptKey) (bool, error)
 }
 
 // PaymentSessionSource is an interface that defines a source for the router to
@@ -1515,10 +1515,13 @@ func (r *ChannelRouter) resumePayments() error {
 	// Switch. We do this here at startup to ensure no more payments can be
 	// made concurrently, so we know the toKeep map will be up-to-date
 	// until the cleaning has finished.
-	toKeep := make(map[uint64]struct{})
+	toKeep := make(map[htlcswitch.AttemptKey]struct{})
 	for _, p := range payments {
 		for _, a := range p.HTLCs {
-			toKeep[a.AttemptID] = struct{}{}
+			toKeep[htlcswitch.AttemptKey{
+				Identifier: p.Info.PaymentIdentifier,
+				Seq:        a.AttemptID,
+			}] = struct{}{}
 
 			// Try to fail the attempt if the route contains a dead
 			// channel.
@@ -1629,7 +1632,10 @@ func (r *ChannelRouter) failStaleAttempt(a paymentsdb.HTLCAttempt,
 	// First, check if we've already had a network result for this attempt.
 	// If no result is found, we'll check whether the reference link is
 	// still known to us.
-	ok, err := r.cfg.Payer.HasAttemptResult(a.AttemptID)
+	ok, err := r.cfg.Payer.HasAttemptResult(htlcswitch.AttemptKey{
+		Identifier: payHash,
+		Seq:        a.AttemptID,
+	})
 	if err != nil {
 		log.Errorf("Failed to fetch network result for attempt=%v",
 			a.AttemptID)
