@@ -2,6 +2,7 @@ package htlcswitch
 
 import (
 	"encoding/binary"
+	"errors"
 	"io"
 
 	"github.com/lightningnetwork/lnd/channeldb"
@@ -44,6 +45,13 @@ type PaymentCircuit struct {
 	// PaymentHash used as unique identifier of payment.
 	PaymentHash [32]byte
 
+	// PaymentIdentifier is the payment-level identifier the attempt
+	// belongs to: the payment hash for non-AMP payments and the SetID for
+	// AMP payments. It is folded into the switch result store key so that
+	// attempts from different payments cannot collide. Circuits written
+	// before this field existed default it to PaymentHash on decode.
+	PaymentIdentifier [32]byte
+
 	// IncomingAmount is the value of the HTLC from the incoming link.
 	IncomingAmount lnwire.MilliSatoshi
 
@@ -83,10 +91,11 @@ func newPaymentCircuit(hash *[32]byte, pkt *htlcPacket) *PaymentCircuit {
 			ChanID: pkt.incomingChanID,
 			HtlcID: pkt.incomingHTLCID,
 		},
-		PaymentHash:    *hash,
-		IncomingAmount: pkt.incomingAmount,
-		OutgoingAmount: pkt.amount,
-		ErrorEncrypter: pkt.obfuscator,
+		PaymentHash:       *hash,
+		PaymentIdentifier: *hash,
+		IncomingAmount:    pkt.incomingAmount,
+		OutgoingAmount:    pkt.amount,
+		ErrorEncrypter:    pkt.obfuscator,
 	}
 }
 
@@ -104,10 +113,11 @@ func makePaymentCircuit(hash *[32]byte, pkt *htlcPacket) PaymentCircuit {
 			ChanID: pkt.incomingChanID,
 			HtlcID: pkt.incomingHTLCID,
 		},
-		PaymentHash:    *hash,
-		IncomingAmount: pkt.incomingAmount,
-		OutgoingAmount: pkt.amount,
-		ErrorEncrypter: pkt.obfuscator,
+		PaymentHash:       *hash,
+		PaymentIdentifier: *hash,
+		IncomingAmount:    pkt.incomingAmount,
+		OutgoingAmount:    pkt.amount,
+		ErrorEncrypter:    pkt.obfuscator,
 	}
 }
 
@@ -148,12 +158,20 @@ func (c *PaymentCircuit) Encode(w io.Writer) error {
 		return err
 	}
 
-	// Skip encoding of error encrypter if this half add does not have one.
-	if encrypterType == hop.EncrypterTypeNone {
-		return nil
+	// Encode the error encrypter unless this half add does not have one.
+	if encrypterType != hop.EncrypterTypeNone {
+		if err := c.ErrorEncrypter.Encode(w); err != nil {
+			return err
+		}
 	}
 
-	return c.ErrorEncrypter.Encode(w)
+	// The payment identifier is appended as a trailing field. Circuits
+	// written before this field existed simply end after the error
+	// encrypter, so a decoder that reaches EOF here defaults the
+	// identifier to the payment hash.
+	_, err = w.Write(c.PaymentIdentifier[:])
+
+	return err
 }
 
 // Decode reads a PaymentCircuit from the provided io.Reader.
@@ -195,7 +213,6 @@ func (c *PaymentCircuit) Decode(r io.Reader) error {
 	case hop.EncrypterTypeNone:
 		// No encrypter was provided, such as when the payment is
 		// locally initiated.
-		return nil
 
 	case hop.EncrypterTypeSphinx:
 		// Sphinx encrypter was used as this is a forwarded HTLC.
@@ -215,7 +232,28 @@ func (c *PaymentCircuit) Decode(r io.Reader) error {
 		return UnknownEncrypterType(encrypterType)
 	}
 
-	return c.ErrorEncrypter.Decode(r)
+	if c.ErrorEncrypter != nil {
+		if err := c.ErrorEncrypter.Decode(r); err != nil {
+			return err
+		}
+	}
+
+	// Read the trailing payment identifier. Circuits written before this
+	// field existed end after the error encrypter, so treat EOF as a
+	// legacy record and default the identifier to the payment hash.
+	_, err = io.ReadFull(r, c.PaymentIdentifier[:])
+	switch {
+	case err == nil:
+		return nil
+
+	case errors.Is(err, io.EOF):
+		c.PaymentIdentifier = c.PaymentHash
+
+		return nil
+
+	default:
+		return err
+	}
 }
 
 // InKey returns the primary identifier for the circuit corresponding to the

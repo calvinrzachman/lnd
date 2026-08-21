@@ -232,6 +232,63 @@ func TestHalfCircuitSerialization(t *testing.T) {
 	}
 }
 
+// TestPaymentCircuitIdentifierRoundTrip asserts that a payment identifier that
+// differs from the payment hash, as happens for AMP payments, survives an
+// encode/decode round trip.
+func TestPaymentCircuitIdentifierRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	circuit := &htlcswitch.PaymentCircuit{
+		Incoming: htlcswitch.CircuitKey{
+			ChanID: lnwire.NewShortChanIDFromInt(1),
+			HtlcID: 1,
+		},
+		PaymentHash:       hash1,
+		PaymentIdentifier: hash2,
+		IncomingAmount:    1000,
+		OutgoingAmount:    900,
+	}
+
+	var b bytes.Buffer
+	require.NoError(t, circuit.Encode(&b))
+
+	var decoded htlcswitch.PaymentCircuit
+	require.NoError(t, decoded.Decode(bytes.NewReader(b.Bytes())))
+
+	require.Equal(t, hash2, decoded.PaymentIdentifier)
+	require.NotEqual(t, decoded.PaymentHash, decoded.PaymentIdentifier)
+}
+
+// TestPaymentCircuitDecodeLegacy asserts that a circuit encoded before the
+// payment identifier field existed decodes with the identifier defaulted to the
+// payment hash. A legacy record is exactly a current encoding without its
+// trailing identifier, so we reproduce one by dropping the last 32 bytes.
+func TestPaymentCircuitDecodeLegacy(t *testing.T) {
+	t.Parallel()
+
+	circuit := &htlcswitch.PaymentCircuit{
+		Incoming: htlcswitch.CircuitKey{
+			ChanID: lnwire.NewShortChanIDFromInt(1),
+			HtlcID: 1,
+		},
+		PaymentHash:       hash1,
+		PaymentIdentifier: hash2,
+		IncomingAmount:    1000,
+		OutgoingAmount:    900,
+	}
+
+	var b bytes.Buffer
+	require.NoError(t, circuit.Encode(&b))
+
+	legacy := b.Bytes()[:b.Len()-len(circuit.PaymentIdentifier)]
+
+	var decoded htlcswitch.PaymentCircuit
+	require.NoError(t, decoded.Decode(bytes.NewReader(legacy)))
+
+	require.Equal(t, hash1, decoded.PaymentIdentifier)
+	require.Equal(t, decoded.PaymentHash, decoded.PaymentIdentifier)
+}
+
 func TestCircuitMapPersistence(t *testing.T) {
 	t.Parallel()
 
