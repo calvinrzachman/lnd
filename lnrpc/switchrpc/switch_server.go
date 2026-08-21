@@ -300,7 +300,22 @@ func (s *Server) SendOnion(_ context.Context,
 	// This prevents the client from incorrectly concluding the original
 	// attempt failed, which would risk a duplicate attempt.
 	attemptID := req.AttemptId
-	initErr := s.cfg.AttemptStore.InitAttempt(attemptID)
+
+	// Derive the payment-level identifier for the composite attempt key.
+	// Clients that predate payment_identifier only set payment_hash, which
+	// equals the identifier for non-AMP payments.
+	idBytes := req.PaymentIdentifier
+	if len(idBytes) == 0 {
+		idBytes = req.PaymentHash
+	}
+	identifier, idErr := lntypes.MakeHash(idBytes)
+	if idErr != nil {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"invalid payment_identifier=%x: %v", idBytes, idErr)
+	}
+	key := htlcswitch.AttemptKey{Identifier: identifier, Seq: attemptID}
+
+	initErr := s.cfg.AttemptStore.InitAttempt(key)
 	if initErr != nil {
 		// A record for this attempt ID already exists. This indicates a
 		// client-side retry of a request that was already successfully
@@ -334,7 +349,7 @@ func (s *Server) SendOnion(_ context.Context,
 		log.Warnf("Validation failed for attempt %d: %v. Failing "+
 			"pending attempt.", req.AttemptId, validationErr)
 
-		s.failPendingAttempt(req.AttemptId, "validation failure")
+		s.failPendingAttempt(key, "validation failure")
 
 		// Return the original, more specific validation error to the
 		// client.
@@ -346,7 +361,9 @@ func (s *Server) SendOnion(_ context.Context,
 		htlcAdd.PaymentHash, chanID)
 
 	// With the attempt initialized, we now dispatch the HTLC.
-	dispatchErr := s.cfg.HtlcDispatcher.SendHTLC(chanID, attemptID, htlcAdd)
+	dispatchErr := s.cfg.HtlcDispatcher.SendHTLC(
+		chanID, attemptID, identifier, htlcAdd,
+	)
 	if dispatchErr != nil {
 		// If the dispatcher returns ErrDuplicateAdd, we treat it as an
 		// acknowledgment of a prior successful dispatch, not an error.
@@ -364,7 +381,7 @@ func (s *Server) SendOnion(_ context.Context,
 		log.Warnf("Dispatch failed for attempt %d: %v. Failing "+
 			"pending attempt.", req.AttemptId, dispatchErr)
 
-		s.failPendingAttempt(req.AttemptId, "dispatch failure")
+		s.failPendingAttempt(key, "dispatch failure")
 
 		// Translate the internal dispatch error into a gRPC status
 		// with rich details for the client.
@@ -377,21 +394,23 @@ func (s *Server) SendOnion(_ context.Context,
 
 // failPendingAttempt is a helper which transitions the given attempt from an
 // initialized (PENDING) state to a FAILED state in the persistent store.
-func (s *Server) failPendingAttempt(attemptID uint64, context string) {
+func (s *Server) failPendingAttempt(key htlcswitch.AttemptKey,
+	context string) {
+
 	// We use a generic failure reason, as this is an internal failure.
 	// The original, more specific error is returned to the client.
 	failReason := &lnwire.FailTemporaryNodeFailure{}
 
 	err := s.cfg.AttemptStore.FailPendingAttempt(
-		attemptID, htlcswitch.NewLinkError(failReason),
+		key, htlcswitch.NewLinkError(failReason),
 	)
 	if err != nil {
 		// If we fail to transition the attempt to a FAILED state
 		// here, the htlc switch's own recovery mechanisms will
 		// eventually clean up any orphaned PENDING attempts after a
 		// restart.
-		log.Errorf("Unable to fail pending attempt %d after %s: %v",
-			attemptID, context, err)
+		log.Errorf("Unable to fail pending attempt %v after %s: %v",
+			key, context, err)
 	}
 }
 
@@ -580,10 +599,17 @@ func (s *Server) findEligibleChannelID(pubKey *btcec.PublicKey,
 func (s *Server) TrackOnion(ctx context.Context,
 	req *TrackOnionRequest) (*TrackOnionResponse, error) {
 
-	hash, err := lntypes.MakeHash(req.PaymentHash)
+	// The result is keyed by the payment-level identifier. Clients that
+	// predate payment_identifier only set payment_hash, which equals the
+	// identifier for non-AMP payments.
+	idBytes := req.PaymentIdentifier
+	if len(idBytes) == 0 {
+		idBytes = req.PaymentHash
+	}
+	hash, err := lntypes.MakeHash(idBytes)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument,
-			"invalid payment_hash=%x: %v", req.PaymentHash, err)
+			"invalid payment_identifier=%x: %v", idBytes, err)
 	}
 
 	log.Debugf("Looking up status of onion attempt_id=%d for payment=%v",
@@ -859,20 +885,27 @@ func (s *Server) DeleteAttempts(_ context.Context,
 	req *DeleteAttemptsRequest) (*DeleteAttemptsResponse, error) {
 
 	log.Debugf("DeleteAttempts called for %d attempt(s)",
-		len(req.AttemptIds))
+		len(req.AttemptKeys))
 
-	// Deduplicate attempt IDs, preserving request order.
-	seen := make(map[uint64]struct{}, len(req.AttemptIds))
-	uniqueIDs := make([]uint64, 0, len(req.AttemptIds))
-	for _, id := range req.AttemptIds {
-		if _, ok := seen[id]; ok {
+	// Convert the requested keys, deduplicating while preserving request
+	// order.
+	seen := make(map[htlcswitch.AttemptKey]struct{}, len(req.AttemptKeys))
+	uniqueKeys := make([]htlcswitch.AttemptKey, 0, len(req.AttemptKeys))
+	for _, pk := range req.AttemptKeys {
+		key, err := protoToAttemptKey(pk)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument,
+				"invalid attempt key: %v", err)
+		}
+
+		if _, ok := seen[key]; ok {
 			continue
 		}
-		seen[id] = struct{}{}
-		uniqueIDs = append(uniqueIDs, id)
+		seen[key] = struct{}{}
+		uniqueKeys = append(uniqueKeys, key)
 	}
 
-	storeResults, err := s.cfg.AttemptStore.DeleteAttempts(uniqueIDs)
+	storeResults, err := s.cfg.AttemptStore.DeleteAttempts(uniqueKeys)
 	if err != nil {
 		log.Errorf("DeleteAttempts failed: %v", err)
 
@@ -882,17 +915,42 @@ func (s *Server) DeleteAttempts(_ context.Context,
 
 	// Convert the store-level results into proto results, preserving the
 	// request order.
-	results := make([]*AttemptDeletionResult, 0, len(uniqueIDs))
-	for _, id := range uniqueIDs {
-		protoStatus := deletionStatusToProto(storeResults[id])
+	results := make([]*AttemptDeletionResult, 0, len(uniqueKeys))
+	for _, key := range uniqueKeys {
+		protoStatus := deletionStatusToProto(storeResults[key])
 
 		results = append(results, &AttemptDeletionResult{
-			AttemptId: id,
-			Status:    protoStatus,
+			AttemptKey: attemptKeyToProto(key),
+			Status:     protoStatus,
 		})
 	}
 
 	return &DeleteAttemptsResponse{Results: results}, nil
+}
+
+// protoToAttemptKey converts a wire AttemptKey into the switch's composite
+// attempt key.
+func protoToAttemptKey(k *AttemptKey) (htlcswitch.AttemptKey, error) {
+	if k == nil {
+		return htlcswitch.AttemptKey{}, fmt.Errorf("nil attempt key")
+	}
+
+	id, err := lntypes.MakeHash(k.PaymentIdentifier)
+	if err != nil {
+		return htlcswitch.AttemptKey{}, fmt.Errorf("invalid "+
+			"payment_identifier=%x: %w", k.PaymentIdentifier, err)
+	}
+
+	return htlcswitch.AttemptKey{Identifier: id, Seq: k.AttemptId}, nil
+}
+
+// attemptKeyToProto converts the switch's composite attempt key into its wire
+// form.
+func attemptKeyToProto(key htlcswitch.AttemptKey) *AttemptKey {
+	return &AttemptKey{
+		PaymentIdentifier: key.Identifier[:],
+		AttemptId:         key.Seq,
+	}
 }
 
 // deletionStatusToProto converts an internal DeletionStatus to the

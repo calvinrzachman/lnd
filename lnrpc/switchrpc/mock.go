@@ -21,7 +21,8 @@ type mockPayer struct {
 
 // SendHTLC is a mock implementation of the SendHTLC method.
 func (m *mockPayer) SendHTLC(firstHop lnwire.ShortChannelID,
-	attemptID uint64, htlc *lnwire.UpdateAddHTLC) error {
+	attemptID uint64, identifier lntypes.Hash,
+	htlc *lnwire.UpdateAddHTLC) error {
 
 	return m.sendErr
 }
@@ -50,12 +51,12 @@ func (m *mockPayer) GetAttemptResult(attemptID uint64,
 }
 
 // GetAttemptResult is a mock implementation of the GetAttemptResult method.
-func (m *mockPayer) HasAttemptResult(attemptID uint64) (bool, error) {
+func (m *mockPayer) HasAttemptResult(key htlcswitch.AttemptKey) (bool, error) {
 	return true, nil
 }
 
 // CleanStore is a mock implementation of the CleanStore method.
-func (m *mockPayer) CleanStore(keepPids map[uint64]struct{}) error {
+func (m *mockPayer) CleanStore(keep map[htlcswitch.AttemptKey]struct{}) error {
 	return nil
 }
 
@@ -79,16 +80,16 @@ type mockAttemptStore struct {
 	initErr    error
 	failErr    error
 	deleteErr  error
-	deleteResp map[uint64]htlcswitch.DeletionStatus
+	deleteResp map[htlcswitch.AttemptKey]htlcswitch.DeletionStatus
 }
 
 // InitAttempt returns the mocked initErr.
-func (m *mockAttemptStore) InitAttempt(attemptID uint64) error {
+func (m *mockAttemptStore) InitAttempt(key htlcswitch.AttemptKey) error {
 	return m.initErr
 }
 
 // FailPendingAttempt returns the mocked failErr.
-func (m *mockAttemptStore) FailPendingAttempt(attemptID uint64,
+func (m *mockAttemptStore) FailPendingAttempt(key htlcswitch.AttemptKey,
 	reason *htlcswitch.LinkError) error {
 
 	return m.failErr
@@ -96,7 +97,8 @@ func (m *mockAttemptStore) FailPendingAttempt(attemptID uint64,
 
 // DeleteAttempts returns the mocked deleteResp and deleteErr.
 func (m *mockAttemptStore) DeleteAttempts(
-	attemptIDs []uint64) (map[uint64]htlcswitch.DeletionStatus, error) {
+	keys []htlcswitch.AttemptKey) (
+	map[htlcswitch.AttemptKey]htlcswitch.DeletionStatus, error) {
 
 	if m.deleteErr != nil {
 		return nil, m.deleteErr
