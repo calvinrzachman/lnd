@@ -143,6 +143,13 @@ message SendOnionRequest {
     // and debugging purposes.
     bytes payment_hash = 7;
 
+    // The payment-level identifier the attempt belongs to: the payment hash
+    // for non-AMP payments and the SetID for AMP payments. It is folded into
+    // the attempt key so that attempts from different payments cannot collide
+    // in the shared result store. Clients that leave this empty fall back to
+    // payment_hash, which is correct for non-AMP payments.
+    bytes payment_identifier = 11;
+
     // The optional blinding point to use when constructing the HTLC.
     // If set, this will be used to blind the next hop in the route.
     optional bytes blinding_point = 8;
@@ -227,6 +234,12 @@ message TrackOnionRequest {
     // Optional: The public keys of the nodes in the route, used with the
     // session_key to decrypt any failure message.
     repeated bytes hop_pubkeys = 4;
+
+    // The payment-level identifier the attempt belongs to: the payment hash
+    // for non-AMP payments and the SetID for AMP payments. Clients that leave
+    // this empty fall back to payment_hash, which is correct for non-AMP
+    // payments.
+    bytes payment_identifier = 5;
 }
 
 message TrackOnionResponse {
@@ -341,11 +354,22 @@ message BuildOnionResponse {
     repeated bytes hop_pubkeys = 3;
 }
 
+// AttemptKey uniquely identifies an HTLC attempt by pairing the payment-level
+// identifier with the attempt ID.
+message AttemptKey {
+    // The payment-level identifier: the payment hash for non-AMP payments and
+    // the SetID for AMP payments.
+    bytes payment_identifier = 1;
+
+    // The attempt ID uniquely identifying this payment attempt.
+    uint64 attempt_id = 2;
+}
+
 message DeleteAttemptsRequest {
-    // The attempt IDs to delete from the server's attempt store. Only terminal
+    // The attempt keys to delete from the server's attempt store. Only terminal
     // (settled or failed) attempts will be deleted. Pending (in-flight)
     // attempts are skipped and reported with a DELETION_PENDING status.
-    repeated uint64 attempt_ids = 1;
+    repeated AttemptKey attempt_keys = 1;
 }
 
 message DeleteAttemptsResponse {
@@ -356,8 +380,8 @@ message DeleteAttemptsResponse {
 
 // AttemptDeletionResult reports the outcome of deleting a single attempt.
 message AttemptDeletionResult {
-    // The attempt ID this result corresponds to.
-    uint64 attempt_id = 1;
+    // The attempt key this result corresponds to.
+    AttemptKey attempt_key = 1;
 
     // The outcome of the deletion for this attempt.
     AttemptDeletionStatus status = 2;

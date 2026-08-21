@@ -163,6 +163,12 @@ type SendOnionRequest struct {
 	// The payment hash associated with the HTLC. This is needed for tracking
 	// and debugging purposes.
 	PaymentHash []byte `protobuf:"bytes,7,opt,name=payment_hash,json=paymentHash,proto3" json:"payment_hash,omitempty"`
+	// The payment-level identifier the attempt belongs to: the payment hash
+	// for non-AMP payments and the SetID for AMP payments. It is folded into
+	// the attempt key so that attempts from different payments cannot collide
+	// in the shared result store. Clients that leave this empty fall back to
+	// payment_hash, which is correct for non-AMP payments.
+	PaymentIdentifier []byte `protobuf:"bytes,11,opt,name=payment_identifier,json=paymentIdentifier,proto3" json:"payment_identifier,omitempty"`
 	// The optional blinding point to use when constructing the HTLC.
 	// If set, this will be used to blind the next hop in the route.
 	BlindingPoint []byte `protobuf:"bytes,8,opt,name=blinding_point,json=blindingPoint,proto3,oneof" json:"blinding_point,omitempty"`
@@ -249,6 +255,13 @@ func (x *SendOnionRequest) GetTimelock() uint32 {
 func (x *SendOnionRequest) GetPaymentHash() []byte {
 	if x != nil {
 		return x.PaymentHash
+	}
+	return nil
+}
+
+func (x *SendOnionRequest) GetPaymentIdentifier() []byte {
+	if x != nil {
+		return x.PaymentIdentifier
 	}
 	return nil
 }
@@ -524,9 +537,14 @@ type TrackOnionRequest struct {
 	SessionKey []byte `protobuf:"bytes,3,opt,name=session_key,json=sessionKey,proto3,oneof" json:"session_key,omitempty"`
 	// Optional: The public keys of the nodes in the route, used with the
 	// session_key to decrypt any failure message.
-	HopPubkeys    [][]byte `protobuf:"bytes,4,rep,name=hop_pubkeys,json=hopPubkeys,proto3" json:"hop_pubkeys,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	HopPubkeys [][]byte `protobuf:"bytes,4,rep,name=hop_pubkeys,json=hopPubkeys,proto3" json:"hop_pubkeys,omitempty"`
+	// The payment-level identifier the attempt belongs to: the payment hash
+	// for non-AMP payments and the SetID for AMP payments. Clients that leave
+	// this empty fall back to payment_hash, which is correct for non-AMP
+	// payments.
+	PaymentIdentifier []byte `protobuf:"bytes,5,opt,name=payment_identifier,json=paymentIdentifier,proto3" json:"payment_identifier,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *TrackOnionRequest) Reset() {
@@ -583,6 +601,13 @@ func (x *TrackOnionRequest) GetSessionKey() []byte {
 func (x *TrackOnionRequest) GetHopPubkeys() [][]byte {
 	if x != nil {
 		return x.HopPubkeys
+	}
+	return nil
+}
+
+func (x *TrackOnionRequest) GetPaymentIdentifier() []byte {
+	if x != nil {
+		return x.PaymentIdentifier
 	}
 	return nil
 }
@@ -1153,19 +1178,76 @@ func (x *BuildOnionResponse) GetHopPubkeys() [][]byte {
 	return nil
 }
 
+// AttemptKey uniquely identifies an HTLC attempt by pairing the payment-level
+// identifier with the attempt ID.
+type AttemptKey struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The payment-level identifier: the payment hash for non-AMP payments and
+	// the SetID for AMP payments.
+	PaymentIdentifier []byte `protobuf:"bytes,1,opt,name=payment_identifier,json=paymentIdentifier,proto3" json:"payment_identifier,omitempty"`
+	// The attempt ID uniquely identifying this payment attempt.
+	AttemptId     uint64 `protobuf:"varint,2,opt,name=attempt_id,json=attemptId,proto3" json:"attempt_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AttemptKey) Reset() {
+	*x = AttemptKey{}
+	mi := &file_switchrpc_switch_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AttemptKey) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AttemptKey) ProtoMessage() {}
+
+func (x *AttemptKey) ProtoReflect() protoreflect.Message {
+	mi := &file_switchrpc_switch_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AttemptKey.ProtoReflect.Descriptor instead.
+func (*AttemptKey) Descriptor() ([]byte, []int) {
+	return file_switchrpc_switch_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *AttemptKey) GetPaymentIdentifier() []byte {
+	if x != nil {
+		return x.PaymentIdentifier
+	}
+	return nil
+}
+
+func (x *AttemptKey) GetAttemptId() uint64 {
+	if x != nil {
+		return x.AttemptId
+	}
+	return 0
+}
+
 type DeleteAttemptsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The attempt IDs to delete from the server's attempt store. Only terminal
+	// The attempt keys to delete from the server's attempt store. Only terminal
 	// (settled or failed) attempts will be deleted. Pending (in-flight)
 	// attempts are skipped and reported with a DELETION_PENDING status.
-	AttemptIds    []uint64 `protobuf:"varint,1,rep,packed,name=attempt_ids,json=attemptIds,proto3" json:"attempt_ids,omitempty"`
+	AttemptKeys   []*AttemptKey `protobuf:"bytes,1,rep,name=attempt_keys,json=attemptKeys,proto3" json:"attempt_keys,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *DeleteAttemptsRequest) Reset() {
 	*x = DeleteAttemptsRequest{}
-	mi := &file_switchrpc_switch_proto_msgTypes[14]
+	mi := &file_switchrpc_switch_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1177,7 +1259,7 @@ func (x *DeleteAttemptsRequest) String() string {
 func (*DeleteAttemptsRequest) ProtoMessage() {}
 
 func (x *DeleteAttemptsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_switchrpc_switch_proto_msgTypes[14]
+	mi := &file_switchrpc_switch_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1190,12 +1272,12 @@ func (x *DeleteAttemptsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteAttemptsRequest.ProtoReflect.Descriptor instead.
 func (*DeleteAttemptsRequest) Descriptor() ([]byte, []int) {
-	return file_switchrpc_switch_proto_rawDescGZIP(), []int{14}
+	return file_switchrpc_switch_proto_rawDescGZIP(), []int{15}
 }
 
-func (x *DeleteAttemptsRequest) GetAttemptIds() []uint64 {
+func (x *DeleteAttemptsRequest) GetAttemptKeys() []*AttemptKey {
 	if x != nil {
-		return x.AttemptIds
+		return x.AttemptKeys
 	}
 	return nil
 }
@@ -1211,7 +1293,7 @@ type DeleteAttemptsResponse struct {
 
 func (x *DeleteAttemptsResponse) Reset() {
 	*x = DeleteAttemptsResponse{}
-	mi := &file_switchrpc_switch_proto_msgTypes[15]
+	mi := &file_switchrpc_switch_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1223,7 +1305,7 @@ func (x *DeleteAttemptsResponse) String() string {
 func (*DeleteAttemptsResponse) ProtoMessage() {}
 
 func (x *DeleteAttemptsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_switchrpc_switch_proto_msgTypes[15]
+	mi := &file_switchrpc_switch_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1236,7 +1318,7 @@ func (x *DeleteAttemptsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteAttemptsResponse.ProtoReflect.Descriptor instead.
 func (*DeleteAttemptsResponse) Descriptor() ([]byte, []int) {
-	return file_switchrpc_switch_proto_rawDescGZIP(), []int{15}
+	return file_switchrpc_switch_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *DeleteAttemptsResponse) GetResults() []*AttemptDeletionResult {
@@ -1249,8 +1331,8 @@ func (x *DeleteAttemptsResponse) GetResults() []*AttemptDeletionResult {
 // AttemptDeletionResult reports the outcome of deleting a single attempt.
 type AttemptDeletionResult struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The attempt ID this result corresponds to.
-	AttemptId uint64 `protobuf:"varint,1,opt,name=attempt_id,json=attemptId,proto3" json:"attempt_id,omitempty"`
+	// The attempt key this result corresponds to.
+	AttemptKey *AttemptKey `protobuf:"bytes,1,opt,name=attempt_key,json=attemptKey,proto3" json:"attempt_key,omitempty"`
 	// The outcome of the deletion for this attempt.
 	Status        AttemptDeletionStatus `protobuf:"varint,2,opt,name=status,proto3,enum=switchrpc.AttemptDeletionStatus" json:"status,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1259,7 +1341,7 @@ type AttemptDeletionResult struct {
 
 func (x *AttemptDeletionResult) Reset() {
 	*x = AttemptDeletionResult{}
-	mi := &file_switchrpc_switch_proto_msgTypes[16]
+	mi := &file_switchrpc_switch_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1271,7 +1353,7 @@ func (x *AttemptDeletionResult) String() string {
 func (*AttemptDeletionResult) ProtoMessage() {}
 
 func (x *AttemptDeletionResult) ProtoReflect() protoreflect.Message {
-	mi := &file_switchrpc_switch_proto_msgTypes[16]
+	mi := &file_switchrpc_switch_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1284,14 +1366,14 @@ func (x *AttemptDeletionResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttemptDeletionResult.ProtoReflect.Descriptor instead.
 func (*AttemptDeletionResult) Descriptor() ([]byte, []int) {
-	return file_switchrpc_switch_proto_rawDescGZIP(), []int{16}
+	return file_switchrpc_switch_proto_rawDescGZIP(), []int{17}
 }
 
-func (x *AttemptDeletionResult) GetAttemptId() uint64 {
+func (x *AttemptDeletionResult) GetAttemptKey() *AttemptKey {
 	if x != nil {
-		return x.AttemptId
+		return x.AttemptKey
 	}
-	return 0
+	return nil
 }
 
 func (x *AttemptDeletionResult) GetStatus() AttemptDeletionStatus {
@@ -1309,7 +1391,7 @@ type DisableRemoteRouterRequest struct {
 
 func (x *DisableRemoteRouterRequest) Reset() {
 	*x = DisableRemoteRouterRequest{}
-	mi := &file_switchrpc_switch_proto_msgTypes[17]
+	mi := &file_switchrpc_switch_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1321,7 +1403,7 @@ func (x *DisableRemoteRouterRequest) String() string {
 func (*DisableRemoteRouterRequest) ProtoMessage() {}
 
 func (x *DisableRemoteRouterRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_switchrpc_switch_proto_msgTypes[17]
+	mi := &file_switchrpc_switch_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1334,7 +1416,7 @@ func (x *DisableRemoteRouterRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DisableRemoteRouterRequest.ProtoReflect.Descriptor instead.
 func (*DisableRemoteRouterRequest) Descriptor() ([]byte, []int) {
-	return file_switchrpc_switch_proto_rawDescGZIP(), []int{17}
+	return file_switchrpc_switch_proto_rawDescGZIP(), []int{18}
 }
 
 type DisableRemoteRouterResponse struct {
@@ -1345,7 +1427,7 @@ type DisableRemoteRouterResponse struct {
 
 func (x *DisableRemoteRouterResponse) Reset() {
 	*x = DisableRemoteRouterResponse{}
-	mi := &file_switchrpc_switch_proto_msgTypes[18]
+	mi := &file_switchrpc_switch_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1357,7 +1439,7 @@ func (x *DisableRemoteRouterResponse) String() string {
 func (*DisableRemoteRouterResponse) ProtoMessage() {}
 
 func (x *DisableRemoteRouterResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_switchrpc_switch_proto_msgTypes[18]
+	mi := &file_switchrpc_switch_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1370,14 +1452,14 @@ func (x *DisableRemoteRouterResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DisableRemoteRouterResponse.ProtoReflect.Descriptor instead.
 func (*DisableRemoteRouterResponse) Descriptor() ([]byte, []int) {
-	return file_switchrpc_switch_proto_rawDescGZIP(), []int{18}
+	return file_switchrpc_switch_proto_rawDescGZIP(), []int{19}
 }
 
 var File_switchrpc_switch_proto protoreflect.FileDescriptor
 
 const file_switchrpc_switch_proto_rawDesc = "" +
 	"\n" +
-	"\x16switchrpc/switch.proto\x12\tswitchrpc\x1a\x0flightning.proto\"\x87\x04\n" +
+	"\x16switchrpc/switch.proto\x12\tswitchrpc\x1a\x0flightning.proto\"\xb6\x04\n" +
 	"\x10SendOnionRequest\x12\x1d\n" +
 	"\n" +
 	"onion_blob\x18\x01 \x01(\fR\tonionBlob\x12\x1d\n" +
@@ -1387,7 +1469,8 @@ const file_switchrpc_switch_proto_rawDesc = "" +
 	"\x11first_hop_chan_id\x18\x04 \x01(\x04R\x0efirstHopChanId\x12\x16\n" +
 	"\x06amount\x18\x05 \x01(\x03R\x06amount\x12\x1a\n" +
 	"\btimelock\x18\x06 \x01(\rR\btimelock\x12!\n" +
-	"\fpayment_hash\x18\a \x01(\fR\vpaymentHash\x12*\n" +
+	"\fpayment_hash\x18\a \x01(\fR\vpaymentHash\x12-\n" +
+	"\x12payment_identifier\x18\v \x01(\fR\x11paymentIdentifier\x12*\n" +
 	"\x0eblinding_point\x18\b \x01(\fH\x00R\rblindingPoint\x88\x01\x01\x12U\n" +
 	"\x0ecustom_records\x18\t \x03(\v2..switchrpc.SendOnionRequest.CustomRecordsEntryR\rcustomRecords\x12\"\n" +
 	"\n" +
@@ -1407,7 +1490,7 @@ const file_switchrpc_switch_proto_rawDesc = "" +
 	"\x0fDefiniteFailure\x12<\n" +
 	"\rlocal_failure\x18\x01 \x01(\v2\x17.switchrpc.LocalFailureR\flocalFailure\"M\n" +
 	"\x11IndefiniteFailure\x128\n" +
-	"\x06reason\x18\x01 \x01(\x0e2 .switchrpc.IndefiniteFailureCodeR\x06reason\"\xac\x01\n" +
+	"\x06reason\x18\x01 \x01(\x0e2 .switchrpc.IndefiniteFailureCodeR\x06reason\"\xdb\x01\n" +
 	"\x11TrackOnionRequest\x12!\n" +
 	"\fpayment_hash\x18\x01 \x01(\fR\vpaymentHash\x12\x1d\n" +
 	"\n" +
@@ -1415,7 +1498,8 @@ const file_switchrpc_switch_proto_rawDesc = "" +
 	"\vsession_key\x18\x03 \x01(\fH\x00R\n" +
 	"sessionKey\x88\x01\x01\x12\x1f\n" +
 	"\vhop_pubkeys\x18\x04 \x03(\fR\n" +
-	"hopPubkeysB\x0e\n" +
+	"hopPubkeys\x12-\n" +
+	"\x12payment_identifier\x18\x05 \x01(\fR\x11paymentIdentifierB\x0e\n" +
 	"\f_session_key\"\x82\x01\n" +
 	"\x12TrackOnionResponse\x12\x1c\n" +
 	"\bpreimage\x18\x01 \x01(\fH\x00R\bpreimage\x12D\n" +
@@ -1448,15 +1532,19 @@ const file_switchrpc_switch_proto_rawDesc = "" +
 	"\vsession_key\x18\x02 \x01(\fR\n" +
 	"sessionKey\x12\x1f\n" +
 	"\vhop_pubkeys\x18\x03 \x03(\fR\n" +
-	"hopPubkeys\"8\n" +
-	"\x15DeleteAttemptsRequest\x12\x1f\n" +
-	"\vattempt_ids\x18\x01 \x03(\x04R\n" +
-	"attemptIds\"T\n" +
-	"\x16DeleteAttemptsResponse\x12:\n" +
-	"\aresults\x18\x01 \x03(\v2 .switchrpc.AttemptDeletionResultR\aresults\"p\n" +
-	"\x15AttemptDeletionResult\x12\x1d\n" +
+	"hopPubkeys\"Z\n" +
 	"\n" +
-	"attempt_id\x18\x01 \x01(\x04R\tattemptId\x128\n" +
+	"AttemptKey\x12-\n" +
+	"\x12payment_identifier\x18\x01 \x01(\fR\x11paymentIdentifier\x12\x1d\n" +
+	"\n" +
+	"attempt_id\x18\x02 \x01(\x04R\tattemptId\"Q\n" +
+	"\x15DeleteAttemptsRequest\x128\n" +
+	"\fattempt_keys\x18\x01 \x03(\v2\x15.switchrpc.AttemptKeyR\vattemptKeys\"T\n" +
+	"\x16DeleteAttemptsResponse\x12:\n" +
+	"\aresults\x18\x01 \x03(\v2 .switchrpc.AttemptDeletionResultR\aresults\"\x89\x01\n" +
+	"\x15AttemptDeletionResult\x126\n" +
+	"\vattempt_key\x18\x01 \x01(\v2\x15.switchrpc.AttemptKeyR\n" +
+	"attemptKey\x128\n" +
 	"\x06status\x18\x02 \x01(\x0e2 .switchrpc.AttemptDeletionStatusR\x06status\"\x1c\n" +
 	"\x1aDisableRemoteRouterRequest\"\x1d\n" +
 	"\x1bDisableRemoteRouterResponse*U\n" +
@@ -1491,7 +1579,7 @@ func file_switchrpc_switch_proto_rawDescGZIP() []byte {
 }
 
 var file_switchrpc_switch_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_switchrpc_switch_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_switchrpc_switch_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_switchrpc_switch_proto_goTypes = []any{
 	(IndefiniteFailureCode)(0),          // 0: switchrpc.IndefiniteFailureCode
 	(AttemptDeletionStatus)(0),          // 1: switchrpc.AttemptDeletionStatus
@@ -1509,16 +1597,17 @@ var file_switchrpc_switch_proto_goTypes = []any{
 	(*UnreadableFailure)(nil),           // 13: switchrpc.UnreadableFailure
 	(*BuildOnionRequest)(nil),           // 14: switchrpc.BuildOnionRequest
 	(*BuildOnionResponse)(nil),          // 15: switchrpc.BuildOnionResponse
-	(*DeleteAttemptsRequest)(nil),       // 16: switchrpc.DeleteAttemptsRequest
-	(*DeleteAttemptsResponse)(nil),      // 17: switchrpc.DeleteAttemptsResponse
-	(*AttemptDeletionResult)(nil),       // 18: switchrpc.AttemptDeletionResult
-	(*DisableRemoteRouterRequest)(nil),  // 19: switchrpc.DisableRemoteRouterRequest
-	(*DisableRemoteRouterResponse)(nil), // 20: switchrpc.DisableRemoteRouterResponse
-	nil,                                 // 21: switchrpc.SendOnionRequest.CustomRecordsEntry
-	(*lnrpc.Route)(nil),                 // 22: lnrpc.Route
+	(*AttemptKey)(nil),                  // 16: switchrpc.AttemptKey
+	(*DeleteAttemptsRequest)(nil),       // 17: switchrpc.DeleteAttemptsRequest
+	(*DeleteAttemptsResponse)(nil),      // 18: switchrpc.DeleteAttemptsResponse
+	(*AttemptDeletionResult)(nil),       // 19: switchrpc.AttemptDeletionResult
+	(*DisableRemoteRouterRequest)(nil),  // 20: switchrpc.DisableRemoteRouterRequest
+	(*DisableRemoteRouterResponse)(nil), // 21: switchrpc.DisableRemoteRouterResponse
+	nil,                                 // 22: switchrpc.SendOnionRequest.CustomRecordsEntry
+	(*lnrpc.Route)(nil),                 // 23: lnrpc.Route
 }
 var file_switchrpc_switch_proto_depIdxs = []int32{
-	21, // 0: switchrpc.SendOnionRequest.custom_records:type_name -> switchrpc.SendOnionRequest.CustomRecordsEntry
+	22, // 0: switchrpc.SendOnionRequest.custom_records:type_name -> switchrpc.SendOnionRequest.CustomRecordsEntry
 	5,  // 1: switchrpc.SendOnionFailureDetails.definite_failure:type_name -> switchrpc.DefiniteFailure
 	6,  // 2: switchrpc.SendOnionFailureDetails.indefinite_failure:type_name -> switchrpc.IndefiniteFailure
 	11, // 3: switchrpc.DefiniteFailure.local_failure:type_name -> switchrpc.LocalFailure
@@ -1528,24 +1617,26 @@ var file_switchrpc_switch_proto_depIdxs = []int32{
 	10, // 7: switchrpc.FailureDetails.forwarding_failure:type_name -> switchrpc.ForwardingFailure
 	13, // 8: switchrpc.FailureDetails.unreadable_failure:type_name -> switchrpc.UnreadableFailure
 	12, // 9: switchrpc.FailureDetails.switch_error:type_name -> switchrpc.SwitchError
-	22, // 10: switchrpc.BuildOnionRequest.route:type_name -> lnrpc.Route
-	18, // 11: switchrpc.DeleteAttemptsResponse.results:type_name -> switchrpc.AttemptDeletionResult
-	1,  // 12: switchrpc.AttemptDeletionResult.status:type_name -> switchrpc.AttemptDeletionStatus
-	2,  // 13: switchrpc.Switch.SendOnion:input_type -> switchrpc.SendOnionRequest
-	7,  // 14: switchrpc.Switch.TrackOnion:input_type -> switchrpc.TrackOnionRequest
-	14, // 15: switchrpc.Switch.BuildOnion:input_type -> switchrpc.BuildOnionRequest
-	16, // 16: switchrpc.Switch.DeleteAttempts:input_type -> switchrpc.DeleteAttemptsRequest
-	19, // 17: switchrpc.Switch.DisableRemoteRouter:input_type -> switchrpc.DisableRemoteRouterRequest
-	3,  // 18: switchrpc.Switch.SendOnion:output_type -> switchrpc.SendOnionResponse
-	8,  // 19: switchrpc.Switch.TrackOnion:output_type -> switchrpc.TrackOnionResponse
-	15, // 20: switchrpc.Switch.BuildOnion:output_type -> switchrpc.BuildOnionResponse
-	17, // 21: switchrpc.Switch.DeleteAttempts:output_type -> switchrpc.DeleteAttemptsResponse
-	20, // 22: switchrpc.Switch.DisableRemoteRouter:output_type -> switchrpc.DisableRemoteRouterResponse
-	18, // [18:23] is the sub-list for method output_type
-	13, // [13:18] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	23, // 10: switchrpc.BuildOnionRequest.route:type_name -> lnrpc.Route
+	16, // 11: switchrpc.DeleteAttemptsRequest.attempt_keys:type_name -> switchrpc.AttemptKey
+	19, // 12: switchrpc.DeleteAttemptsResponse.results:type_name -> switchrpc.AttemptDeletionResult
+	16, // 13: switchrpc.AttemptDeletionResult.attempt_key:type_name -> switchrpc.AttemptKey
+	1,  // 14: switchrpc.AttemptDeletionResult.status:type_name -> switchrpc.AttemptDeletionStatus
+	2,  // 15: switchrpc.Switch.SendOnion:input_type -> switchrpc.SendOnionRequest
+	7,  // 16: switchrpc.Switch.TrackOnion:input_type -> switchrpc.TrackOnionRequest
+	14, // 17: switchrpc.Switch.BuildOnion:input_type -> switchrpc.BuildOnionRequest
+	17, // 18: switchrpc.Switch.DeleteAttempts:input_type -> switchrpc.DeleteAttemptsRequest
+	20, // 19: switchrpc.Switch.DisableRemoteRouter:input_type -> switchrpc.DisableRemoteRouterRequest
+	3,  // 20: switchrpc.Switch.SendOnion:output_type -> switchrpc.SendOnionResponse
+	8,  // 21: switchrpc.Switch.TrackOnion:output_type -> switchrpc.TrackOnionResponse
+	15, // 22: switchrpc.Switch.BuildOnion:output_type -> switchrpc.BuildOnionResponse
+	18, // 23: switchrpc.Switch.DeleteAttempts:output_type -> switchrpc.DeleteAttemptsResponse
+	21, // 24: switchrpc.Switch.DisableRemoteRouter:output_type -> switchrpc.DisableRemoteRouterResponse
+	20, // [20:25] is the sub-list for method output_type
+	15, // [15:20] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_switchrpc_switch_proto_init() }
@@ -1577,7 +1668,7 @@ func file_switchrpc_switch_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_switchrpc_switch_proto_rawDesc), len(file_switchrpc_switch_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   20,
+			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
