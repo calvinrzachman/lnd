@@ -142,9 +142,12 @@ type SendOnionRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The raw onion packet to be sent across the network.
 	OnionBlob []byte `protobuf:"bytes,1,opt,name=onion_blob,json=onionBlob,proto3" json:"onion_blob,omitempty"`
-	// The attempt ID uniquely identifying this payment attempt. The caller can
-	// expect to track results for the payment via this attempt ID.
-	AttemptId uint64 `protobuf:"varint,2,opt,name=attempt_id,json=attemptId,proto3" json:"attempt_id,omitempty"`
+	// The attempt key uniquely identifying this payment attempt: the
+	// payment-level identifier (the payment hash for non-AMP payments, the
+	// SetID for AMP) paired with the attempt ID. Folding the identifier into
+	// the key keeps attempts from different payments in disjoint subspaces of
+	// the shared result store.
+	AttemptKey *AttemptKey `protobuf:"bytes,2,opt,name=attempt_key,json=attemptKey,proto3" json:"attempt_key,omitempty"`
 	// The first hop's public key where the onion will be sent.
 	// The first hop must be specified either by channel ID or public key.
 	FirstHopPubkey []byte `protobuf:"bytes,3,opt,name=first_hop_pubkey,json=firstHopPubkey,proto3" json:"first_hop_pubkey,omitempty"`
@@ -163,12 +166,6 @@ type SendOnionRequest struct {
 	// The payment hash associated with the HTLC. This is needed for tracking
 	// and debugging purposes.
 	PaymentHash []byte `protobuf:"bytes,7,opt,name=payment_hash,json=paymentHash,proto3" json:"payment_hash,omitempty"`
-	// The payment-level identifier the attempt belongs to: the payment hash
-	// for non-AMP payments and the SetID for AMP payments. It is folded into
-	// the attempt key so that attempts from different payments cannot collide
-	// in the shared result store. Clients that leave this empty fall back to
-	// payment_hash, which is correct for non-AMP payments.
-	PaymentIdentifier []byte `protobuf:"bytes,11,opt,name=payment_identifier,json=paymentIdentifier,proto3" json:"payment_identifier,omitempty"`
 	// The optional blinding point to use when constructing the HTLC.
 	// If set, this will be used to blind the next hop in the route.
 	BlindingPoint []byte `protobuf:"bytes,8,opt,name=blinding_point,json=blindingPoint,proto3,oneof" json:"blinding_point,omitempty"`
@@ -217,11 +214,11 @@ func (x *SendOnionRequest) GetOnionBlob() []byte {
 	return nil
 }
 
-func (x *SendOnionRequest) GetAttemptId() uint64 {
+func (x *SendOnionRequest) GetAttemptKey() *AttemptKey {
 	if x != nil {
-		return x.AttemptId
+		return x.AttemptKey
 	}
-	return 0
+	return nil
 }
 
 func (x *SendOnionRequest) GetFirstHopPubkey() []byte {
@@ -255,13 +252,6 @@ func (x *SendOnionRequest) GetTimelock() uint32 {
 func (x *SendOnionRequest) GetPaymentHash() []byte {
 	if x != nil {
 		return x.PaymentHash
-	}
-	return nil
-}
-
-func (x *SendOnionRequest) GetPaymentIdentifier() []byte {
-	if x != nil {
-		return x.PaymentIdentifier
 	}
 	return nil
 }
@@ -529,22 +519,18 @@ type TrackOnionRequest struct {
 	// The payment hash associated with the HTLC. This is needed for tracking
 	// and debugging purposes.
 	PaymentHash []byte `protobuf:"bytes,1,opt,name=payment_hash,json=paymentHash,proto3" json:"payment_hash,omitempty"`
-	// The attempt ID uniquely identifying this payment attempt. The caller can
-	// expect to track results for the payment via this attempt ID.
-	AttemptId uint64 `protobuf:"varint,2,opt,name=attempt_id,json=attemptId,proto3" json:"attempt_id,omitempty"`
+	// The attempt key uniquely identifying this payment attempt: the
+	// payment-level identifier (the payment hash for non-AMP payments, the
+	// SetID for AMP) paired with the attempt ID.
+	AttemptKey *AttemptKey `protobuf:"bytes,2,opt,name=attempt_key,json=attemptKey,proto3" json:"attempt_key,omitempty"`
 	// Optional: The session key that was used to construct the onion packet.
 	// This is required by the server to decrypt any failure message.
 	SessionKey []byte `protobuf:"bytes,3,opt,name=session_key,json=sessionKey,proto3,oneof" json:"session_key,omitempty"`
 	// Optional: The public keys of the nodes in the route, used with the
 	// session_key to decrypt any failure message.
-	HopPubkeys [][]byte `protobuf:"bytes,4,rep,name=hop_pubkeys,json=hopPubkeys,proto3" json:"hop_pubkeys,omitempty"`
-	// The payment-level identifier the attempt belongs to: the payment hash
-	// for non-AMP payments and the SetID for AMP payments. Clients that leave
-	// this empty fall back to payment_hash, which is correct for non-AMP
-	// payments.
-	PaymentIdentifier []byte `protobuf:"bytes,5,opt,name=payment_identifier,json=paymentIdentifier,proto3" json:"payment_identifier,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	HopPubkeys    [][]byte `protobuf:"bytes,4,rep,name=hop_pubkeys,json=hopPubkeys,proto3" json:"hop_pubkeys,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *TrackOnionRequest) Reset() {
@@ -584,11 +570,11 @@ func (x *TrackOnionRequest) GetPaymentHash() []byte {
 	return nil
 }
 
-func (x *TrackOnionRequest) GetAttemptId() uint64 {
+func (x *TrackOnionRequest) GetAttemptKey() *AttemptKey {
 	if x != nil {
-		return x.AttemptId
+		return x.AttemptKey
 	}
-	return 0
+	return nil
 }
 
 func (x *TrackOnionRequest) GetSessionKey() []byte {
@@ -601,13 +587,6 @@ func (x *TrackOnionRequest) GetSessionKey() []byte {
 func (x *TrackOnionRequest) GetHopPubkeys() [][]byte {
 	if x != nil {
 		return x.HopPubkeys
-	}
-	return nil
-}
-
-func (x *TrackOnionRequest) GetPaymentIdentifier() []byte {
-	if x != nil {
-		return x.PaymentIdentifier
 	}
 	return nil
 }
@@ -1459,18 +1438,17 @@ var File_switchrpc_switch_proto protoreflect.FileDescriptor
 
 const file_switchrpc_switch_proto_rawDesc = "" +
 	"\n" +
-	"\x16switchrpc/switch.proto\x12\tswitchrpc\x1a\x0flightning.proto\"\xb6\x04\n" +
+	"\x16switchrpc/switch.proto\x12\tswitchrpc\x1a\x0flightning.proto\"\xa0\x04\n" +
 	"\x10SendOnionRequest\x12\x1d\n" +
 	"\n" +
-	"onion_blob\x18\x01 \x01(\fR\tonionBlob\x12\x1d\n" +
-	"\n" +
-	"attempt_id\x18\x02 \x01(\x04R\tattemptId\x12(\n" +
+	"onion_blob\x18\x01 \x01(\fR\tonionBlob\x126\n" +
+	"\vattempt_key\x18\x02 \x01(\v2\x15.switchrpc.AttemptKeyR\n" +
+	"attemptKey\x12(\n" +
 	"\x10first_hop_pubkey\x18\x03 \x01(\fR\x0efirstHopPubkey\x12)\n" +
 	"\x11first_hop_chan_id\x18\x04 \x01(\x04R\x0efirstHopChanId\x12\x16\n" +
 	"\x06amount\x18\x05 \x01(\x03R\x06amount\x12\x1a\n" +
 	"\btimelock\x18\x06 \x01(\rR\btimelock\x12!\n" +
-	"\fpayment_hash\x18\a \x01(\fR\vpaymentHash\x12-\n" +
-	"\x12payment_identifier\x18\v \x01(\fR\x11paymentIdentifier\x12*\n" +
+	"\fpayment_hash\x18\a \x01(\fR\vpaymentHash\x12*\n" +
 	"\x0eblinding_point\x18\b \x01(\fH\x00R\rblindingPoint\x88\x01\x01\x12U\n" +
 	"\x0ecustom_records\x18\t \x03(\v2..switchrpc.SendOnionRequest.CustomRecordsEntryR\rcustomRecords\x12\"\n" +
 	"\n" +
@@ -1490,16 +1468,15 @@ const file_switchrpc_switch_proto_rawDesc = "" +
 	"\x0fDefiniteFailure\x12<\n" +
 	"\rlocal_failure\x18\x01 \x01(\v2\x17.switchrpc.LocalFailureR\flocalFailure\"M\n" +
 	"\x11IndefiniteFailure\x128\n" +
-	"\x06reason\x18\x01 \x01(\x0e2 .switchrpc.IndefiniteFailureCodeR\x06reason\"\xdb\x01\n" +
+	"\x06reason\x18\x01 \x01(\x0e2 .switchrpc.IndefiniteFailureCodeR\x06reason\"\xc5\x01\n" +
 	"\x11TrackOnionRequest\x12!\n" +
-	"\fpayment_hash\x18\x01 \x01(\fR\vpaymentHash\x12\x1d\n" +
-	"\n" +
-	"attempt_id\x18\x02 \x01(\x04R\tattemptId\x12$\n" +
+	"\fpayment_hash\x18\x01 \x01(\fR\vpaymentHash\x126\n" +
+	"\vattempt_key\x18\x02 \x01(\v2\x15.switchrpc.AttemptKeyR\n" +
+	"attemptKey\x12$\n" +
 	"\vsession_key\x18\x03 \x01(\fH\x00R\n" +
 	"sessionKey\x88\x01\x01\x12\x1f\n" +
 	"\vhop_pubkeys\x18\x04 \x03(\fR\n" +
-	"hopPubkeys\x12-\n" +
-	"\x12payment_identifier\x18\x05 \x01(\fR\x11paymentIdentifierB\x0e\n" +
+	"hopPubkeysB\x0e\n" +
 	"\f_session_key\"\x82\x01\n" +
 	"\x12TrackOnionResponse\x12\x1c\n" +
 	"\bpreimage\x18\x01 \x01(\fH\x00R\bpreimage\x12D\n" +
@@ -1607,36 +1584,38 @@ var file_switchrpc_switch_proto_goTypes = []any{
 	(*lnrpc.Route)(nil),                 // 23: lnrpc.Route
 }
 var file_switchrpc_switch_proto_depIdxs = []int32{
-	22, // 0: switchrpc.SendOnionRequest.custom_records:type_name -> switchrpc.SendOnionRequest.CustomRecordsEntry
-	5,  // 1: switchrpc.SendOnionFailureDetails.definite_failure:type_name -> switchrpc.DefiniteFailure
-	6,  // 2: switchrpc.SendOnionFailureDetails.indefinite_failure:type_name -> switchrpc.IndefiniteFailure
-	11, // 3: switchrpc.DefiniteFailure.local_failure:type_name -> switchrpc.LocalFailure
-	0,  // 4: switchrpc.IndefiniteFailure.reason:type_name -> switchrpc.IndefiniteFailureCode
-	9,  // 5: switchrpc.TrackOnionResponse.failure_details:type_name -> switchrpc.FailureDetails
-	11, // 6: switchrpc.FailureDetails.local_failure:type_name -> switchrpc.LocalFailure
-	10, // 7: switchrpc.FailureDetails.forwarding_failure:type_name -> switchrpc.ForwardingFailure
-	13, // 8: switchrpc.FailureDetails.unreadable_failure:type_name -> switchrpc.UnreadableFailure
-	12, // 9: switchrpc.FailureDetails.switch_error:type_name -> switchrpc.SwitchError
-	23, // 10: switchrpc.BuildOnionRequest.route:type_name -> lnrpc.Route
-	16, // 11: switchrpc.DeleteAttemptsRequest.attempt_keys:type_name -> switchrpc.AttemptKey
-	19, // 12: switchrpc.DeleteAttemptsResponse.results:type_name -> switchrpc.AttemptDeletionResult
-	16, // 13: switchrpc.AttemptDeletionResult.attempt_key:type_name -> switchrpc.AttemptKey
-	1,  // 14: switchrpc.AttemptDeletionResult.status:type_name -> switchrpc.AttemptDeletionStatus
-	2,  // 15: switchrpc.Switch.SendOnion:input_type -> switchrpc.SendOnionRequest
-	7,  // 16: switchrpc.Switch.TrackOnion:input_type -> switchrpc.TrackOnionRequest
-	14, // 17: switchrpc.Switch.BuildOnion:input_type -> switchrpc.BuildOnionRequest
-	17, // 18: switchrpc.Switch.DeleteAttempts:input_type -> switchrpc.DeleteAttemptsRequest
-	20, // 19: switchrpc.Switch.DisableRemoteRouter:input_type -> switchrpc.DisableRemoteRouterRequest
-	3,  // 20: switchrpc.Switch.SendOnion:output_type -> switchrpc.SendOnionResponse
-	8,  // 21: switchrpc.Switch.TrackOnion:output_type -> switchrpc.TrackOnionResponse
-	15, // 22: switchrpc.Switch.BuildOnion:output_type -> switchrpc.BuildOnionResponse
-	18, // 23: switchrpc.Switch.DeleteAttempts:output_type -> switchrpc.DeleteAttemptsResponse
-	21, // 24: switchrpc.Switch.DisableRemoteRouter:output_type -> switchrpc.DisableRemoteRouterResponse
-	20, // [20:25] is the sub-list for method output_type
-	15, // [15:20] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	16, // 0: switchrpc.SendOnionRequest.attempt_key:type_name -> switchrpc.AttemptKey
+	22, // 1: switchrpc.SendOnionRequest.custom_records:type_name -> switchrpc.SendOnionRequest.CustomRecordsEntry
+	5,  // 2: switchrpc.SendOnionFailureDetails.definite_failure:type_name -> switchrpc.DefiniteFailure
+	6,  // 3: switchrpc.SendOnionFailureDetails.indefinite_failure:type_name -> switchrpc.IndefiniteFailure
+	11, // 4: switchrpc.DefiniteFailure.local_failure:type_name -> switchrpc.LocalFailure
+	0,  // 5: switchrpc.IndefiniteFailure.reason:type_name -> switchrpc.IndefiniteFailureCode
+	16, // 6: switchrpc.TrackOnionRequest.attempt_key:type_name -> switchrpc.AttemptKey
+	9,  // 7: switchrpc.TrackOnionResponse.failure_details:type_name -> switchrpc.FailureDetails
+	11, // 8: switchrpc.FailureDetails.local_failure:type_name -> switchrpc.LocalFailure
+	10, // 9: switchrpc.FailureDetails.forwarding_failure:type_name -> switchrpc.ForwardingFailure
+	13, // 10: switchrpc.FailureDetails.unreadable_failure:type_name -> switchrpc.UnreadableFailure
+	12, // 11: switchrpc.FailureDetails.switch_error:type_name -> switchrpc.SwitchError
+	23, // 12: switchrpc.BuildOnionRequest.route:type_name -> lnrpc.Route
+	16, // 13: switchrpc.DeleteAttemptsRequest.attempt_keys:type_name -> switchrpc.AttemptKey
+	19, // 14: switchrpc.DeleteAttemptsResponse.results:type_name -> switchrpc.AttemptDeletionResult
+	16, // 15: switchrpc.AttemptDeletionResult.attempt_key:type_name -> switchrpc.AttemptKey
+	1,  // 16: switchrpc.AttemptDeletionResult.status:type_name -> switchrpc.AttemptDeletionStatus
+	2,  // 17: switchrpc.Switch.SendOnion:input_type -> switchrpc.SendOnionRequest
+	7,  // 18: switchrpc.Switch.TrackOnion:input_type -> switchrpc.TrackOnionRequest
+	14, // 19: switchrpc.Switch.BuildOnion:input_type -> switchrpc.BuildOnionRequest
+	17, // 20: switchrpc.Switch.DeleteAttempts:input_type -> switchrpc.DeleteAttemptsRequest
+	20, // 21: switchrpc.Switch.DisableRemoteRouter:input_type -> switchrpc.DisableRemoteRouterRequest
+	3,  // 22: switchrpc.Switch.SendOnion:output_type -> switchrpc.SendOnionResponse
+	8,  // 23: switchrpc.Switch.TrackOnion:output_type -> switchrpc.TrackOnionResponse
+	15, // 24: switchrpc.Switch.BuildOnion:output_type -> switchrpc.BuildOnionResponse
+	18, // 25: switchrpc.Switch.DeleteAttempts:output_type -> switchrpc.DeleteAttemptsResponse
+	21, // 26: switchrpc.Switch.DisableRemoteRouter:output_type -> switchrpc.DisableRemoteRouterResponse
+	22, // [22:27] is the sub-list for method output_type
+	17, // [17:22] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_switchrpc_switch_proto_init() }

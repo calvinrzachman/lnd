@@ -116,9 +116,12 @@ message SendOnionRequest {
     // The raw onion packet to be sent across the network.
     bytes onion_blob = 1;
 
-    // The attempt ID uniquely identifying this payment attempt. The caller can
-    // expect to track results for the payment via this attempt ID.
-    uint64 attempt_id = 2;
+    // The attempt key uniquely identifying this payment attempt: the
+    // payment-level identifier (the payment hash for non-AMP payments, the
+    // SetID for AMP) paired with the attempt ID. Folding the identifier into
+    // the key keeps attempts from different payments in disjoint subspaces of
+    // the shared result store.
+    AttemptKey attempt_key = 2;
 
     // The first hop's public key where the onion will be sent.
     // The first hop must be specified either by channel ID or public key.
@@ -142,13 +145,6 @@ message SendOnionRequest {
     // The payment hash associated with the HTLC. This is needed for tracking
     // and debugging purposes.
     bytes payment_hash = 7;
-
-    // The payment-level identifier the attempt belongs to: the payment hash
-    // for non-AMP payments and the SetID for AMP payments. It is folded into
-    // the attempt key so that attempts from different payments cannot collide
-    // in the shared result store. Clients that leave this empty fall back to
-    // payment_hash, which is correct for non-AMP payments.
-    bytes payment_identifier = 11;
 
     // The optional blinding point to use when constructing the HTLC.
     // If set, this will be used to blind the next hop in the route.
@@ -223,9 +219,10 @@ message TrackOnionRequest {
     // and debugging purposes.
     bytes payment_hash = 1;
 
-    // The attempt ID uniquely identifying this payment attempt. The caller can
-    // expect to track results for the payment via this attempt ID.
-    uint64 attempt_id = 2;
+    // The attempt key uniquely identifying this payment attempt: the
+    // payment-level identifier (the payment hash for non-AMP payments, the
+    // SetID for AMP) paired with the attempt ID.
+    AttemptKey attempt_key = 2;
 
     // Optional: The session key that was used to construct the onion packet.
     // This is required by the server to decrypt any failure message.
@@ -234,12 +231,6 @@ message TrackOnionRequest {
     // Optional: The public keys of the nodes in the route, used with the
     // session_key to decrypt any failure message.
     repeated bytes hop_pubkeys = 4;
-
-    // The payment-level identifier the attempt belongs to: the payment hash
-    // for non-AMP payments and the SetID for AMP payments. Clients that leave
-    // this empty fall back to payment_hash, which is correct for non-AMP
-    // payments.
-    bytes payment_identifier = 5;
 }
 
 message TrackOnionResponse {

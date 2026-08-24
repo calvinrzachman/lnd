@@ -299,12 +299,16 @@ func (s *Server) SendOnion(_ context.Context,
 	// dgement as duplicate, rather than a new, misleading transient error.
 	// This prevents the client from incorrectly concluding the original
 	// attempt failed, which would risk a duplicate attempt.
-	attemptID := req.AttemptId
+	if req.AttemptKey == nil {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"attempt_key is required")
+	}
+	attemptID := req.AttemptKey.AttemptId
 
 	// Derive the payment-level identifier for the composite attempt key.
-	// Clients that predate payment_identifier only set payment_hash, which
-	// equals the identifier for non-AMP payments.
-	idBytes := req.PaymentIdentifier
+	// Callers may leave the identifier empty for non-AMP payments, in which
+	// case it equals the payment hash.
+	idBytes := req.AttemptKey.PaymentIdentifier
 	if len(idBytes) == 0 {
 		idBytes = req.PaymentHash
 	}
@@ -347,7 +351,7 @@ func (s *Server) SendOnion(_ context.Context,
 	// TrackOnion call for this attempt to hang indefinitely.
 	if validationErr != nil {
 		log.Warnf("Validation failed for attempt %d: %v. Failing "+
-			"pending attempt.", req.AttemptId, validationErr)
+			"pending attempt.", attemptID, validationErr)
 
 		s.failPendingAttempt(key, "validation failure")
 
@@ -357,7 +361,7 @@ func (s *Server) SendOnion(_ context.Context,
 	}
 
 	log.Debugf("Dispatching HTLC attempt(id=%v, amt=%v) for payment=%x "+
-		"via channel=%s", req.AttemptId, req.Amount,
+		"via channel=%s", attemptID, req.Amount,
 		htlcAdd.PaymentHash, chanID)
 
 	// With the attempt initialized, we now dispatch the HTLC.
@@ -379,7 +383,7 @@ func (s *Server) SendOnion(_ context.Context,
 		// For any other dispatch error, we transition the attempt to a
 		// failed state to prevent an orphaned record.
 		log.Warnf("Dispatch failed for attempt %d: %v. Failing "+
-			"pending attempt.", req.AttemptId, dispatchErr)
+			"pending attempt.", attemptID, dispatchErr)
 
 		s.failPendingAttempt(key, "dispatch failure")
 
@@ -599,10 +603,16 @@ func (s *Server) findEligibleChannelID(pubKey *btcec.PublicKey,
 func (s *Server) TrackOnion(ctx context.Context,
 	req *TrackOnionRequest) (*TrackOnionResponse, error) {
 
-	// The result is keyed by the payment-level identifier. Clients that
-	// predate payment_identifier only set payment_hash, which equals the
-	// identifier for non-AMP payments.
-	idBytes := req.PaymentIdentifier
+	if req.AttemptKey == nil {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"attempt_key is required")
+	}
+	attemptID := req.AttemptKey.AttemptId
+
+	// The result is keyed by the payment-level identifier. Callers may
+	// leave it empty for non-AMP payments, in which case it equals the
+	// payment hash.
+	idBytes := req.AttemptKey.PaymentIdentifier
 	if len(idBytes) == 0 {
 		idBytes = req.PaymentHash
 	}
@@ -613,7 +623,7 @@ func (s *Server) TrackOnion(ctx context.Context,
 	}
 
 	log.Debugf("Looking up status of onion attempt_id=%d for payment=%v",
-		req.AttemptId, hash)
+		attemptID, hash)
 
 	// Attempt to build the error decryptor with the provided session key
 	// and hop public keys.
@@ -632,17 +642,17 @@ func (s *Server) TrackOnion(ctx context.Context,
 
 	// Query the switch for the result of the payment attempt via onion.
 	resultChan, err := s.cfg.HtlcDispatcher.GetAttemptResult(
-		req.AttemptId, hash, errorDecryptor,
+		attemptID, hash, errorDecryptor,
 	)
 	if err != nil {
 		log.Errorf("GetAttemptResult failed for attempt_id=%d of "+
-			" payment=%x: %v", req.AttemptId, hash, err)
+			" payment=%x: %v", attemptID, hash, err)
 
 		// If the payment ID is not found, we return a NotFound error.
 		if errors.Is(err, htlcswitch.ErrPaymentIDNotFound) {
 			return nil, status.Errorf(codes.NotFound,
 				"payment with attempt ID %d not found",
-				req.AttemptId)
+				attemptID)
 		}
 
 		// For other errors, we return an internal error.
@@ -676,7 +686,7 @@ func (s *Server) TrackOnion(ctx context.Context,
 	// the payment failed, we build a structured response for the client.
 	if result.Error != nil {
 		log.Debugf("HTLC attempt %d failed for payment=%v: %v",
-			req.AttemptId, hash, result.Error)
+			attemptID, hash, result.Error)
 
 		details := marshallFailureDetails(result.Error)
 
@@ -691,7 +701,7 @@ func (s *Server) TrackOnion(ctx context.Context,
 	// is returned as-is, deferring decryption to the client.
 	if len(result.EncryptedError) > 0 {
 		log.Debugf("HTLC attempt %d failed for payment=%v with "+
-			"encrypted error", req.AttemptId, hash)
+			"encrypted error", attemptID, hash)
 
 		details := &FailureDetails{
 			ErrorMessage: "payment attempt failed with encrypted " +
@@ -719,7 +729,7 @@ func (s *Server) TrackOnion(ctx context.Context,
 	}
 
 	log.Debugf("Received preimage via onion attempt_id=%d for payment=%v",
-		req.AttemptId, hash)
+		attemptID, hash)
 
 	return &TrackOnionResponse{
 		Result: &TrackOnionResponse_Preimage{
