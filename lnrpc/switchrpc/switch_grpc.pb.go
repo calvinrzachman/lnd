@@ -21,22 +21,28 @@ type SwitchClient interface {
 	//
 	//SendOnion dispatches a pre-formed onion packet. It is the primary entry
 	//point for a remote router, and it is idempotent: a client can and should
-	//retry it after a timeout or disconnection, reusing the same attempt_id so
+	//retry it after a timeout or disconnection, reusing the same attempt key so
 	//the server recognises the retry rather than sending a second HTLC.
 	//
+	//An attempt is named by its key, the pair (payment_hash, attempt_id), which
+	//the client chooses. The server maps the key to an internal attempt of its
+	//own, so the key only needs to be unique per payment hash and never collides
+	//with attempts made by lnd's own router. A retry MUST resend the exact same
+	//request, including the same onion bytes.
+	//
 	//The outcome is carried in the response, never in a gRPC error. Exactly one
-	//of Accepted, Rejected or Ambiguous is set, and each documents the action it
-	//obliges the caller to take. An outcome the client does not recognise, or a
-	//response with none set, MUST be treated as Ambiguous.
+	//of Accepted, Rejected, Ambiguous or Mismatch is set, and each documents the
+	//action it obliges the caller to take. An outcome the client does not
+	//recognise, or a response with none set, MUST be treated as Ambiguous.
 	//
 	//A gRPC error means the call failed rather than the HTLC: a malformed
 	//request, an auth failure, a transport problem, or a server not running this
 	//sub-server. A client that cannot tell those apart MUST retry the same
-	//attempt_id, because a call that never reached the server and a call whose
+	//attempt key, because a call that never reached the server and a call whose
 	//response was lost look identical from outside.
 	//
-	//A malformed request (InvalidArgument) also records the attempt as failed,
-	//so resend a corrected request under a new attempt_id.
+	//A malformed request (InvalidArgument) may also record the attempt as
+	//failed, so resend a corrected request under a new attempt key.
 	SendOnion(ctx context.Context, in *SendOnionRequest, opts ...grpc.CallOption) (*SendOnionResponse, error)
 	//
 	//TrackOnion allows callers to query whether or not a payment dispatched via
@@ -74,20 +80,20 @@ type SwitchClient interface {
 	BuildOnion(ctx context.Context, in *BuildOnionRequest, opts ...grpc.CallOption) (*BuildOnionResponse, error)
 	//
 	//DeleteAttempts removes terminal (settled or failed) payment attempt records
-	//from the server's attempt store. The client explicitly names the attempt
-	//IDs to delete, enabling online garbage collection of completed attempt
-	//data.
+	//from the server's attempt store. The client explicitly names the attempts
+	//to delete by their (payment_hash, attempt_id) key, enabling online garbage
+	//collection of completed attempt data.
 	//
-	//The server processes each attempt ID independently and reports per-ID
+	//The server processes each attempt independently and reports per-attempt
 	//results. Pending (in-flight) attempts are never deleted; they are reported
-	//with a DELETION_PENDING status. Unknown attempt IDs are reported with
+	//with a DELETION_PENDING status. Unknown attempt keys are reported with
 	//DELETION_NOT_FOUND. Unprocessable records are reported with
 	//DELETION_FAILED. The overall RPC succeeds (gRPC OK) as long as the
 	//request could be processed, even if individual attempts were not deleted.
 	//
 	//Clients MUST only delete attempts whose outcome (settled or failed) has
 	//been durably recorded and will never need to be retried. Deleting an
-	//attempt removes the server's idempotency protection for that attempt ID.
+	//attempt removes the server's idempotency protection for that attempt key.
 	DeleteAttempts(ctx context.Context, in *DeleteAttemptsRequest, opts ...grpc.CallOption) (*DeleteAttemptsResponse, error)
 	//
 	//DisableRemoteRouter marks the database as no longer being used by a remote
@@ -157,22 +163,28 @@ type SwitchServer interface {
 	//
 	//SendOnion dispatches a pre-formed onion packet. It is the primary entry
 	//point for a remote router, and it is idempotent: a client can and should
-	//retry it after a timeout or disconnection, reusing the same attempt_id so
+	//retry it after a timeout or disconnection, reusing the same attempt key so
 	//the server recognises the retry rather than sending a second HTLC.
 	//
+	//An attempt is named by its key, the pair (payment_hash, attempt_id), which
+	//the client chooses. The server maps the key to an internal attempt of its
+	//own, so the key only needs to be unique per payment hash and never collides
+	//with attempts made by lnd's own router. A retry MUST resend the exact same
+	//request, including the same onion bytes.
+	//
 	//The outcome is carried in the response, never in a gRPC error. Exactly one
-	//of Accepted, Rejected or Ambiguous is set, and each documents the action it
-	//obliges the caller to take. An outcome the client does not recognise, or a
-	//response with none set, MUST be treated as Ambiguous.
+	//of Accepted, Rejected, Ambiguous or Mismatch is set, and each documents the
+	//action it obliges the caller to take. An outcome the client does not
+	//recognise, or a response with none set, MUST be treated as Ambiguous.
 	//
 	//A gRPC error means the call failed rather than the HTLC: a malformed
 	//request, an auth failure, a transport problem, or a server not running this
 	//sub-server. A client that cannot tell those apart MUST retry the same
-	//attempt_id, because a call that never reached the server and a call whose
+	//attempt key, because a call that never reached the server and a call whose
 	//response was lost look identical from outside.
 	//
-	//A malformed request (InvalidArgument) also records the attempt as failed,
-	//so resend a corrected request under a new attempt_id.
+	//A malformed request (InvalidArgument) may also record the attempt as
+	//failed, so resend a corrected request under a new attempt key.
 	SendOnion(context.Context, *SendOnionRequest) (*SendOnionResponse, error)
 	//
 	//TrackOnion allows callers to query whether or not a payment dispatched via
@@ -210,20 +222,20 @@ type SwitchServer interface {
 	BuildOnion(context.Context, *BuildOnionRequest) (*BuildOnionResponse, error)
 	//
 	//DeleteAttempts removes terminal (settled or failed) payment attempt records
-	//from the server's attempt store. The client explicitly names the attempt
-	//IDs to delete, enabling online garbage collection of completed attempt
-	//data.
+	//from the server's attempt store. The client explicitly names the attempts
+	//to delete by their (payment_hash, attempt_id) key, enabling online garbage
+	//collection of completed attempt data.
 	//
-	//The server processes each attempt ID independently and reports per-ID
+	//The server processes each attempt independently and reports per-attempt
 	//results. Pending (in-flight) attempts are never deleted; they are reported
-	//with a DELETION_PENDING status. Unknown attempt IDs are reported with
+	//with a DELETION_PENDING status. Unknown attempt keys are reported with
 	//DELETION_NOT_FOUND. Unprocessable records are reported with
 	//DELETION_FAILED. The overall RPC succeeds (gRPC OK) as long as the
 	//request could be processed, even if individual attempts were not deleted.
 	//
 	//Clients MUST only delete attempts whose outcome (settled or failed) has
 	//been durably recorded and will never need to be retried. Deleting an
-	//attempt removes the server's idempotency protection for that attempt ID.
+	//attempt removes the server's idempotency protection for that attempt key.
 	DeleteAttempts(context.Context, *DeleteAttemptsRequest) (*DeleteAttemptsResponse, error)
 	//
 	//DisableRemoteRouter marks the database as no longer being used by a remote

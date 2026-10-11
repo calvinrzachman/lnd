@@ -52,8 +52,8 @@
     },
     "/v2/switch/deleteattempts": {
       "post": {
-        "summary": "DeleteAttempts removes terminal (settled or failed) payment attempt records\nfrom the server's attempt store. The client explicitly names the attempt\nIDs to delete, enabling online garbage collection of completed attempt\ndata.",
-        "description": "The server processes each attempt ID independently and reports per-ID\nresults. Pending (in-flight) attempts are never deleted; they are reported\nwith a DELETION_PENDING status. Unknown attempt IDs are reported with\nDELETION_NOT_FOUND. Unprocessable records are reported with\nDELETION_FAILED. The overall RPC succeeds (gRPC OK) as long as the\nrequest could be processed, even if individual attempts were not deleted.\n\nClients MUST only delete attempts whose outcome (settled or failed) has\nbeen durably recorded and will never need to be retried. Deleting an\nattempt removes the server's idempotency protection for that attempt ID.",
+        "summary": "DeleteAttempts removes terminal (settled or failed) payment attempt records\nfrom the server's attempt store. The client explicitly names the attempts\nto delete by their (payment_hash, attempt_id) key, enabling online garbage\ncollection of completed attempt data.",
+        "description": "The server processes each attempt independently and reports per-attempt\nresults. Pending (in-flight) attempts are never deleted; they are reported\nwith a DELETION_PENDING status. Unknown attempt keys are reported with\nDELETION_NOT_FOUND. Unprocessable records are reported with\nDELETION_FAILED. The overall RPC succeeds (gRPC OK) as long as the\nrequest could be processed, even if individual attempts were not deleted.\n\nClients MUST only delete attempts whose outcome (settled or failed) has\nbeen durably recorded and will never need to be retried. Deleting an\nattempt removes the server's idempotency protection for that attempt key.",
         "operationId": "Switch_DeleteAttempts",
         "responses": {
           "200": {
@@ -119,8 +119,8 @@
     },
     "/v2/switch/onion": {
       "post": {
-        "summary": "SendOnion dispatches a pre-formed onion packet. It is the primary entry\npoint for a remote router, and it is idempotent: a client can and should\nretry it after a timeout or disconnection, reusing the same attempt_id so\nthe server recognises the retry rather than sending a second HTLC.",
-        "description": "The outcome is carried in the response, never in a gRPC error. Exactly one\nof Accepted, Rejected or Ambiguous is set, and each documents the action it\nobliges the caller to take. An outcome the client does not recognise, or a\nresponse with none set, MUST be treated as Ambiguous.\n\nA gRPC error means the call failed rather than the HTLC: a malformed\nrequest, an auth failure, a transport problem, or a server not running this\nsub-server. A client that cannot tell those apart MUST retry the same\nattempt_id, because a call that never reached the server and a call whose\nresponse was lost look identical from outside.\n\nA malformed request (InvalidArgument) also records the attempt as failed,\nso resend a corrected request under a new attempt_id.",
+        "summary": "SendOnion dispatches a pre-formed onion packet. It is the primary entry\npoint for a remote router, and it is idempotent: a client can and should\nretry it after a timeout or disconnection, reusing the same attempt key so\nthe server recognises the retry rather than sending a second HTLC.",
+        "description": "An attempt is named by its key, the pair (payment_hash, attempt_id), which\nthe client chooses. The server maps the key to an internal attempt of its\nown, so the key only needs to be unique per payment hash and never collides\nwith attempts made by lnd's own router. A retry MUST resend the exact same\nrequest, including the same onion bytes.\n\nThe outcome is carried in the response, never in a gRPC error. Exactly one\nof Accepted, Rejected, Ambiguous or Mismatch is set, and each documents the\naction it obliges the caller to take. An outcome the client does not\nrecognise, or a response with none set, MUST be treated as Ambiguous.\n\nA gRPC error means the call failed rather than the HTLC: a malformed\nrequest, an auth failure, a transport problem, or a server not running this\nsub-server. A client that cannot tell those apart MUST retry the same\nattempt key, because a call that never reached the server and a call whose\nresponse was lost look identical from outside.\n\nA malformed request (InvalidArgument) may also record the attempt as\nfailed, so resend a corrected request under a new attempt key.",
         "operationId": "Switch_SendOnion",
         "responses": {
           "200": {
@@ -383,7 +383,7 @@
       "properties": {
         "already_registered": {
           "type": "boolean",
-          "description": "Set when the switch already held this attempt from an earlier call,\neither because the attempt was already registered or because a circuit\nfor it already existed. Required behaviour is identical either way; this\nis diagnostic.\n\nA circuit without a registration should not occur in correct operation.\nIt means the attempt_id is also in use by another dispatcher, such as\nlnd's own router, so the result later tracked may belong to that\ndispatcher's HTLC. Keep attempt_ids unique."
+          "description": "Set when the switch already held this attempt from an earlier call,\neither because the attempt was already registered or because a circuit\nfor it already existed. Required behaviour is identical either way; this\nis diagnostic.\n\nA circuit without a registration should not occur in correct operation.\nThe server allocates the internal attempt from the same sequence as\nlnd's own router, so it means the server's records are out of step."
         }
       },
       "description": "Accepted means the switch has taken ownership of this attempt. Await the\nresult with TrackOnion.\n\nDo NOT conclude success or failure from this message. It reports who owns\nthe attempt, not how it ended."
@@ -396,7 +396,7 @@
           "description": "A human-readable reason, for logs and metrics.\n\nBehaviour MUST NOT branch on this value. Every ambiguous outcome\nrequires the same action, and a caller that treats one reason\ndifferently from another will eventually treat one of them unsafely.\nIt is free text rather than an enum for exactly that reason."
         }
       },
-      "description": "Ambiguous means the switch cannot determine whether it took ownership of the\nattempt.\n\nThe caller MUST retry the same attempt_id until it receives Accepted or\nRejected, and MUST NOT record a terminal outcome for the attempt in the\nmeantime. Retrying is safe: the switch recognises an attempt it already\nholds and answers Accepted rather than dispatching a second HTLC."
+      "description": "Ambiguous means the switch cannot determine whether it took ownership of the\nattempt.\n\nThe caller MUST retry the same attempt key until it receives another\noutcome, and MUST NOT record a terminal outcome for the attempt in the\nmeantime. Retrying is safe: the switch recognises an attempt it already\nholds and answers Accepted rather than dispatching a second HTLC."
     },
     "switchrpcAttemptDeletionResult": {
       "type": "object",
@@ -409,6 +409,11 @@
         "status": {
           "$ref": "#/definitions/switchrpcAttemptDeletionStatus",
           "description": "The outcome of the deletion for this attempt."
+        },
+        "payment_hash": {
+          "type": "string",
+          "format": "byte",
+          "description": "The payment hash this result corresponds to."
         }
       },
       "description": "AttemptDeletionResult reports the outcome of deleting a single attempt."
@@ -423,6 +428,22 @@
       ],
       "default": "DELETION_OK",
       "description": "AttemptDeletionStatus describes the outcome of a single attempt deletion.\n\n - DELETION_OK: The attempt result was successfully deleted from the store.\n - DELETION_PENDING: The attempt is still in-flight (pending) and cannot be safely deleted.\n - DELETION_NOT_FOUND: The attempt ID was not found in the store. This may indicate a client\nbug (wrong ID, wrong backend) since the server has no record of this\nattempt ever existing.\n - DELETION_FAILED: The attempt record exists but could not be processed (e.g.\ndeserialization error). The record remains in the store."
+    },
+    "switchrpcAttemptRef": {
+      "type": "object",
+      "properties": {
+        "payment_hash": {
+          "type": "string",
+          "format": "byte",
+          "description": "The payment hash the attempt was dispatched with."
+        },
+        "attempt_id": {
+          "type": "string",
+          "format": "uint64",
+          "description": "The attempt ID the attempt was dispatched with."
+        }
+      },
+      "description": "AttemptRef names an attempt by the idempotency key it was dispatched with."
     },
     "switchrpcBuildOnionRequest": {
       "type": "object",
@@ -471,13 +492,13 @@
     "switchrpcDeleteAttemptsRequest": {
       "type": "object",
       "properties": {
-        "attempt_ids": {
+        "attempts": {
           "type": "array",
           "items": {
-            "type": "string",
-            "format": "uint64"
+            "type": "object",
+            "$ref": "#/definitions/switchrpcAttemptRef"
           },
-          "description": "The attempt IDs to delete from the server's attempt store. Only terminal\n(settled or failed) attempts will be deleted. Pending (in-flight)\nattempts are skipped and reported with a DELETION_PENDING status."
+          "description": "The attempts to delete from the server's attempt store. Only terminal\n(settled or failed) attempts will be deleted. Pending (in-flight)\nattempts are skipped and reported with a DELETION_PENDING status."
         }
       }
     },
@@ -490,7 +511,7 @@
             "type": "object",
             "$ref": "#/definitions/switchrpcAttemptDeletionResult"
           },
-          "description": "Per-attempt deletion outcomes. The order corresponds to the order of\nattempt_ids in the request."
+          "description": "Per-attempt deletion outcomes. The order corresponds to the order of\nattempts in the request."
         }
       }
     },
@@ -558,6 +579,10 @@
       },
       "description": "LocalFailure represents a failure that originates at the local node, as\nreported by TrackOnion. SendOnion reports a local rejection through the\nRejected outcome instead, which carries the raw wire failure directly.\n\nNo onion decryption is involved because the failure occurred before the\nHTLC left our node."
     },
+    "switchrpcMismatch": {
+      "type": "object",
+      "description": "Mismatch means the attempt key is already registered for a request that\ndiffers from this one in a field that defines the HTLC, such as the onion,\namount or first hop. Nothing was dispatched for this request, and the\nregistered attempt is untouched and may be in flight.\n\nThis indicates a client bug, such as a reused key or a rebuilt onion. The\ncaller MUST stop sending under this key, MUST NOT fail or reroute the\nattempt on the strength of this answer, and should alert an operator. The\nregistered attempt can still be tracked with TrackOnion under the same key."
+    },
     "switchrpcRejected": {
       "type": "object",
       "properties": {
@@ -580,7 +605,7 @@
         "attempt_id": {
           "type": "string",
           "format": "uint64",
-          "description": "The attempt ID uniquely identifying this payment attempt. The caller can\nexpect to track results for the payment via this attempt ID."
+          "description": "The attempt ID chosen by the caller. Together with payment_hash it forms\nthe attempt key, which names this attempt in SendOnion, TrackOnion and\nDeleteAttempts."
         },
         "first_hop_pubkey": {
           "type": "string",
@@ -638,9 +663,12 @@
         },
         "ambiguous": {
           "$ref": "#/definitions/switchrpcAmbiguous"
+        },
+        "mismatch": {
+          "$ref": "#/definitions/switchrpcMismatch"
         }
       },
-      "description": "SendOnionResponse reports what the switch did with the attempt. Exactly one\noutcome is always set.\n\nA gRPC error from SendOnion means the call itself failed: a malformed\nrequest, an auth failure, a transport problem, or a server not running this\nsub-server. It never describes what happened to an HTLC. A caller that\nreceives an error and cannot distinguish those cases MUST retry the same\nattempt_id, because a call that failed before reaching the server and a call\nwhose response was lost are indistinguishable from outside.\n\nFORWARD COMPATIBILITY, and this rule is load-bearing:\n\nA caller that receives an outcome it does not recognise, or a response with\nno outcome set at all, MUST treat it as Ambiguous and retry the same\nattempt_id. It MUST NOT treat it as success, failure, or an empty response.\n\nThis matters because carrying the outcome in the response body trades one\nsafety property away and this rule buys it back. An unhandled gRPC error is\nloud, while an unhandled response field is silent, so a caller built against\nan older version of this service could otherwise misread a newer server's\nanswer as \"nothing happened\". Defaulting the unknown case to Ambiguous keeps\nthe failure mode a wasted retry rather than a lost or duplicated payment."
+      "description": "SendOnionResponse reports what the switch did with the attempt. Exactly one\noutcome is always set.\n\nA gRPC error from SendOnion means the call itself failed: a malformed\nrequest, an auth failure, a transport problem, or a server not running this\nsub-server. It never describes what happened to an HTLC. A caller that\nreceives an error and cannot distinguish those cases MUST retry the same\nattempt key, because a call that failed before reaching the server and a\ncall whose response was lost are indistinguishable from outside.\n\nFORWARD COMPATIBILITY, and this rule is load-bearing:\n\nA caller that receives an outcome it does not recognise, or a response with\nno outcome set at all, MUST treat it as Ambiguous and retry the same\nattempt key. It MUST NOT treat it as success, failure, or an empty response.\n\nThis matters because carrying the outcome in the response body trades one\nsafety property away and this rule buys it back. An unhandled gRPC error is\nloud, while an unhandled response field is silent, so a caller built against\nan older version of this service could otherwise misread a newer server's\nanswer as \"nothing happened\". Defaulting the unknown case to Ambiguous keeps\nthe failure mode a wasted retry rather than a lost or duplicated payment."
     },
     "switchrpcSwitchError": {
       "type": "object",
@@ -657,7 +685,7 @@
         "attempt_id": {
           "type": "string",
           "format": "uint64",
-          "description": "The attempt ID uniquely identifying this payment attempt. The caller can\nexpect to track results for the payment via this attempt ID."
+          "description": "The attempt ID chosen by the caller. Together with payment_hash it forms\nthe attempt key, which names this attempt in SendOnion, TrackOnion and\nDeleteAttempts."
         },
         "session_key": {
           "type": "string",

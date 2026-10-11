@@ -12,22 +12,28 @@ service Switch {
     /*
     SendOnion dispatches a pre-formed onion packet. It is the primary entry
     point for a remote router, and it is idempotent: a client can and should
-    retry it after a timeout or disconnection, reusing the same attempt_id so
+    retry it after a timeout or disconnection, reusing the same attempt key so
     the server recognises the retry rather than sending a second HTLC.
 
+    An attempt is named by its key, the pair (payment_hash, attempt_id), which
+    the client chooses. The server maps the key to an internal attempt of its
+    own, so the key only needs to be unique per payment hash and never collides
+    with attempts made by lnd's own router. A retry MUST resend the exact same
+    request, including the same onion bytes.
+
     The outcome is carried in the response, never in a gRPC error. Exactly one
-    of Accepted, Rejected or Ambiguous is set, and each documents the action it
-    obliges the caller to take. An outcome the client does not recognise, or a
-    response with none set, MUST be treated as Ambiguous.
+    of Accepted, Rejected, Ambiguous or Mismatch is set, and each documents the
+    action it obliges the caller to take. An outcome the client does not
+    recognise, or a response with none set, MUST be treated as Ambiguous.
 
     A gRPC error means the call failed rather than the HTLC: a malformed
     request, an auth failure, a transport problem, or a server not running this
     sub-server. A client that cannot tell those apart MUST retry the same
-    attempt_id, because a call that never reached the server and a call whose
+    attempt key, because a call that never reached the server and a call whose
     response was lost look identical from outside.
 
-    A malformed request (InvalidArgument) also records the attempt as failed,
-    so resend a corrected request under a new attempt_id.
+    A malformed request (InvalidArgument) may also record the attempt as
+    failed, so resend a corrected request under a new attempt key.
     */
     rpc SendOnion (SendOnionRequest) returns (SendOnionResponse);
 
@@ -71,20 +77,20 @@ service Switch {
 
     /*
     DeleteAttempts removes terminal (settled or failed) payment attempt records
-    from the server's attempt store. The client explicitly names the attempt
-    IDs to delete, enabling online garbage collection of completed attempt
-    data.
+    from the server's attempt store. The client explicitly names the attempts
+    to delete by their (payment_hash, attempt_id) key, enabling online garbage
+    collection of completed attempt data.
 
-    The server processes each attempt ID independently and reports per-ID
+    The server processes each attempt independently and reports per-attempt
     results. Pending (in-flight) attempts are never deleted; they are reported
-    with a DELETION_PENDING status. Unknown attempt IDs are reported with
+    with a DELETION_PENDING status. Unknown attempt keys are reported with
     DELETION_NOT_FOUND. Unprocessable records are reported with
     DELETION_FAILED. The overall RPC succeeds (gRPC OK) as long as the
     request could be processed, even if individual attempts were not deleted.
 
     Clients MUST only delete attempts whose outcome (settled or failed) has
     been durably recorded and will never need to be retried. Deleting an
-    attempt removes the server's idempotency protection for that attempt ID.
+    attempt removes the server's idempotency protection for that attempt key.
     */
     rpc DeleteAttempts (DeleteAttemptsRequest) returns (DeleteAttemptsResponse);
 
@@ -102,8 +108,9 @@ message SendOnionRequest {
     // The raw onion packet to be sent across the network.
     bytes onion_blob = 1;
 
-    // The attempt ID uniquely identifying this payment attempt. The caller can
-    // expect to track results for the payment via this attempt ID.
+    // The attempt ID chosen by the caller. Together with payment_hash it forms
+    // the attempt key, which names this attempt in SendOnion, TrackOnion and
+    // DeleteAttempts.
     uint64 attempt_id = 2;
 
     // The first hop's public key where the onion will be sent.
@@ -147,14 +154,14 @@ message SendOnionRequest {
 // request, an auth failure, a transport problem, or a server not running this
 // sub-server. It never describes what happened to an HTLC. A caller that
 // receives an error and cannot distinguish those cases MUST retry the same
-// attempt_id, because a call that failed before reaching the server and a call
-// whose response was lost are indistinguishable from outside.
+// attempt key, because a call that failed before reaching the server and a
+// call whose response was lost are indistinguishable from outside.
 //
 // FORWARD COMPATIBILITY, and this rule is load-bearing:
 //
 // A caller that receives an outcome it does not recognise, or a response with
 // no outcome set at all, MUST treat it as Ambiguous and retry the same
-// attempt_id. It MUST NOT treat it as success, failure, or an empty response.
+// attempt key. It MUST NOT treat it as success, failure, or an empty response.
 //
 // This matters because carrying the outcome in the response body trades one
 // safety property away and this rule buys it back. An unhandled gRPC error is
@@ -167,6 +174,7 @@ message SendOnionResponse {
         Accepted accepted = 1;
         Rejected rejected = 2;
         Ambiguous ambiguous = 3;
+        Mismatch mismatch = 4;
     }
 }
 
@@ -182,9 +190,8 @@ message Accepted {
     // is diagnostic.
     //
     // A circuit without a registration should not occur in correct operation.
-    // It means the attempt_id is also in use by another dispatcher, such as
-    // lnd's own router, so the result later tracked may belong to that
-    // dispatcher's HTLC. Keep attempt_ids unique.
+    // The server allocates the internal attempt from the same sequence as
+    // lnd's own router, so it means the server's records are out of step.
     bool already_registered = 1;
 }
 
@@ -205,8 +212,8 @@ message Rejected {
 // Ambiguous means the switch cannot determine whether it took ownership of the
 // attempt.
 //
-// The caller MUST retry the same attempt_id until it receives Accepted or
-// Rejected, and MUST NOT record a terminal outcome for the attempt in the
+// The caller MUST retry the same attempt key until it receives another
+// outcome, and MUST NOT record a terminal outcome for the attempt in the
 // meantime. Retrying is safe: the switch recognises an attempt it already
 // holds and answers Accepted rather than dispatching a second HTLC.
 message Ambiguous {
@@ -219,13 +226,26 @@ message Ambiguous {
     string reason = 1;
 }
 
+// Mismatch means the attempt key is already registered for a request that
+// differs from this one in a field that defines the HTLC, such as the onion,
+// amount or first hop. Nothing was dispatched for this request, and the
+// registered attempt is untouched and may be in flight.
+//
+// This indicates a client bug, such as a reused key or a rebuilt onion. The
+// caller MUST stop sending under this key, MUST NOT fail or reroute the
+// attempt on the strength of this answer, and should alert an operator. The
+// registered attempt can still be tracked with TrackOnion under the same key.
+message Mismatch {
+}
+
 message TrackOnionRequest {
     // The payment hash associated with the HTLC. This is needed for tracking
     // and debugging purposes.
     bytes payment_hash = 1;
 
-    // The attempt ID uniquely identifying this payment attempt. The caller can
-    // expect to track results for the payment via this attempt ID.
+    // The attempt ID chosen by the caller. Together with payment_hash it forms
+    // the attempt key, which names this attempt in SendOnion, TrackOnion and
+    // DeleteAttempts.
     uint64 attempt_id = 2;
 
     // Optional: The session key that was used to construct the onion packet.
@@ -363,16 +383,30 @@ message BuildOnionResponse {
     repeated bytes hop_pubkeys = 3;
 }
 
+// AttemptRef names an attempt by the idempotency key it was dispatched with.
+message AttemptRef {
+    // The payment hash the attempt was dispatched with.
+    bytes payment_hash = 1;
+
+    // The attempt ID the attempt was dispatched with.
+    uint64 attempt_id = 2;
+}
+
 message DeleteAttemptsRequest {
-    // The attempt IDs to delete from the server's attempt store. Only terminal
+    // Attempts used to be named by attempt ID alone. An attempt ID is only
+    // unique together with its payment hash, so the field was replaced.
+    reserved 1;
+    reserved "attempt_ids";
+
+    // The attempts to delete from the server's attempt store. Only terminal
     // (settled or failed) attempts will be deleted. Pending (in-flight)
     // attempts are skipped and reported with a DELETION_PENDING status.
-    repeated uint64 attempt_ids = 1;
+    repeated AttemptRef attempts = 2;
 }
 
 message DeleteAttemptsResponse {
     // Per-attempt deletion outcomes. The order corresponds to the order of
-    // attempt_ids in the request.
+    // attempts in the request.
     repeated AttemptDeletionResult results = 1;
 }
 
@@ -383,6 +417,9 @@ message AttemptDeletionResult {
 
     // The outcome of the deletion for this attempt.
     AttemptDeletionStatus status = 2;
+
+    // The payment hash this result corresponds to.
+    bytes payment_hash = 3;
 }
 
 // AttemptDeletionStatus describes the outcome of a single attempt deletion.

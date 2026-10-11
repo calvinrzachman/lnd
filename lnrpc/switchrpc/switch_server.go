@@ -246,8 +246,9 @@ func (r *ServerShell) CreateSubServer(
 // to forward a payment through this lnd instance.
 //
 // To safely handle network failures, a client can and should retry this RPC
-// after a timeout or disconnection. Retries MUST use the exact same
-// attempt id to allow the server to correctly detect duplicate requests.
+// after a timeout or disconnection. Retries MUST use the exact same request,
+// named by the same (payment_hash, attempt_id) key, to allow the server to
+// correctly detect duplicate requests.
 //
 // The server guarantees safety against duplicate attempts by following a
 // "write-ahead" style approach. Upon receiving a request, it first writes a
@@ -271,6 +272,10 @@ func (r *ServerShell) CreateSubServer(
 // client MUST retry the exact same request and MUST NOT record a terminal
 // outcome in the meantime.
 //
+// 4. Mismatch: the attempt key is registered for a request with different
+// HTLC-defining fields. Nothing is dispatched and the registered attempt is
+// untouched. The client MUST stop and alert rather than fail the attempt.
+//
 // A gRPC error means the call failed rather than the HTLC: a malformed request,
 // an auth failure, a transport problem, or a server not running this
 // sub-server.
@@ -287,23 +292,46 @@ func (s *Server) SendOnion(_ context.Context,
 	// dgement as duplicate, rather than a new, misleading transient error.
 	// This prevents the client from incorrectly concluding the original
 	// attempt failed, which would risk a duplicate attempt.
-	attemptID := req.AttemptId
-	initErr := s.cfg.AttemptStore.InitAttempt(attemptID)
+	//
+	// The client names the attempt with its own idempotency key. We map
+	// that key to an internal attempt ID from our own sequencer, and use
+	// the internal ID for everything inside the switch.
+	key, err := attemptKey(req)
+	if err != nil {
+		return nil, err
+	}
+
+	attemptID, initErr := s.cfg.ExternalAttemptStore.InitExternalAttempt(
+		key, requestFingerprint(req), s.cfg.NextAttemptID,
+	)
 	if initErr != nil {
-		// A record for this attempt ID already exists, so a prior
-		// SendOnion was already registered. This is an acknowledgement
-		// rather than a failure: the caller should stop retrying and
-		// track the attempt.
+		// The key is already registered with the same fingerprint, so
+		// a prior SendOnion was already registered. This is an
+		// acknowledgement rather than a failure: the caller should stop
+		// retrying and track the attempt.
 		if errors.Is(initErr, htlcswitch.ErrPaymentIDAlreadyExists) {
-			log.Debugf("Attempt id=%v already exists", attemptID)
+			log.Debugf("Attempt id=%v already exists as internal "+
+				"attempt %d", req.AttemptId, attemptID)
 
 			return acknowledged(), nil
 		}
 
+		// The key is registered for a different request. The original
+		// attempt may be in flight, so this must neither read as a
+		// verdict on it nor dispatch anything.
+		mismatch := htlcswitch.ErrAttemptFingerprintMismatch
+		if errors.Is(initErr, mismatch) {
+			log.Errorf("Attempt id=%v for payment=%x is "+
+				"registered for a different request",
+				req.AttemptId, req.PaymentHash)
+
+			return keyMismatch(), nil
+		}
+
 		// We cannot tell whether the record was written, so the caller
 		// must retry to resolve it.
-		log.Errorf("Unable to initialize attempt id=%d: %v", attemptID,
-			initErr)
+		log.Errorf("Unable to initialize attempt id=%d: %v",
+			req.AttemptId, initErr)
 
 		return ambiguous(initErr), nil
 	}
@@ -321,7 +349,7 @@ func (s *Server) SendOnion(_ context.Context,
 		log.Warnf("Validation failed for attempt %d: %v. Failing "+
 			"pending attempt.", req.AttemptId, validationErr)
 
-		s.failPendingAttempt(req.AttemptId, "validation failure")
+		s.failPendingAttempt(attemptID, "validation failure")
 
 		return nil, validationErr
 	}
@@ -346,10 +374,10 @@ func (s *Server) SendOnion(_ context.Context,
 		// of a prior dispatch, not a failure.
 		//
 		// The registration check above catches every repeat of an
-		// attempt id, so this is only reached when the store had no
-		// record but the circuit map did: an id shared with another
-		// dispatcher, or the two out of step. Log it loudly, since it
-		// should not happen in correct operation.
+		// attempt key, and the internal ID comes from the sequencer
+		// lnd's own router uses, so this is only reached when the
+		// store and the circuit map are out of step. Log it loudly,
+		// since it should not happen in correct operation.
 		if errors.Is(dispatchErr, htlcswitch.ErrDuplicateAdd) {
 			log.Errorf("Circuit already exists for attempt id=%v "+
 				"that had no registration", attemptID)
@@ -364,7 +392,7 @@ func (s *Server) SendOnion(_ context.Context,
 		log.Warnf("Dispatch failed for attempt %d: %v. Failing "+
 			"pending attempt.", req.AttemptId, dispatchErr)
 
-		s.failPendingAttempt(req.AttemptId, "dispatch failure")
+		s.failPendingAttempt(attemptID, "dispatch failure")
 
 		return marshallDispatchOutcome(dispatchErr), nil
 	}
@@ -391,6 +419,16 @@ func acknowledged() *SendOnionResponse {
 			Accepted: &Accepted{
 				AlreadyRegistered: true,
 			},
+		},
+	}
+}
+
+// keyMismatch reports that the attempt key is registered for a different
+// request. Nothing was dispatched, and the registered attempt is untouched.
+func keyMismatch() *SendOnionResponse {
+	return &SendOnionResponse{
+		Outcome: &SendOnionResponse_Mismatch{
+			Mismatch: &Mismatch{},
 		},
 	}
 }
@@ -723,9 +761,27 @@ func (s *Server) TrackOnion(ctx context.Context,
 			"provided. Will defer error handling to caller")
 	}
 
+	// Resolve the client's key to the internal attempt ID. A key we have
+	// never registered is reported as not found, the same as an attempt
+	// the switch does not know.
+	key, err := attemptKey(req)
+	if err != nil {
+		return nil, err
+	}
+
+	attemptID, err := s.cfg.ExternalAttemptStore.LookupExternalAttempt(key)
+	if errors.Is(err, htlcswitch.ErrPaymentIDNotFound) {
+		return nil, status.Errorf(codes.NotFound,
+			"payment with attempt ID %d not found", req.AttemptId)
+	}
+	if err != nil {
+		return nil, status.Errorf(codes.Internal,
+			"unable to look up attempt: %v", err)
+	}
+
 	// Query the switch for the result of the payment attempt via onion.
 	resultChan, err := s.cfg.HtlcDispatcher.GetAttemptResult(
-		req.AttemptId, hash, errorDecryptor,
+		attemptID, hash, errorDecryptor,
 	)
 	if err != nil {
 		log.Errorf("GetAttemptResult failed for attempt_id=%d of "+
@@ -978,20 +1034,29 @@ func (s *Server) DeleteAttempts(_ context.Context,
 	req *DeleteAttemptsRequest) (*DeleteAttemptsResponse, error) {
 
 	log.Debugf("DeleteAttempts called for %d attempt(s)",
-		len(req.AttemptIds))
+		len(req.Attempts))
 
-	// Deduplicate attempt IDs, preserving request order.
-	seen := make(map[uint64]struct{}, len(req.AttemptIds))
-	uniqueIDs := make([]uint64, 0, len(req.AttemptIds))
-	for _, id := range req.AttemptIds {
-		if _, ok := seen[id]; ok {
+	// Deduplicate attempts by key, preserving request order.
+	var (
+		seen   = make(map[string]struct{}, len(req.Attempts))
+		unique = make([]*AttemptRef, 0, len(req.Attempts))
+		keys   = make([][]byte, 0, len(req.Attempts))
+	)
+	for _, ref := range req.Attempts {
+		key, err := attemptKey(ref)
+		if err != nil {
+			return nil, err
+		}
+
+		if _, ok := seen[string(key)]; ok {
 			continue
 		}
-		seen[id] = struct{}{}
-		uniqueIDs = append(uniqueIDs, id)
+		seen[string(key)] = struct{}{}
+		unique = append(unique, ref)
+		keys = append(keys, key)
 	}
 
-	storeResults, err := s.cfg.AttemptStore.DeleteAttempts(uniqueIDs)
+	statuses, err := s.cfg.ExternalAttemptStore.DeleteExternalAttempts(keys)
 	if err != nil {
 		log.Errorf("DeleteAttempts failed: %v", err)
 
@@ -1001,13 +1066,12 @@ func (s *Server) DeleteAttempts(_ context.Context,
 
 	// Convert the store-level results into proto results, preserving the
 	// request order.
-	results := make([]*AttemptDeletionResult, 0, len(uniqueIDs))
-	for _, id := range uniqueIDs {
-		protoStatus := deletionStatusToProto(storeResults[id])
-
+	results := make([]*AttemptDeletionResult, 0, len(unique))
+	for i, ref := range unique {
 		results = append(results, &AttemptDeletionResult{
-			AttemptId: id,
-			Status:    protoStatus,
+			PaymentHash: ref.PaymentHash,
+			AttemptId:   ref.AttemptId,
+			Status:      deletionStatusToProto(statuses[i]),
 		})
 	}
 

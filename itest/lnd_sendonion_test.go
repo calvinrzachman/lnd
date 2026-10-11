@@ -217,7 +217,10 @@ func testSendOnionTwice(ht *lntest.HarnessTest) {
 	// Now that we've confirmed that duplicate sends are rejected for
 	// settled attempts, delete the attempt record from the store.
 	deleteReq := &switchrpc.DeleteAttemptsRequest{
-		AttemptIds: []uint64{1},
+		Attempts: []*switchrpc.AttemptRef{{
+			PaymentHash: payHash[:],
+			AttemptId:   1,
+		}},
 	}
 	deleteResp := alice.RPC.DeleteAttempts(deleteReq)
 	require.Len(ht, deleteResp.Results, 1)

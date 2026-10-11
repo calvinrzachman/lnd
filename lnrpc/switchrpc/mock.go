@@ -119,14 +119,50 @@ func (m *mockChannelLink) MayAddOutgoingHtlc(lnwire.MilliSatoshi) error {
 	return nil
 }
 
-// mockAttemptStore is a mock implementation of the AttemptStore interface.
+// mockAttemptStore is a mock implementation of the AttemptStore and
+// ExternalAttemptStore interfaces.
 type mockAttemptStore struct {
 	htlcswitch.AttemptStore
 	initErr    error
 	failErr    error
 	failCalls  int
+	lookupErr  error
 	deleteErr  error
 	deleteResp map[uint64]htlcswitch.DeletionStatus
+
+	// deleteByKey holds the status DeleteExternalAttempts reports for
+	// each attempt key.
+	deleteByKey map[string]htlcswitch.DeletionStatus
+}
+
+// InitExternalAttempt returns the mocked initErr with internal ID 1.
+func (m *mockAttemptStore) InitExternalAttempt(key []byte,
+	fingerprint [32]byte, nextID func() (uint64, error)) (uint64, error) {
+
+	return 1, m.initErr
+}
+
+// LookupExternalAttempt returns the mocked lookupErr with internal ID 1.
+func (m *mockAttemptStore) LookupExternalAttempt(key []byte) (uint64,
+	error) {
+
+	return 1, m.lookupErr
+}
+
+// DeleteExternalAttempts reports, for each key, the mocked deleteByKey status.
+func (m *mockAttemptStore) DeleteExternalAttempts(
+	keys [][]byte) ([]htlcswitch.DeletionStatus, error) {
+
+	if m.deleteErr != nil {
+		return nil, m.deleteErr
+	}
+
+	statuses := make([]htlcswitch.DeletionStatus, len(keys))
+	for i, key := range keys {
+		statuses[i] = m.deleteByKey[string(key)]
+	}
+
+	return statuses, nil
 }
 
 // InitAttempt returns the mocked initErr.
