@@ -25,9 +25,9 @@ type SwitchClient interface {
 	//the server recognises the retry rather than sending a second HTLC.
 	//
 	//The outcome is carried in the response, never in a gRPC error. Exactly one
-	//of Accepted, Rejected or Ambiguous is set, and each documents the action it
-	//obliges the caller to take. An outcome the client does not recognise, or a
-	//response with none set, MUST be treated as Ambiguous.
+	//of Accepted, Rejected, Ambiguous or Mismatch is set, and each documents the
+	//action it obliges the caller to take. An outcome the client does not
+	//recognise, or a response with none set, MUST be treated as Ambiguous.
 	//
 	//A gRPC error means the call failed rather than the HTLC: a malformed
 	//request, an auth failure, a transport problem, or a server not running this
@@ -158,9 +158,9 @@ type SwitchServer interface {
 	//the server recognises the retry rather than sending a second HTLC.
 	//
 	//The outcome is carried in the response, never in a gRPC error. Exactly one
-	//of Accepted, Rejected or Ambiguous is set, and each documents the action it
-	//obliges the caller to take. An outcome the client does not recognise, or a
-	//response with none set, MUST be treated as Ambiguous.
+	//of Accepted, Rejected, Ambiguous or Mismatch is set, and each documents the
+	//action it obliges the caller to take. An outcome the client does not
+	//recognise, or a response with none set, MUST be treated as Ambiguous.
 	//
 	//A gRPC error means the call failed rather than the HTLC: a malformed
 	//request, an auth failure, a transport problem, or a server not running this
