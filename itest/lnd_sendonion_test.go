@@ -17,8 +17,6 @@ import (
 	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 // testSendOnion tests the basic success case for the SendOnion RPC. It
@@ -85,8 +83,10 @@ func testSendOnion(ht *lntest.HarnessTest) {
 		AttemptId:      1,
 	}
 
-	err := alice.RPC.SendOnion(sendReq)
+	resp, err := alice.RPC.SendOnion(sendReq)
 	require.NoError(ht, err, "expected successful onion send")
+	require.NotNil(ht, resp.GetAccepted(), "expected the switch to "+
+		"accept the attempt")
 
 	// Query for the result of the payment via onion and confirm that it
 	// succeeded.
@@ -168,8 +168,10 @@ func testSendOnionTwice(ht *lntest.HarnessTest) {
 		OnionBlob:      onionResp.OnionBlob,
 		AttemptId:      1,
 	}
-	err := alice.RPC.SendOnion(sendReq)
+	resp, err := alice.RPC.SendOnion(sendReq)
 	require.NoError(ht, err, "expected successful onion send")
+	require.NotNil(ht, resp.GetAccepted(), "expected the switch to "+
+		"accept the attempt")
 
 	// Assert that the HTLC reaches Dave.
 	invoiceStream := dave.RPC.SubscribeSingleInvoice(payHash[:])
@@ -178,14 +180,16 @@ func testSendOnionTwice(ht *lntest.HarnessTest) {
 	// While the first onion is still in-flight, we'll send the same onion
 	// again with the same attempt ID. This should error as our Switch will
 	// detect duplicate ADDs for *in-flight* HTLCs.
-	err = alice.RPC.SendOnion(sendReq)
-	require.Error(ht, err, "expected failure on onion send")
+	resp, err = alice.RPC.SendOnion(sendReq)
+	require.NoError(ht, err, "a duplicate dispatch is an acknowledgement, "+
+		"not an error")
 
-	// Check that we get the expected gRPC error.
-	s, ok := status.FromError(err)
-	require.True(ht, ok, "expected gRPC status error")
-	require.Equal(ht, codes.AlreadyExists, s.Code(),
-		"unexpected error code")
+	accepted := resp.GetAccepted()
+	require.NotNil(ht, accepted, "expected an acknowledgement")
+	require.True(ht, accepted.AlreadyRegistered,
+		"the switch already held this attempt and must say so")
+	require.Equal(ht, payHash[:], accepted.PaymentHash,
+		"the acknowledgement must echo the hash we asked about")
 
 	// Dave settles the invoice.
 	dave.RPC.SettleInvoice(preimage[:])
@@ -206,14 +210,14 @@ func testSendOnionTwice(ht *lntest.HarnessTest) {
 	// Now that the original HTLC attempt has settled, we'll send the same
 	// onion again with the same attempt ID. Confirm that this is also
 	// prevented.
-	err = alice.RPC.SendOnion(sendReq)
-	require.Error(ht, err, "expected failure on onion send")
+	resp, err = alice.RPC.SendOnion(sendReq)
+	require.NoError(ht, err, "a duplicate dispatch is an acknowledgement, "+
+		"not an error")
 
-	// Check that we get the expected gRPC error.
-	s, ok = status.FromError(err)
-	require.True(ht, ok, "expected gRPC status error")
-	require.Equal(ht, codes.AlreadyExists, s.Code(),
-		"unexpected error code")
+	accepted = resp.GetAccepted()
+	require.NotNil(ht, accepted, "expected an acknowledgement")
+	require.True(ht, accepted.AlreadyRegistered,
+		"the switch already held this attempt and must say so")
 
 	// Now that we've confirmed that duplicate sends are rejected for
 	// settled attempts, delete the attempt record from the store.
@@ -295,48 +299,47 @@ func testSendOnionConcurrency(ht *lntest.HarnessTest) {
 	var wg sync.WaitGroup
 	wg.Add(numConcurrentRequests)
 
-	// Use channels to collect the results from each goroutine.
-	resultsChan := make(chan error, numConcurrentRequests)
+	// Collect each response and error, and assert on them below, since
+	// require must run on the test goroutine.
+	type sendResult struct {
+		resp *switchrpc.SendOnionResponse
+		err  error
+	}
+	resultsChan := make(chan sendResult, numConcurrentRequests)
 
 	// Launch all requests concurrently to simulate a retry storm.
 	for i := 0; i < numConcurrentRequests; i++ {
 		go func() {
 			defer wg.Done()
 
-			err := alice.RPC.SendOnion(sendReq)
-			resultsChan <- err
+			resp, err := alice.RPC.SendOnion(sendReq)
+			resultsChan <- sendResult{resp: resp, err: err}
 		}()
 	}
 
 	wg.Wait()
 	close(resultsChan)
 
-	// We expect exactly one successful dispatch and the rest to be
-	// rejected as duplicates.
+	// We expect exactly one dispatch, with the rest acknowledged as
+	// duplicates.
 	successCount := 0
 	duplicateCount := 0
 
-	for err := range resultsChan {
-		// A nil error indicates a successful dispatch.
-		if err == nil {
-			successCount++
-			continue
-		}
+	for res := range resultsChan {
+		require.NoError(ht, res.err, "dispatch must not error")
+		accepted := res.resp.GetAccepted()
 
-		// For non-nil errors, we should receive a gRPC status error.
-		s, ok := status.FromError(err)
+		// Every concurrent dispatch of the same attempt id must be
+		// accepted: exactly one does the work and the rest are
+		// acknowledged as already held. None may be rejected or
+		// ambiguous, because the switch always knows the answer here.
+		require.NotNilf(ht, accepted, "concurrent dispatch was not "+
+			"accepted: %v", res.resp.Outcome)
 
-		// If it's not a gRPC status error, it's an unexpected
-		// condition.
-		require.Truef(ht, ok, "unexpected error from SendOnion: %v, "+
-			"code: %v", s.Err().Error(), s.Code())
-
-		// Check if the error code indicates a duplicate acknowledgment.
-		if s.Code() == codes.AlreadyExists {
+		if accepted.AlreadyRegistered {
 			duplicateCount++
 		} else {
-			ht.Fatalf("unexpected error from SendOnion: %v, "+
-				"code: %v", s.Err().Error(), s.Code())
+			successCount++
 		}
 	}
 
@@ -403,8 +406,10 @@ func testTrackOnion(ht *lntest.HarnessTest) {
 		AttemptId:      1,
 	}
 
-	err := alice.RPC.SendOnion(sendReq)
+	resp, err := alice.RPC.SendOnion(sendReq)
 	require.NoError(ht, err, "expected successful onion send")
+	require.NotNil(ht, resp.GetAccepted(), "expected the switch to "+
+		"accept the attempt")
 
 	// Track the payment providing all necessary information to delegate
 	// error decryption to the server. We expect this to fail as Dave is not
@@ -546,20 +551,19 @@ func testSendOnionPreWireDefiniteIsSafe(ht *lntest.HarnessTest) {
 		AttemptId:      1,
 	}
 
-	err := alice.RPC.SendOnion(sendReq)
-	require.Error(ht, err, "expected a pre-wire dispatch failure")
+	resp, err := alice.RPC.SendOnion(sendReq)
+	require.NoError(ht, err, "a pre-wire rejection is an outcome, not an "+
+		"RPC error")
 
-	// If the failure is definitive, it must be classified as a
-	// DefiniteFailure (callers rely on it to act on the failure).
-	s, ok := status.FromError(err)
-	require.True(ht, ok, "expected a gRPC status error")
-	if s.Code() == codes.FailedPrecondition {
-		details := switchrpc.GetSendOnionFailureDetails(err)
-		require.NotNil(ht, details, "FailedPrecondition without details")
-		require.NotNil(ht, details.GetDefiniteFailure(),
-			"definitive SendOnion error must carry a DefiniteFailure")
-		require.Nil(ht, details.GetIndefiniteFailure())
-	}
+	// A pre-wire failure must be reported as Rejected, with a wire failure
+	// the caller can decode and act on.
+	rejected := resp.GetRejected()
+	require.NotNil(ht, rejected, "a pre-wire failure must be Rejected")
+	require.NotEmpty(ht, rejected.WireFailure,
+		"a rejection must carry a wire failure the caller can act on")
+
+	_, decodeErr := switchrpc.UnmarshallFailureMessage(rejected.WireFailure)
+	require.NoError(ht, decodeErr, "the wire failure must be decodable")
 
 	// Nothing crossed the wire: Bob never saw an incoming HTLC.
 	assertPeerHasNoPendingHtlcs(ht, bob)
@@ -613,9 +617,12 @@ func testSendOnionPreWireDropNotDefinite(ht *lntest.HarnessTest) {
 	}
 
 	// SendOnion must succeed, since the HTLC was accepted into the mailbox.
-	err := alice.RPC.SendOnion(sendReq)
-	require.NoError(ht, err, "pre-wire drop must not be a definitive "+
-		"SendOnion failure")
+	resp, err := alice.RPC.SendOnion(sendReq)
+	require.NoError(ht, err, "a dropped HTLC must not fail SendOnion")
+	require.NotNil(ht, resp.GetAccepted(), "the switch took ownership, so "+
+		"the outcome must be Accepted and resolved via TrackOnion")
+	require.Nil(ht, resp.GetRejected(), "a dropped HTLC is not a "+
+		"rejection: the switch cannot tell it apart from a live one")
 
 	// Bob never sees the ADD (dropped before Peer.SendMessage).
 	assertPeerHasNoPendingHtlcs(ht, bob)
@@ -678,8 +685,10 @@ func testSendOnionPostWireNeverDefinite(ht *lntest.HarnessTest) {
 	}
 
 	// SendOnion succeeds and the HTLC reaches Bob (on the wire).
-	err := alice.RPC.SendOnion(sendReq)
+	resp, err := alice.RPC.SendOnion(sendReq)
 	require.NoError(ht, err, "expected successful onion send")
+	require.NotNil(ht, resp.GetAccepted(), "expected the switch to "+
+		"accept the attempt")
 
 	invoiceStream := bob.RPC.SubscribeSingleInvoice(payHash[:])
 	ht.AssertInvoiceState(invoiceStream, lnrpc.Invoice_ACCEPTED)
