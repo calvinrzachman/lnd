@@ -78,6 +78,7 @@ type mockAttemptStore struct {
 	htlcswitch.AttemptStore
 	initErr    error
 	failErr    error
+	failCalls  int
 	deleteErr  error
 	deleteResp map[uint64]htlcswitch.DeletionStatus
 }
@@ -87,9 +88,11 @@ func (m *mockAttemptStore) InitAttempt(attemptID uint64) error {
 	return m.initErr
 }
 
-// FailPendingAttempt returns the mocked failErr.
+// FailPendingAttempt records the call and returns the mocked failErr.
 func (m *mockAttemptStore) FailPendingAttempt(attemptID uint64,
 	reason *htlcswitch.LinkError) error {
+
+	m.failCalls++
 
 	return m.failErr
 }

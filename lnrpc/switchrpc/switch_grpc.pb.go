@@ -18,38 +18,21 @@ const _ = grpc.SupportPackageIsVersion7
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type SwitchClient interface {
-	// SendOnion provides an idempotent API for dispatching a pre-formed onion
-	// packet, which is the primary entry point for a remote router.
+	// SendOnion dispatches a pre-formed onion packet. It is the primary entry
+	// point for a remote router, and it is idempotent: a client can and should
+	// retry it after a timeout or disconnection, reusing the same attempt_id so
+	// the server recognises the retry rather than sending a second HTLC.
 	//
-	// To safely handle network failures, a client can and should retry this RPC
-	// after a timeout or disconnection. Retries MUST use the exact same
-	// attempt_id to allow the server to correctly detect duplicate requests.
+	// The outcome is carried in the response, never in a gRPC error. Exactly one
+	// of Accepted, Rejected or Ambiguous is set, and each documents the action it
+	// obliges the caller to take. An outcome the client does not recognise, or a
+	// response with none set, MUST be treated as Ambiguous.
 	//
-	// A client interacting with this RPC must handle four distinct categories
-	// of outcomes, determined by the gRPC status code:
-	//
-	// 1. SUCCESS (gRPC code OK): A definitive confirmation that the HTLC has
-	// been successfully dispatched. The client can proceed to track the
-	// payment's final result via the TrackOnion RPC.
-	//
-	// 2. DUPLICATE ACKNOWLEDGMENT (gRPC code AlreadyExists): A definitive
-	// acknowledgment that a request with the same attempt_id has already
-	// been successfully processed. A retrying client should interpret this
-	// as a success and proceed to tracking the payment's result.
-	//
-	// 3. INDEFINITE FAILURE (gRPC code Unavailable or DeadlineExceeded): The
-	// state of the HTLC dispatch is unknown. The client MUST retry the exact
-	// same request to resolve the ambiguity. A client MUST NOT treat this as
-	// a definitive failure and move on to a new attempt ID; doing so risks a
-	// duplicate in-flight HTLC.
-	//
-	// 4. DEFINITIVE FAILURE (gRPC code FailedPrecondition, InvalidArgument,
-	// etc.): The HTLC was not and will not be dispatched. The client should
-	// fail the attempt and may retry with a new route and/or attempt_id.
-	//
-	// In the case of a FailedPrecondition or Unavailable failure, the gRPC
-	// error may include a SendOnionFailureDetails message with additional
-	// context for logging and pathfinding.
+	// A gRPC error means the call failed rather than the HTLC: a malformed
+	// request, an auth failure, a transport problem, or a server not running this
+	// sub-server. A client that cannot tell those apart MUST retry the same
+	// attempt_id, because a call that never reached the server and a call whose
+	// response was lost look identical from outside.
 	SendOnion(ctx context.Context, in *SendOnionRequest, opts ...grpc.CallOption) (*SendOnionResponse, error)
 	// TrackOnion allows callers to query whether or not a payment dispatched via
 	// SendOnion succeeded or failed.
@@ -163,38 +146,21 @@ func (c *switchClient) DisableRemoteRouter(ctx context.Context, in *DisableRemot
 // All implementations must embed UnimplementedSwitchServer
 // for forward compatibility
 type SwitchServer interface {
-	// SendOnion provides an idempotent API for dispatching a pre-formed onion
-	// packet, which is the primary entry point for a remote router.
+	// SendOnion dispatches a pre-formed onion packet. It is the primary entry
+	// point for a remote router, and it is idempotent: a client can and should
+	// retry it after a timeout or disconnection, reusing the same attempt_id so
+	// the server recognises the retry rather than sending a second HTLC.
 	//
-	// To safely handle network failures, a client can and should retry this RPC
-	// after a timeout or disconnection. Retries MUST use the exact same
-	// attempt_id to allow the server to correctly detect duplicate requests.
+	// The outcome is carried in the response, never in a gRPC error. Exactly one
+	// of Accepted, Rejected or Ambiguous is set, and each documents the action it
+	// obliges the caller to take. An outcome the client does not recognise, or a
+	// response with none set, MUST be treated as Ambiguous.
 	//
-	// A client interacting with this RPC must handle four distinct categories
-	// of outcomes, determined by the gRPC status code:
-	//
-	// 1. SUCCESS (gRPC code OK): A definitive confirmation that the HTLC has
-	// been successfully dispatched. The client can proceed to track the
-	// payment's final result via the TrackOnion RPC.
-	//
-	// 2. DUPLICATE ACKNOWLEDGMENT (gRPC code AlreadyExists): A definitive
-	// acknowledgment that a request with the same attempt_id has already
-	// been successfully processed. A retrying client should interpret this
-	// as a success and proceed to tracking the payment's result.
-	//
-	// 3. INDEFINITE FAILURE (gRPC code Unavailable or DeadlineExceeded): The
-	// state of the HTLC dispatch is unknown. The client MUST retry the exact
-	// same request to resolve the ambiguity. A client MUST NOT treat this as
-	// a definitive failure and move on to a new attempt ID; doing so risks a
-	// duplicate in-flight HTLC.
-	//
-	// 4. DEFINITIVE FAILURE (gRPC code FailedPrecondition, InvalidArgument,
-	// etc.): The HTLC was not and will not be dispatched. The client should
-	// fail the attempt and may retry with a new route and/or attempt_id.
-	//
-	// In the case of a FailedPrecondition or Unavailable failure, the gRPC
-	// error may include a SendOnionFailureDetails message with additional
-	// context for logging and pathfinding.
+	// A gRPC error means the call failed rather than the HTLC: a malformed
+	// request, an auth failure, a transport problem, or a server not running this
+	// sub-server. A client that cannot tell those apart MUST retry the same
+	// attempt_id, because a call that never reached the server and a call whose
+	// response was lost look identical from outside.
 	SendOnion(context.Context, *SendOnionRequest) (*SendOnionResponse, error)
 	// TrackOnion allows callers to query whether or not a payment dispatched via
 	// SendOnion succeeded or failed.

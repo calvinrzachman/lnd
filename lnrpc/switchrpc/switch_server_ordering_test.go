@@ -9,8 +9,6 @@ import (
 	"github.com/lightningnetwork/lnd/htlcswitch"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 // TestInitAttemptPrecedesValidation asserts that the idempotency gate runs
@@ -18,10 +16,11 @@ import (
 //
 // Callers treat InvalidArgument as definite, meaning no HTLC was dispatched.
 // That is only sound because InitAttempt answers first, so a retry of an
-// attempt the server already knows about comes back as AlreadyExists and never
-// as a validation failure. If validation moved ahead of the gate, retrying a
-// live attempt with a request the server disliked would report definite for an
-// HTLC that is on the wire, and the caller would fail it and reroute.
+// attempt the server already knows about comes back as an already registered
+// acceptance and never as a validation failure. If validation moved ahead of
+// the gate, retrying a live attempt with a request the server disliked would
+// report definite for an HTLC that is on the wire, and the caller would fail
+// it and reroute.
 //
 // The ordering is not otherwise visible: both orderings compile, both pass the
 // individual validation tests, and they differ only for a request that is at
@@ -49,15 +48,15 @@ func TestInitAttemptPrecedesValidation(t *testing.T) {
 		FirstHopChanId: 12345,
 	}
 
-	_, err = server.SendOnion(t.Context(), req)
-	require.Error(t, err)
+	resp, err := server.SendOnion(t.Context(), req)
+	require.NoErrorf(t, err, "validation ran before the idempotency gate: "+
+		"a known attempt reported an RPC error instead of an already "+
+		"registered acceptance. A caller reads InvalidArgument as "+
+		"definitely-not-dispatched and may reroute an HTLC that is "+
+		"already on the wire")
 
-	st, ok := status.FromError(err)
-	require.True(t, ok, "expected a gRPC status error")
-
-	require.Equalf(t, codes.AlreadyExists, st.Code(),
-		"validation ran before the idempotency gate: a known attempt "+
-			"reported %v instead of AlreadyExists. A caller reads "+
-			"that as definitely-not-dispatched and may reroute an "+
-			"HTLC that is already on the wire", st.Code())
+	accepted := resp.GetAccepted()
+	require.NotNil(t, accepted, "a known attempt must be accepted")
+	require.True(t, accepted.AlreadyRegistered,
+		"a known attempt must be reported as already registered")
 }
