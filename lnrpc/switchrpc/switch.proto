@@ -16,9 +16,9 @@ service Switch {
     the server recognises the retry rather than sending a second HTLC.
 
     The outcome is carried in the response, never in a gRPC error. Exactly one
-    of Accepted, Rejected or Ambiguous is set, and each documents the action it
-    obliges the caller to take. An outcome the client does not recognise, or a
-    response with none set, MUST be treated as Ambiguous.
+    of Accepted, Rejected, Ambiguous or Mismatch is set, and each documents the
+    action it obliges the caller to take. An outcome the client does not
+    recognise, or a response with none set, MUST be treated as Ambiguous.
 
     A gRPC error means the call failed rather than the HTLC: a malformed
     request, an auth failure, a transport problem, or a server not running this
@@ -164,6 +164,7 @@ message SendOnionResponse {
         Accepted accepted = 1;
         Rejected rejected = 2;
         Ambiguous ambiguous = 3;
+        Mismatch mismatch = 4;
     }
 }
 
@@ -216,6 +217,22 @@ message Ambiguous {
     // requires the same action, and a caller that treats one reason
     // differently from another will eventually treat one of them unsafely.
     // It is free text rather than an enum for exactly that reason.
+    string reason = 1;
+}
+
+// Mismatch means the attempt_id is already registered for a request that
+// differs from this one. This indicates a caller bug, such as a reused
+// attempt_id or a resend whose bytes changed.
+//
+// The registered attempt may be the caller's own and still in flight, so the
+// caller MUST NOT treat this as a failure, MUST NOT dispatch another attempt
+// for the payment, and MUST NOT reuse the attempt_id. It should halt the
+// payment and alert an operator.
+//
+// NOTE: Not yet sent. A server reports it once it records a fingerprint of
+// each registered request.
+message Mismatch {
+    // A human-readable reason, for logs and metrics.
     string reason = 1;
 }
 
