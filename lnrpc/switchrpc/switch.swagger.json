@@ -120,7 +120,7 @@
     "/v2/switch/onion": {
       "post": {
         "summary": "SendOnion dispatches a pre-formed onion packet. It is the primary entry\npoint for a remote router, and it is idempotent: a client can and should\nretry it after a timeout or disconnection, reusing the same attempt_id so\nthe server recognises the retry rather than sending a second HTLC.",
-        "description": "The outcome is carried in the response, never in a gRPC error. Exactly one\nof Accepted, Rejected or Ambiguous is set, and each documents the action it\nobliges the caller to take. An outcome the client does not recognise, or a\nresponse with none set, MUST be treated as Ambiguous.\n\nA gRPC error means the call failed rather than the HTLC: a malformed\nrequest, an auth failure, a transport problem, or a server not running this\nsub-server. A client that cannot tell those apart MUST retry the same\nattempt_id, because a call that never reached the server and a call whose\nresponse was lost look identical from outside.",
+        "description": "The outcome is carried in the response, never in a gRPC error. Exactly one\nof Accepted, Rejected, Ambiguous or Mismatch is set, and each documents the\naction it obliges the caller to take. An outcome the client does not\nrecognise, or a response with none set, MUST be treated as Ambiguous.\n\nA gRPC error means the call failed rather than the HTLC: a malformed\nrequest, an auth failure, a transport problem, or a server not running this\nsub-server. A client that cannot tell those apart MUST retry the same\nattempt_id, because a call that never reached the server and a call whose\nresponse was lost look identical from outside.",
         "operationId": "Switch_SendOnion",
         "responses": {
           "200": {
@@ -563,6 +563,16 @@
       },
       "description": "LocalFailure represents a failure that originates at the local node, as\nreported by TrackOnion. SendOnion reports a local rejection through the\nRejected outcome instead, which carries the raw wire failure directly.\n\nNo onion decryption is involved because the failure occurred before the\nHTLC left our node."
     },
+    "switchrpcMismatch": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "description": "A human-readable reason, for logs and metrics."
+        }
+      },
+      "description": "Mismatch means the attempt_id is already registered for a request that\ndiffers from this one. This indicates a caller bug, such as a reused\nattempt_id or a resend whose bytes changed.\n\nThe registered attempt may be the caller's own and still in flight, so the\ncaller MUST NOT treat this as a failure, MUST NOT dispatch another attempt\nfor the payment, and MUST NOT reuse the attempt_id. It should halt the\npayment and alert an operator.\n\nNOTE: Not yet sent. A server reports it once it records a fingerprint of\neach registered request."
+    },
     "switchrpcRejected": {
       "type": "object",
       "properties": {
@@ -643,6 +653,9 @@
         },
         "ambiguous": {
           "$ref": "#/definitions/switchrpcAmbiguous"
+        },
+        "mismatch": {
+          "$ref": "#/definitions/switchrpcMismatch"
         }
       },
       "description": "SendOnionResponse reports what the switch did with the attempt. Exactly one\noutcome is always set.\n\nA gRPC error from SendOnion means the call itself failed: a malformed\nrequest, an auth failure, a transport problem, or a server not running this\nsub-server. It never describes what happened to an HTLC. A caller that\nreceives an error and cannot distinguish those cases MUST retry the same\nattempt_id, because a call that failed before reaching the server and a call\nwhose response was lost are indistinguishable from outside.\n\nFORWARD COMPATIBILITY, and this rule is load-bearing:\n\nA caller that receives an outcome it does not recognise, or a response with\nno outcome set at all, MUST treat it as Ambiguous and retry the same\nattempt_id. It MUST NOT treat it as success, failure, or an empty response.\n\nThis matters because carrying the outcome in the response body trades one\nsafety property away and this rule buys it back. An unhandled gRPC error is\nloud, while an unhandled response field is silent, so a caller built against\nan older version of this service could otherwise misread a newer server's\nanswer as \"nothing happened\". Defaulting the unknown case to Ambiguous keeps\nthe failure mode a wasted retry rather than a lost or duplicated payment."

@@ -246,6 +246,10 @@ func TestSendOnion(t *testing.T) {
 			require.Equal(t, tc.wantFailCalls, store.failCalls,
 				"terminal records written")
 
+			// The server does not record request fingerprints yet,
+			// so it must never report a mismatch.
+			require.Nil(t, resp.GetMismatch())
+
 			// An expected outcome means the call itself succeeds
 			// and the outcome rides in the response body.
 			if tc.expectedOutcome != "" {
