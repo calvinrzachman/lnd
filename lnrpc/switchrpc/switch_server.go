@@ -650,6 +650,9 @@ func (s *Server) findEligibleChannelID(pubKey *btcec.PublicKey,
 //
 // 4. no_record: this server holds no record of the attempt.
 //
+// 5. mismatch: the attempt settled with a preimage for a different payment
+// hash, which is withheld.
+//
 // A response with no result set means the attempt may still be live. The
 // server answers that way when it holds a result it cannot describe.
 //
@@ -821,6 +824,17 @@ func marshallAttemptResult(attemptID uint64, hash lntypes.Hash,
 			ErrAmbiguousPaymentState.Error())
 	}
 
+	// The stored attempt may belong to a different payment if its id was
+	// reused. Its preimage is that payment's secret, so it is withheld and
+	// the caller is told the attempt is bound elsewhere.
+	preimage := lntypes.Preimage(result.Preimage)
+	if !preimage.Matches(hash) {
+		log.Errorf("Attempt %d settled with a preimage that does not "+
+			"match payment=%v, withholding it", attemptID, hash)
+
+		return mismatch(), nil
+	}
+
 	log.Debugf("Received preimage via onion attempt_id=%d for payment=%v",
 		attemptID, hash)
 
@@ -836,6 +850,15 @@ func inFlight() *TrackOnionResponse {
 	return &TrackOnionResponse{
 		Result: &TrackOnionResponse_InFlight{
 			InFlight: &InFlight{},
+		},
+	}
+}
+
+// mismatch reports that the attempt settled for a different payment hash.
+func mismatch() *TrackOnionResponse {
+	return &TrackOnionResponse{
+		Result: &TrackOnionResponse_Mismatch{
+			Mismatch: &Mismatch{},
 		},
 	}
 }

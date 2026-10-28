@@ -595,8 +595,13 @@ func (x *Ambiguous) GetReason() string {
 // for the payment, and MUST NOT reuse the attempt_id. It should halt the
 // payment and alert an operator.
 //
-// NOTE: Not yet sent. A server reports it once it records a fingerprint of
-// each registered request.
+// From SendOnion: not yet sent. A server reports it once it records a
+// fingerprint of each registered request.
+//
+// From TrackOnion: the attempt settled with a preimage that does not hash to
+// the request's payment_hash, so the attempt_id is bound to a different
+// payment. The preimage is withheld, since it is that other payment's secret.
+// The caller MUST NOT record the payment as paid.
 type Mismatch struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// A human-readable reason, for logs and metrics.
@@ -756,6 +761,7 @@ type TrackOnionResponse struct {
 	//	*TrackOnionResponse_FailureDetails
 	//	*TrackOnionResponse_InFlight
 	//	*TrackOnionResponse_NoRecord
+	//	*TrackOnionResponse_Mismatch
 	Result        isTrackOnionResponse_Result `protobuf_oneof:"result"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -834,13 +840,23 @@ func (x *TrackOnionResponse) GetNoRecord() *NoRecord {
 	return nil
 }
 
+func (x *TrackOnionResponse) GetMismatch() *Mismatch {
+	if x != nil {
+		if x, ok := x.Result.(*TrackOnionResponse_Mismatch); ok {
+			return x.Mismatch
+		}
+	}
+	return nil
+}
+
 type isTrackOnionResponse_Result interface {
 	isTrackOnionResponse_Result()
 }
 
 type TrackOnionResponse_Preimage struct {
-	// The attempt settled, and this is its payment preimage. The caller
-	// may record the payment as paid.
+	// The attempt settled, and this is its payment preimage, which hashes
+	// to the request's payment_hash. The caller may record the payment as
+	// paid.
 	Preimage []byte `protobuf:"bytes,1,opt,name=preimage,proto3,oneof"`
 }
 
@@ -860,6 +876,11 @@ type TrackOnionResponse_NoRecord struct {
 	NoRecord *NoRecord `protobuf:"bytes,4,opt,name=no_record,json=noRecord,proto3,oneof"`
 }
 
+type TrackOnionResponse_Mismatch struct {
+	// The attempt settled for a different payment hash.
+	Mismatch *Mismatch `protobuf:"bytes,5,opt,name=mismatch,proto3,oneof"`
+}
+
 func (*TrackOnionResponse_Preimage) isTrackOnionResponse_Result() {}
 
 func (*TrackOnionResponse_FailureDetails) isTrackOnionResponse_Result() {}
@@ -867,6 +888,8 @@ func (*TrackOnionResponse_FailureDetails) isTrackOnionResponse_Result() {}
 func (*TrackOnionResponse_InFlight) isTrackOnionResponse_Result() {}
 
 func (*TrackOnionResponse_NoRecord) isTrackOnionResponse_Result() {}
+
+func (*TrackOnionResponse_Mismatch) isTrackOnionResponse_Result() {}
 
 // InFlight means the attempt has not resolved and its HTLC may be live. Keep
 // tracking it, and do not record a terminal outcome in the meantime.
@@ -1709,12 +1732,13 @@ const file_switchrpc_switch_proto_rawDesc = "" +
 	"hopPubkeys\x123\n" +
 	"\n" +
 	"track_mode\x18\x05 \x01(\x0e2\x14.switchrpc.TrackModeR\ttrackModeB\x0e\n" +
-	"\f_session_key\"\xea\x01\n" +
+	"\f_session_key\"\x9d\x02\n" +
 	"\x12TrackOnionResponse\x12\x1c\n" +
 	"\bpreimage\x18\x01 \x01(\fH\x00R\bpreimage\x12D\n" +
 	"\x0ffailure_details\x18\x02 \x01(\v2\x19.switchrpc.FailureDetailsH\x00R\x0efailureDetails\x122\n" +
 	"\tin_flight\x18\x03 \x01(\v2\x13.switchrpc.InFlightH\x00R\binFlight\x122\n" +
-	"\tno_record\x18\x04 \x01(\v2\x13.switchrpc.NoRecordH\x00R\bnoRecordB\b\n" +
+	"\tno_record\x18\x04 \x01(\v2\x13.switchrpc.NoRecordH\x00R\bnoRecord\x121\n" +
+	"\bmismatch\x18\x05 \x01(\v2\x13.switchrpc.MismatchH\x00R\bmismatchB\b\n" +
 	"\x06result\"\n" +
 	"\n" +
 	"\bInFlight\"\n" +
@@ -1828,28 +1852,29 @@ var file_switchrpc_switch_proto_depIdxs = []int32{
 	12, // 6: switchrpc.TrackOnionResponse.failure_details:type_name -> switchrpc.FailureDetails
 	10, // 7: switchrpc.TrackOnionResponse.in_flight:type_name -> switchrpc.InFlight
 	11, // 8: switchrpc.TrackOnionResponse.no_record:type_name -> switchrpc.NoRecord
-	14, // 9: switchrpc.FailureDetails.local_failure:type_name -> switchrpc.LocalFailure
-	13, // 10: switchrpc.FailureDetails.forwarding_failure:type_name -> switchrpc.ForwardingFailure
-	16, // 11: switchrpc.FailureDetails.unreadable_failure:type_name -> switchrpc.UnreadableFailure
-	15, // 12: switchrpc.FailureDetails.switch_error:type_name -> switchrpc.SwitchError
-	25, // 13: switchrpc.BuildOnionRequest.route:type_name -> lnrpc.Route
-	21, // 14: switchrpc.DeleteAttemptsResponse.results:type_name -> switchrpc.AttemptDeletionResult
-	1,  // 15: switchrpc.AttemptDeletionResult.status:type_name -> switchrpc.AttemptDeletionStatus
-	2,  // 16: switchrpc.Switch.SendOnion:input_type -> switchrpc.SendOnionRequest
-	8,  // 17: switchrpc.Switch.TrackOnion:input_type -> switchrpc.TrackOnionRequest
-	17, // 18: switchrpc.Switch.BuildOnion:input_type -> switchrpc.BuildOnionRequest
-	19, // 19: switchrpc.Switch.DeleteAttempts:input_type -> switchrpc.DeleteAttemptsRequest
-	22, // 20: switchrpc.Switch.DisableRemoteRouter:input_type -> switchrpc.DisableRemoteRouterRequest
-	3,  // 21: switchrpc.Switch.SendOnion:output_type -> switchrpc.SendOnionResponse
-	9,  // 22: switchrpc.Switch.TrackOnion:output_type -> switchrpc.TrackOnionResponse
-	18, // 23: switchrpc.Switch.BuildOnion:output_type -> switchrpc.BuildOnionResponse
-	20, // 24: switchrpc.Switch.DeleteAttempts:output_type -> switchrpc.DeleteAttemptsResponse
-	23, // 25: switchrpc.Switch.DisableRemoteRouter:output_type -> switchrpc.DisableRemoteRouterResponse
-	21, // [21:26] is the sub-list for method output_type
-	16, // [16:21] is the sub-list for method input_type
-	16, // [16:16] is the sub-list for extension type_name
-	16, // [16:16] is the sub-list for extension extendee
-	0,  // [0:16] is the sub-list for field type_name
+	7,  // 9: switchrpc.TrackOnionResponse.mismatch:type_name -> switchrpc.Mismatch
+	14, // 10: switchrpc.FailureDetails.local_failure:type_name -> switchrpc.LocalFailure
+	13, // 11: switchrpc.FailureDetails.forwarding_failure:type_name -> switchrpc.ForwardingFailure
+	16, // 12: switchrpc.FailureDetails.unreadable_failure:type_name -> switchrpc.UnreadableFailure
+	15, // 13: switchrpc.FailureDetails.switch_error:type_name -> switchrpc.SwitchError
+	25, // 14: switchrpc.BuildOnionRequest.route:type_name -> lnrpc.Route
+	21, // 15: switchrpc.DeleteAttemptsResponse.results:type_name -> switchrpc.AttemptDeletionResult
+	1,  // 16: switchrpc.AttemptDeletionResult.status:type_name -> switchrpc.AttemptDeletionStatus
+	2,  // 17: switchrpc.Switch.SendOnion:input_type -> switchrpc.SendOnionRequest
+	8,  // 18: switchrpc.Switch.TrackOnion:input_type -> switchrpc.TrackOnionRequest
+	17, // 19: switchrpc.Switch.BuildOnion:input_type -> switchrpc.BuildOnionRequest
+	19, // 20: switchrpc.Switch.DeleteAttempts:input_type -> switchrpc.DeleteAttemptsRequest
+	22, // 21: switchrpc.Switch.DisableRemoteRouter:input_type -> switchrpc.DisableRemoteRouterRequest
+	3,  // 22: switchrpc.Switch.SendOnion:output_type -> switchrpc.SendOnionResponse
+	9,  // 23: switchrpc.Switch.TrackOnion:output_type -> switchrpc.TrackOnionResponse
+	18, // 24: switchrpc.Switch.BuildOnion:output_type -> switchrpc.BuildOnionResponse
+	20, // 25: switchrpc.Switch.DeleteAttempts:output_type -> switchrpc.DeleteAttemptsResponse
+	23, // 26: switchrpc.Switch.DisableRemoteRouter:output_type -> switchrpc.DisableRemoteRouterResponse
+	22, // [22:27] is the sub-list for method output_type
+	17, // [17:22] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_switchrpc_switch_proto_init() }
@@ -1870,6 +1895,7 @@ func file_switchrpc_switch_proto_init() {
 		(*TrackOnionResponse_FailureDetails)(nil),
 		(*TrackOnionResponse_InFlight)(nil),
 		(*TrackOnionResponse_NoRecord)(nil),
+		(*TrackOnionResponse_Mismatch)(nil),
 	}
 	file_switchrpc_switch_proto_msgTypes[10].OneofWrappers = []any{
 		(*FailureDetails_LocalFailure)(nil),

@@ -39,8 +39,8 @@ type SwitchClient interface {
 	// with SendOnion.
 	//
 	// The answer is carried in the response, never in a gRPC error. At most one
-	// of preimage, failure_details, in_flight or no_record is set, and each
-	// documents the action it obliges the caller to take. A result the client
+	// of preimage, failure_details, in_flight, no_record or mismatch is set, and
+	// each documents the action it obliges the caller to take. A result the client
 	// does not recognise, or a response with none set, means the attempt may
 	// still be live: keep tracking it and never treat it as failed.
 	//
@@ -156,8 +156,8 @@ type SwitchServer interface {
 	// with SendOnion.
 	//
 	// The answer is carried in the response, never in a gRPC error. At most one
-	// of preimage, failure_details, in_flight or no_record is set, and each
-	// documents the action it obliges the caller to take. A result the client
+	// of preimage, failure_details, in_flight, no_record or mismatch is set, and
+	// each documents the action it obliges the caller to take. A result the client
 	// does not recognise, or a response with none set, means the attempt may
 	// still be live: keep tracking it and never treat it as failed.
 	//
