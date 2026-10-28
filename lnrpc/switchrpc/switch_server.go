@@ -440,6 +440,11 @@ func rejected(failure lnwire.FailureMessage) *SendOnionResponse {
 // that is a rejection. Any other error is reported as ambiguous. The attempt
 // is still recorded as failed by the caller of this function, so a retry is
 // acknowledged and tracking resolves it to that recorded failure.
+//
+// NOTE: lnd's router reads a SendHTLC error with the same predicate, in
+// handleSwitchErr (routing/payment_lifecycle.go). Both rely on the switch
+// returning a ClearTextError only before it commits a circuit, so a change to
+// how one reads these errors should be reflected in the other.
 func marshallDispatchOutcome(err error) *SendOnionResponse {
 	var clearTextErr htlcswitch.ClearTextError
 	if errors.As(err, &clearTextErr) {
