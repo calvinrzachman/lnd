@@ -383,7 +383,7 @@
       "properties": {
         "already_registered": {
           "type": "boolean",
-          "description": "Set when the switch already held this attempt from an earlier call,\neither because the attempt was already registered or because a circuit\nfor it already existed. Required behaviour is identical either way; this\nis diagnostic."
+          "description": "Set when the switch already held this attempt from an earlier call,\neither because the attempt was already registered or because a circuit\nfor it already existed. Required behaviour is identical either way; this\nis diagnostic.\n\nA circuit without a registration should not occur in correct operation.\nIt means the attempt_id is also in use by another dispatcher, such as\nlnd's own router, so the result later tracked may belong to that\ndispatcher's HTLC. Keep attempt_ids unique."
         }
       },
       "description": "Accepted means the switch has taken ownership of this attempt. Await the\nresult with TrackOnion.\n\nDo NOT conclude success or failure from this message. It reports who owns\nthe attempt, not how it ended."

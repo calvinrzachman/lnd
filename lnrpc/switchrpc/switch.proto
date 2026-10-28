@@ -177,6 +177,11 @@ message Accepted {
     // either because the attempt was already registered or because a circuit
     // for it already existed. Required behaviour is identical either way; this
     // is diagnostic.
+    //
+    // A circuit without a registration should not occur in correct operation.
+    // It means the attempt_id is also in use by another dispatcher, such as
+    // lnd's own router, so the result later tracked may belong to that
+    // dispatcher's HTLC. Keep attempt_ids unique.
     bool already_registered = 1;
 }
 

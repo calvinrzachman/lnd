@@ -344,9 +344,15 @@ func (s *Server) SendOnion(_ context.Context,
 		// If the dispatcher returns ErrDuplicateAdd, the switch already
 		// holds a circuit for this attempt. That is an acknowledgement
 		// of a prior dispatch, not a failure.
+		//
+		// The registration check above catches every repeat of an
+		// attempt id, so this is only reached when the store had no
+		// record but the circuit map did: an id shared with another
+		// dispatcher, or the two out of step. Log it loudly, since it
+		// should not happen in correct operation.
 		if errors.Is(dispatchErr, htlcswitch.ErrDuplicateAdd) {
-			log.Debugf("Duplicate dispatch for attempt id=%v",
-				attemptID)
+			log.Errorf("Circuit already exists for attempt id=%v "+
+				"that had no registration", attemptID)
 
 			return acknowledged(), nil
 		}

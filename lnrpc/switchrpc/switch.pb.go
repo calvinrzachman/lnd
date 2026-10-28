@@ -349,6 +349,11 @@ type Accepted struct {
 	// either because the attempt was already registered or because a circuit
 	// for it already existed. Required behaviour is identical either way; this
 	// is diagnostic.
+	//
+	// A circuit without a registration should not occur in correct operation.
+	// It means the attempt_id is also in use by another dispatcher, such as
+	// lnd's own router, so the result later tracked may belong to that
+	// dispatcher's HTLC. Keep attempt_ids unique.
 	AlreadyRegistered bool `protobuf:"varint,1,opt,name=already_registered,json=alreadyRegistered,proto3" json:"already_registered,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
