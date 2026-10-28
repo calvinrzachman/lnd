@@ -6,6 +6,7 @@ package switchrpc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -73,6 +74,10 @@ func TestSendOnion(t *testing.T) {
 		// because a pending record for an attempt that will never
 		// resolve would make TrackOnion hang.
 		wantFailCalls int
+
+		// wantFailCode is the wire failure code the handler must record
+		// for the attempt when wantFailCalls is non-zero.
+		wantFailCode lnwire.FailCode
 	}{
 		{
 			name: "valid request",
@@ -95,6 +100,7 @@ func TestSendOnion(t *testing.T) {
 			},
 			expectedErrCode: codes.InvalidArgument,
 			wantFailCalls:   1,
+			wantFailCode:    lnwire.CodeTemporaryNodeFailure,
 		},
 		{
 			name: "invalid onion blob size",
@@ -105,6 +111,7 @@ func TestSendOnion(t *testing.T) {
 			},
 			expectedErrCode: codes.InvalidArgument,
 			wantFailCalls:   1,
+			wantFailCode:    lnwire.CodeTemporaryNodeFailure,
 		},
 		{
 			name: "missing payment hash",
@@ -115,6 +122,7 @@ func TestSendOnion(t *testing.T) {
 			},
 			expectedErrCode: codes.InvalidArgument,
 			wantFailCalls:   1,
+			wantFailCode:    lnwire.CodeTemporaryNodeFailure,
 		},
 		{
 			name: "zero amount",
@@ -125,6 +133,7 @@ func TestSendOnion(t *testing.T) {
 			},
 			expectedErrCode: codes.InvalidArgument,
 			wantFailCalls:   1,
+			wantFailCode:    lnwire.CodeTemporaryNodeFailure,
 		},
 		{
 			name: "dispatcher internal error",
@@ -138,6 +147,7 @@ func TestSendOnion(t *testing.T) {
 			},
 			expectedOutcome: outcomeAmbiguous,
 			wantFailCalls:   1,
+			wantFailCode:    lnwire.CodeTemporaryNodeFailure,
 		},
 		{
 			// The ErrPaymentIDAlreadyExists error is the means by
@@ -218,6 +228,7 @@ func TestSendOnion(t *testing.T) {
 			},
 			expectedOutcome: outcomeRejected,
 			wantFailCalls:   1,
+			wantFailCode:    lnwire.CodeTemporaryChannelFailure,
 		},
 	}
 
@@ -245,6 +256,14 @@ func TestSendOnion(t *testing.T) {
 
 			require.Equal(t, tc.wantFailCalls, store.failCalls,
 				"terminal records written")
+			if tc.wantFailCalls > 0 {
+				require.NotNil(t, store.failReason)
+				require.Equal(
+					t, tc.wantFailCode,
+					store.failReason.WireMessage().Code(),
+					"recorded failure",
+				)
+			}
 
 			// The server does not record request fingerprints yet,
 			// so it must never report a mismatch.
@@ -1337,6 +1356,65 @@ func TestMarshallDispatchOutcome(t *testing.T) {
 			t.Parallel()
 
 			tc.assert(t, marshallDispatchOutcome(tc.err))
+		})
+	}
+}
+
+// TestDispatchFailureReason pins the failure recorded for an attempt whose
+// dispatch failed: a ClearTextError keeps its wire failure, and an error with
+// no wire failure records nothing specific.
+func TestDispatchFailureReason(t *testing.T) {
+	t.Parallel()
+
+	linkErr := htlcswitch.NewDetailedLinkError(
+		lnwire.NewTemporaryChannelFailure(nil),
+		htlcswitch.OutgoingFailureInsufficientBalance,
+	)
+
+	tests := []struct {
+		name     string
+		err      error
+		wantCode lnwire.FailCode
+	}{
+		{
+			name:     "link error",
+			err:      linkErr,
+			wantCode: lnwire.CodeTemporaryChannelFailure,
+		},
+		{
+			name:     "wrapped link error",
+			err:      fmt.Errorf("send: %w", linkErr),
+			wantCode: lnwire.CodeTemporaryChannelFailure,
+		},
+		{
+			name: "forwarding error",
+			err: htlcswitch.NewForwardingError(
+				&lnwire.FailUnknownNextPeer{}, 0,
+			),
+			wantCode: lnwire.CodeUnknownNextPeer,
+		},
+		{
+			name: "opaque error",
+			err:  errors.New("opaque"),
+		},
+		{
+			name: "switch exiting",
+			err:  htlcswitch.ErrSwitchExiting,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := dispatchFailureReason(tc.err)
+			if tc.wantCode == 0 {
+				require.Nil(t, got)
+				return
+			}
+
+			require.NotNil(t, got)
+			require.Equal(t, tc.wantCode, got.WireMessage().Code())
 		})
 	}
 }

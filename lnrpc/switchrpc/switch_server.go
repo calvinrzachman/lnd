@@ -321,7 +321,7 @@ func (s *Server) SendOnion(_ context.Context,
 		log.Warnf("Validation failed for attempt %d: %v. Failing "+
 			"pending attempt.", req.AttemptId, validationErr)
 
-		s.failPendingAttempt(req.AttemptId, "validation failure")
+		s.failPendingAttempt(req.AttemptId, nil, "validation failure")
 
 		return nil, validationErr
 	}
@@ -329,7 +329,10 @@ func (s *Server) SendOnion(_ context.Context,
 		log.Warnf("Cannot serve attempt %d: %v. Failing pending "+
 			"attempt.", req.AttemptId, rejection)
 
-		s.failPendingAttempt(req.AttemptId, "pre-dispatch rejection")
+		s.failPendingAttempt(
+			req.AttemptId, htlcswitch.NewLinkError(rejection),
+			"pre-dispatch rejection",
+		)
 
 		return rejected(rejection), nil
 	}
@@ -358,7 +361,10 @@ func (s *Server) SendOnion(_ context.Context,
 		log.Warnf("Dispatch failed for attempt %d: %v. Failing "+
 			"pending attempt.", req.AttemptId, dispatchErr)
 
-		s.failPendingAttempt(req.AttemptId, "dispatch failure")
+		s.failPendingAttempt(
+			req.AttemptId, dispatchFailureReason(dispatchErr),
+			"dispatch failure",
+		)
 
 		return marshallDispatchOutcome(dispatchErr), nil
 	}
@@ -446,16 +452,35 @@ func marshallDispatchOutcome(err error) *SendOnionResponse {
 	return ambiguous(err)
 }
 
-// failPendingAttempt is a helper which transitions the given attempt from an
-// initialized (PENDING) state to a FAILED state in the persistent store.
-func (s *Server) failPendingAttempt(attemptID uint64, context string) {
-	// We use a generic failure reason, as this is an internal failure.
-	// The original, more specific error is returned to the client.
-	failReason := &lnwire.FailTemporaryNodeFailure{}
+// dispatchFailureReason returns the failure to record for an attempt whose
+// dispatch failed with err. A ClearTextError carries the wire failure the
+// caller also receives, so that is recorded. Any other error has none, so nil
+// is returned and the generic reason is recorded.
+func dispatchFailureReason(err error) *htlcswitch.LinkError {
+	var clearTextErr htlcswitch.ClearTextError
+	if errors.As(err, &clearTextErr) {
+		return htlcswitch.NewLinkError(clearTextErr.WireMessage())
+	}
 
-	err := s.cfg.AttemptStore.FailPendingAttempt(
-		attemptID, htlcswitch.NewLinkError(failReason),
-	)
+	return nil
+}
+
+// failPendingAttempt is a helper which transitions the given attempt from an
+// initialized (PENDING) state to a FAILED state in the persistent store. The
+// reason is recorded so that a caller which recovers the attempt by tracking
+// it, after losing the SendOnion response, learns why it failed. A nil reason
+// records a generic TemporaryNodeFailure, for failures that carry no wire
+// failure of their own.
+func (s *Server) failPendingAttempt(attemptID uint64,
+	reason *htlcswitch.LinkError, context string) {
+
+	if reason == nil {
+		reason = htlcswitch.NewLinkError(
+			&lnwire.FailTemporaryNodeFailure{},
+		)
+	}
+
+	err := s.cfg.AttemptStore.FailPendingAttempt(attemptID, reason)
 	if err != nil {
 		// If we fail to transition the attempt to a FAILED state
 		// here, the htlc switch's own recovery mechanisms will
