@@ -552,11 +552,11 @@ func (s *Server) validateAndPrepareOnion(req *SendOnionRequest) (
 		// Find an eligible channel ID for the given first-hop pubkey.
 		chanID, err = s.findEligibleChannelID(firstHop, amount)
 		if err != nil {
-			// Well formed, but we have no usable channel to this
-			// peer right now. Nothing was dispatched, and the
-			// caller can act on that, so report it as a rejection
-			// carrying the wire failure a hop would have sent.
-			log.Debugf("No eligible channel for pubkey=%x: %v",
+			// Well formed, but we have no channel to this peer.
+			// Nothing was dispatched, and the caller can act on
+			// that, so report it as a rejection carrying the wire
+			// failure a hop would have sent.
+			log.Debugf("No channel for pubkey=%x: %v",
 				firstHop.SerializeCompressed(), err)
 
 			return chanID, htlcAdd, &lnwire.FailUnknownNextPeer{},
@@ -606,9 +606,12 @@ func (s *Server) validateAndPrepareOnion(req *SendOnionRequest) (
 	return chanID, htlcAdd, nil, err
 }
 
-// findEligibleChannelID attempts to find an eligible channel based on the
-// provided public key and the amount to be sent. It returns a channel ID that
-// can carry the given payment amount.
+// findEligibleChannelID picks a channel to the peer with the given public key
+// for an HTLC of the given amount. It prefers a channel that can carry the
+// amount. If the peer has channels but none can, it still returns one, so that
+// the switch rejects the HTLC with the precise failure for that channel, such
+// as a temporary channel failure, rather than this server inventing one. It
+// returns an error only when there is no channel to the peer at all.
 func (s *Server) findEligibleChannelID(pubKey *btcec.PublicKey,
 	amount lnwire.MilliSatoshi) (lnwire.ShortChannelID, error) {
 
@@ -621,6 +624,17 @@ func (s *Server) findEligibleChannelID(pubKey *btcec.PublicKey,
 			fmt.Errorf("failed to retrieve channels: %w", err)
 	}
 
+	if len(links) == 0 {
+		return lnwire.ShortChannelID{},
+			fmt.Errorf("no channel to peer %x", pubKeyArray)
+	}
+
+	// fallback is the channel to hand the switch when none can carry the
+	// amount: the eligible channel with the most bandwidth, or any channel
+	// if none is eligible.
+	fallback := links[0]
+	fallbackEligible := fallback.EligibleToForward()
+
 	for _, link := range links {
 		log.Tracef("Considering channel link scid=%v",
 			link.ShortChanID())
@@ -628,6 +642,13 @@ func (s *Server) findEligibleChannelID(pubKey *btcec.PublicKey,
 		// Ensure the link is eligible to forward payments.
 		if !link.EligibleToForward() {
 			continue
+		}
+
+		if !fallbackEligible ||
+			link.Bandwidth() > fallback.Bandwidth() {
+
+			fallback = link
+			fallbackEligible = true
 		}
 
 		// Check if the channel has sufficient bandwidth.
@@ -639,9 +660,11 @@ func (s *Server) findEligibleChannelID(pubKey *btcec.PublicKey,
 		}
 	}
 
-	return lnwire.ShortChannelID{},
-		fmt.Errorf("no suitable channel found for amount: %d msat",
-			amount)
+	log.Debugf("No channel to peer %x can carry %v, handing scid=%v to "+
+		"the switch to report why", pubKeyArray, amount,
+		fallback.ShortChanID())
+
+	return fallback.ShortChanID(), nil
 }
 
 // TrackOnion provides callers the means to query whether or not a payment

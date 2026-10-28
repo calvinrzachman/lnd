@@ -71,6 +71,10 @@ func TestSendOnion(t *testing.T) {
 		// Accepted outcome must carry.
 		wantAlreadyRegistered bool
 
+		// check, if set, makes further assertions on the server and
+		// the response once the call returns.
+		check func(*testing.T, *Server, *SendOnionResponse)
+
 		// wantFailCalls is the number of times the handler must move
 		// the attempt to a terminal failed state. Every validation
 		// failure and every non-duplicate dispatch error is terminal,
@@ -239,7 +243,10 @@ func TestSendOnion(t *testing.T) {
 			expectedOutcome: outcomeAccepted,
 		},
 		{
-			name: "first hop pubkey with no eligible channel",
+			// The peer has a channel, but it cannot carry the
+			// amount. The server hands it to the switch anyway, so
+			// the switch reports the precise failure for it.
+			name: "first hop pubkey with no channel that can carry the amount",
 			setup: func(t *testing.T, s *Server,
 				req *SendOnionRequest) {
 
@@ -247,13 +254,48 @@ func TestSendOnion(t *testing.T) {
 				s.cfg.ChannelInfoAccessor = &mockChannelInfoAccessor{
 					links: []htlcswitch.ChannelInfoProvider{
 						&mockChannelLink{
-							scid: lnwire.NewShortChanIDFromInt(1),
+							scid: lnwire.NewShortChanIDFromInt(7),
 						},
 					},
 				}
+
+				payer, ok := s.cfg.HtlcDispatcher.(*mockPayer)
+				require.True(t, ok)
+				payer.sendErr = htlcswitch.NewLinkError(
+					lnwire.NewTemporaryChannelFailure(nil),
+				)
 			},
 			expectedOutcome: outcomeRejected,
 			wantFailCalls:   1,
+			check: func(t *testing.T, s *Server,
+				resp *SendOnionResponse) {
+
+				payer, ok := s.cfg.HtlcDispatcher.(*mockPayer)
+				require.True(t, ok)
+				require.NotNil(t, payer.sentFirstHop)
+				require.Equal(t, lnwire.NewShortChanIDFromInt(7),
+					*payer.sentFirstHop)
+				requireRejectCode(t, resp, lnwire.CodeTemporaryChannelFailure)
+			},
+		},
+		{
+			name: "first hop pubkey with no channel to the peer",
+			setup: func(t *testing.T, s *Server,
+				req *SendOnionRequest) {
+
+				setFirstHopPubkey(t, req)
+				s.cfg.ChannelInfoAccessor = &mockChannelInfoAccessor{}
+			},
+			expectedOutcome: outcomeRejected,
+			wantFailCalls:   1,
+			check: func(t *testing.T, s *Server,
+				resp *SendOnionResponse) {
+
+				payer, ok := s.cfg.HtlcDispatcher.(*mockPayer)
+				require.True(t, ok)
+				require.Nil(t, payer.sentFirstHop)
+				requireRejectCode(t, resp, lnwire.CodeUnknownNextPeer)
+			},
 		},
 		{
 			name: "ambiguous attempt init error",
@@ -331,6 +373,9 @@ func TestSendOnion(t *testing.T) {
 				require.NoError(t, err)
 				require.NotNil(t, resp)
 				requireOutcome(t, resp, tc.expectedOutcome)
+				if tc.check != nil {
+					tc.check(t, server, resp)
+				}
 				if tc.expectedOutcome == outcomeAccepted {
 					accepted := resp.GetAccepted()
 					require.Equal(
@@ -394,6 +439,21 @@ func setFirstHopPubkey(t *testing.T, req *SendOnionRequest) {
 
 	req.FirstHopChanId = 0
 	req.FirstHopPubkey = priv.PubKey().SerializeCompressed()
+}
+
+// requireRejectCode asserts that resp is a rejection carrying a wire failure
+// with the given code.
+func requireRejectCode(t *testing.T, resp *SendOnionResponse,
+	want lnwire.FailCode) {
+
+	t.Helper()
+
+	rej := resp.GetRejected()
+	require.NotNil(t, rej)
+
+	failure, err := UnmarshallFailureMessage(rej.WireFailure)
+	require.NoError(t, err)
+	require.Equal(t, want, failure.Code())
 }
 
 // TestTrackOnion is a unit test that rigorously verifies the behavior of the

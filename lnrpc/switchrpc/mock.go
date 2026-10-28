@@ -14,6 +14,7 @@ import (
 // mockPayer is a mock implementation of the htlcswitch.Payer interface.
 type mockPayer struct {
 	sendErr         error
+	sentFirstHop    *lnwire.ShortChannelID
 	getResultResult *htlcswitch.PaymentResult
 	getResultErr    error
 	resultChan      chan *htlcswitch.PaymentResult
@@ -22,6 +23,8 @@ type mockPayer struct {
 // SendHTLC is a mock implementation of the SendHTLC method.
 func (m *mockPayer) SendHTLC(firstHop lnwire.ShortChannelID,
 	attemptID uint64, htlc *lnwire.UpdateAddHTLC) error {
+
+	m.sentFirstHop = &firstHop
 
 	return m.sendErr
 }
