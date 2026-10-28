@@ -486,6 +486,23 @@ func (store *networkResultStore) GetResult(pid uint64) (
 	return result, nil
 }
 
+// HasFinalResult reports whether a final result (settle or fail) has been
+// stored for the given attempt ID. It returns false for an attempt that is
+// still pending, and ErrPaymentIDNotFound for attempts that are unknown.
+func (store *networkResultStore) HasFinalResult(pid uint64) (bool, error) {
+	_, err := store.GetResult(pid)
+	switch {
+	case err == nil:
+		return true, nil
+
+	case errors.Is(err, ErrAttemptResultPending):
+		return false, nil
+
+	default:
+		return false, err
+	}
+}
+
 func fetchResult(tx kvdb.RTx, pid uint64) (*networkResult, error) {
 	var attemptIDBytes [8]byte
 	binary.BigEndian.PutUint64(attemptIDBytes[:], pid)
