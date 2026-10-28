@@ -302,107 +302,139 @@ func requireOutcome(t *testing.T, resp *SendOnionResponse, want string) {
 	}
 }
 
+// The TrackOnion results a test can expect, named for the response arm.
+const (
+	resultNone     = "none"
+	resultPreimage = "preimage"
+	resultFailure  = "failure"
+	resultInFlight = "in flight"
+	resultNoRecord = "no record"
+)
+
 // TestTrackOnion is a unit test that rigorously verifies the behavior of the
-// TrackOnion RPC handler in isolation.
+// TrackOnion RPC handler in isolation, in both the wait and the peek mode.
 func TestTrackOnion(t *testing.T) {
 	t.Parallel()
 
 	preimage := lntypes.Preimage{1, 2, 3}
 	preimageBytes := preimage[:]
+	hash := preimage.Hash()
 
 	// Create a valid request that can be used as a template for tests.
 	makeValidRequest := func() *TrackOnionRequest {
 		return &TrackOnionRequest{
-			PaymentHash: make([]byte, 32),
+			PaymentHash: hash[:],
 			AttemptId:   1,
 		}
+	}
+
+	// Both modes read a resolved attempt's result the same way, so the
+	// cases for a resolved attempt run in each.
+	bothModes := []TrackMode{
+		TrackMode_TRACK_MODE_WAIT, TrackMode_TRACK_MODE_PEEK,
 	}
 
 	//nolint:ll
 	testCases := []struct {
 		name string
 
+		// modes are the track modes the case runs in. Unset means the
+		// wait mode only.
+		modes []TrackMode
+
 		// setup is a function that modifies the server or request for a
-		// specific test case.
-		setup func(*testing.T, *mockPayer, *TrackOnionRequest)
+		// specific test case. A peek reads the attempt store before the
+		// result, so the store reports a final result unless setup
+		// says otherwise.
+		setup func(*testing.T, *mockPayer, *mockAttemptStore,
+			*TrackOnionRequest)
 
 		// getCtx is a function that returns the context to use for the
-		// RPC call.
+		// RPC call. Unset means the test context.
 		getCtx func() context.Context
 
 		// expectedErrCode is the gRPC error code we expect from the
-		// call.
+		// call. Only meaningful when expectedResult is empty.
 		expectedErrCode codes.Code
 
-		// checkResponse is a function that asserts the response from the
-		// RPC call.
-		checkResponse func(*testing.T, *TrackOnionResponse)
+		// expectedResult is the response result we expect, one of the
+		// result constants. When set, the call must succeed and carry
+		// that result.
+		expectedResult string
+
+		// check, if set, makes further assertions on the payer and the
+		// response once the call returns.
+		check func(*testing.T, *mockPayer, *TrackOnionResponse)
 	}{
 		{
-			name: "payment success",
-			setup: func(t *testing.T, m *mockPayer,
-				req *TrackOnionRequest) {
+			name:  "payment success",
+			modes: bothModes,
+			setup: func(t *testing.T, payer *mockPayer,
+				store *mockAttemptStore, req *TrackOnionRequest) {
 
-				m.getResultResult = &htlcswitch.PaymentResult{
+				payer.getResultResult = &htlcswitch.PaymentResult{
 					Preimage: preimage,
 				}
 			},
-			getCtx: t.Context,
-			checkResponse: func(t *testing.T, resp *TrackOnionResponse) {
+			expectedResult: resultPreimage,
+			check: func(t *testing.T, payer *mockPayer,
+				resp *TrackOnionResponse) {
+
 				require.Equal(t, preimageBytes, resp.GetPreimage())
 			},
 		},
 		{
-			name: "payment failed with generic internal error",
-			setup: func(t *testing.T, m *mockPayer,
-				req *TrackOnionRequest) {
+			// A result the switch cannot classify does not show
+			// that the HTLC failed, so no result is set and the
+			// caller reads the attempt as possibly live.
+			name:  "payment ended with an unrecognised error",
+			modes: bothModes,
+			setup: func(t *testing.T, payer *mockPayer,
+				store *mockAttemptStore, req *TrackOnionRequest) {
 
-				m.getResultResult = &htlcswitch.PaymentResult{
-					Error: errors.New("test error"),
+				payer.getResultResult = &htlcswitch.PaymentResult{
+					Error: errors.New("unknown response type"),
 				}
 			},
-			getCtx: t.Context,
-			checkResponse: func(t *testing.T, resp *TrackOnionResponse) {
-				details := resp.GetFailureDetails()
-				require.NotNil(t, details)
-				require.NotNil(t, details.GetSwitchError())
-				require.Contains(t, details.ErrorMessage, "test error")
-			},
+			expectedResult: resultNone,
 		},
 		{
-			name: "payment failed with clear text error",
-			setup: func(t *testing.T, m *mockPayer,
-				req *TrackOnionRequest) {
+			name:  "payment failed with clear text error",
+			modes: bothModes,
+			setup: func(t *testing.T, payer *mockPayer,
+				store *mockAttemptStore, req *TrackOnionRequest) {
 
 				wireMsg := lnwire.NewTemporaryChannelFailure(nil)
 				linkErr := htlcswitch.NewLinkError(wireMsg)
-				m.getResultResult = &htlcswitch.PaymentResult{
+				payer.getResultResult = &htlcswitch.PaymentResult{
 					Error: linkErr,
 				}
 			},
-			getCtx: t.Context,
-			checkResponse: func(t *testing.T, resp *TrackOnionResponse) {
+			expectedResult: resultFailure,
+			check: func(t *testing.T, payer *mockPayer,
+				resp *TrackOnionResponse) {
+
 				details := resp.GetFailureDetails()
-				require.NotNil(t, details)
 				require.NotNil(t, details.GetLocalFailure())
 				require.Empty(t, details.GetForwardingFailure())
 			},
 		},
 		{
 			name: "payment failed with forwarding error",
-			setup: func(t *testing.T, m *mockPayer,
-				req *TrackOnionRequest) {
+			setup: func(t *testing.T, payer *mockPayer,
+				store *mockAttemptStore, req *TrackOnionRequest) {
 
 				wireMsg := lnwire.NewTemporaryChannelFailure(nil)
 				fwdErr := htlcswitch.NewForwardingError(wireMsg, 1)
-				m.getResultResult = &htlcswitch.PaymentResult{
+				payer.getResultResult = &htlcswitch.PaymentResult{
 					Error: fwdErr,
 				}
 			},
-			getCtx: t.Context,
-			checkResponse: func(t *testing.T, resp *TrackOnionResponse) {
+			expectedResult: resultFailure,
+			check: func(t *testing.T, payer *mockPayer,
+				resp *TrackOnionResponse) {
+
 				details := resp.GetFailureDetails()
-				require.NotNil(t, details)
 				require.NotNil(t, details.GetForwardingFailure())
 				require.Empty(t, details.GetLocalFailure())
 				require.Equal(t, uint32(1),
@@ -411,21 +443,22 @@ func TestTrackOnion(t *testing.T) {
 		},
 		{
 			name: "payment failed with unknown forwarding error",
-			setup: func(t *testing.T, m *mockPayer,
-				req *TrackOnionRequest) {
+			setup: func(t *testing.T, payer *mockPayer,
+				store *mockAttemptStore, req *TrackOnionRequest) {
 
 				// NewUnknownForwardingError has a nil wire
 				// message. Without the nil guard in
 				// marshallFailureDetails this would panic.
 				fwdErr := htlcswitch.NewUnknownForwardingError(2)
-				m.getResultResult = &htlcswitch.PaymentResult{
+				payer.getResultResult = &htlcswitch.PaymentResult{
 					Error: fwdErr,
 				}
 			},
-			getCtx: t.Context,
-			checkResponse: func(t *testing.T, resp *TrackOnionResponse) {
+			expectedResult: resultFailure,
+			check: func(t *testing.T, payer *mockPayer,
+				resp *TrackOnionResponse) {
+
 				details := resp.GetFailureDetails()
-				require.NotNil(t, details)
 				require.NotNil(t, details.GetForwardingFailure())
 				require.Equal(t, uint32(2),
 					details.GetForwardingFailure().FailureSourceIndex)
@@ -434,28 +467,94 @@ func TestTrackOnion(t *testing.T) {
 			},
 		},
 		{
-			name: "payment not found",
-			setup: func(t *testing.T, m *mockPayer,
-				req *TrackOnionRequest) {
+			name:  "encrypted error",
+			modes: bothModes,
+			setup: func(t *testing.T, payer *mockPayer,
+				store *mockAttemptStore, req *TrackOnionRequest) {
 
-				m.getResultErr = htlcswitch.ErrPaymentIDNotFound
+				payer.getResultResult = &htlcswitch.PaymentResult{
+					EncryptedError: []byte("encrypted error"),
+				}
 			},
-			getCtx:          t.Context,
-			expectedErrCode: codes.NotFound,
+			expectedResult: resultFailure,
+			check: func(t *testing.T, payer *mockPayer,
+				resp *TrackOnionResponse) {
+
+				details := resp.GetFailureDetails()
+				require.Equal(t, []byte("encrypted error"),
+					details.GetEncryptedErrorData())
+			},
 		},
 		{
-			name: "invalid payment hash",
-			setup: func(t *testing.T, m *mockPayer,
-				req *TrackOnionRequest) {
+			// An unknown attempt is an answer in both modes, not a
+			// gRPC error.
+			name:  "unknown attempt",
+			modes: bothModes,
+			setup: func(t *testing.T, payer *mockPayer,
+				store *mockAttemptStore, req *TrackOnionRequest) {
 
-				req.PaymentHash = []byte{1, 2, 3}
+				payer.getResultErr = htlcswitch.ErrPaymentIDNotFound
+
+				store.hasFinalErr = htlcswitch.ErrPaymentIDNotFound
 			},
-			getCtx:          t.Context,
+			expectedResult: resultNoRecord,
+		},
+		{
+			// A peek at an unresolved attempt answers at once and
+			// never asks the switch for the result, which would
+			// subscribe for it.
+			name:  "unresolved attempt",
+			modes: []TrackMode{TrackMode_TRACK_MODE_PEEK},
+			setup: func(t *testing.T, payer *mockPayer,
+				store *mockAttemptStore, req *TrackOnionRequest) {
+
+				store.hasFinal = false
+
+				// Give the switch a result to return if asked,
+				// so a peek that asks fails the test rather
+				// than hanging on it.
+				payer.getResultResult = &htlcswitch.PaymentResult{
+					Preimage: preimage,
+				}
+			},
+			expectedResult: resultInFlight,
+			check: func(t *testing.T, payer *mockPayer,
+				resp *TrackOnionResponse) {
+
+				require.Zero(t, payer.getResultCalls)
+			},
+		},
+		{
+			name:  "attempt store read error",
+			modes: []TrackMode{TrackMode_TRACK_MODE_PEEK},
+			setup: func(t *testing.T, payer *mockPayer,
+				store *mockAttemptStore, req *TrackOnionRequest) {
+
+				store.hasFinalErr = errors.New("db unavailable")
+			},
+			expectedErrCode: codes.Internal,
+		},
+		{
+			name: "unknown track mode",
+			setup: func(t *testing.T, payer *mockPayer,
+				store *mockAttemptStore, req *TrackOnionRequest) {
+
+				req.TrackMode = TrackMode(7)
+			},
 			expectedErrCode: codes.InvalidArgument,
 		},
 		{
-			name:  "context canceled",
-			setup: nil, // No setup needed, mock will block.
+			name: "invalid payment hash",
+			setup: func(t *testing.T, payer *mockPayer,
+				store *mockAttemptStore, req *TrackOnionRequest) {
+
+				req.PaymentHash = []byte{1, 2, 3}
+			},
+			expectedErrCode: codes.InvalidArgument,
+		},
+		{
+			name: "context canceled",
+			// No setup needed, the mock result never arrives.
 			getCtx: func() context.Context {
 				ctx, cancel := context.WithCancel(t.Context())
 				cancel()
@@ -465,8 +564,8 @@ func TestTrackOnion(t *testing.T) {
 		},
 		{
 			name: "invalid decryptor args",
-			setup: func(t *testing.T, m *mockPayer,
-				req *TrackOnionRequest) {
+			setup: func(t *testing.T, payer *mockPayer,
+				store *mockAttemptStore, req *TrackOnionRequest) {
 
 				// Provide an invalid session key and a valid
 				// hop public key to trigger an error in
@@ -478,94 +577,122 @@ func TestTrackOnion(t *testing.T) {
 					103, 208, 148, 27, 216, 153, 206, 77,
 				}}
 			},
-			getCtx:          t.Context,
 			expectedErrCode: codes.InvalidArgument,
 		},
 		{
-			name: "encrypted error",
-			setup: func(t *testing.T, m *mockPayer,
-				req *TrackOnionRequest) {
-
-				m.getResultResult = &htlcswitch.PaymentResult{
-					EncryptedError: []byte("encrypted error"),
-				}
-			},
-			getCtx: t.Context,
-			checkResponse: func(t *testing.T, resp *TrackOnionResponse) {
-				details := resp.GetFailureDetails()
-				require.NotNil(t, details)
-				require.Equal(t, []byte("encrypted error"),
-					details.GetEncryptedErrorData())
-			},
-		},
-		{
 			name: "switch exiting",
-			setup: func(t *testing.T, m *mockPayer,
-				req *TrackOnionRequest) {
+			setup: func(t *testing.T, payer *mockPayer,
+				store *mockAttemptStore, req *TrackOnionRequest) {
 
 				// To simulate the switch exiting, we'll
 				// provide a result channel that is already
 				// closed.
 				closedChan := make(chan *htlcswitch.PaymentResult)
 				close(closedChan)
-				m.resultChan = closedChan
+				payer.resultChan = closedChan
 			},
-			getCtx:          t.Context,
 			expectedErrCode: codes.Unavailable,
 		},
 		{
 			name: "ambiguous result",
-			setup: func(t *testing.T, m *mockPayer,
-				req *TrackOnionRequest) {
+			setup: func(t *testing.T, payer *mockPayer,
+				store *mockAttemptStore, req *TrackOnionRequest) {
 
-				m.getResultResult = &htlcswitch.PaymentResult{
-					// A result with no error and a zero-value
-					// preimage.
+				// A result with no error and a zero-value
+				// preimage.
+				payer.getResultResult = &htlcswitch.PaymentResult{
 					Error:    nil,
 					Preimage: lntypes.Preimage{},
 				}
 			},
-			getCtx:          t.Context,
 			expectedErrCode: codes.Internal,
 		},
 	}
 
 	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+		modes := tc.modes
+		if len(modes) == 0 {
+			modes = []TrackMode{TrackMode_TRACK_MODE_WAIT}
+		}
 
-			mockPayer := &mockPayer{}
+		for _, mode := range modes {
+			t.Run(tc.name+"/"+mode.String(), func(t *testing.T) {
+				t.Parallel()
 
-			// Create a new server for each test case to ensure
-			// isolation.
-			server, _, err := New(&Config{
-				HtlcDispatcher: mockPayer,
-			})
-			require.NoError(t, err)
+				// Create a new server for each test case to
+				// ensure isolation.
+				payer := &mockPayer{}
+				store := &mockAttemptStore{hasFinal: true}
+				server, _, err := New(&Config{
+					HtlcDispatcher: payer,
+					AttemptStore:   store,
+				})
+				require.NoError(t, err)
 
-			req := makeValidRequest()
+				req := makeValidRequest()
+				req.TrackMode = mode
 
-			// Apply the test-specific setup.
-			if tc.setup != nil {
-				tc.setup(t, mockPayer, req)
-			}
+				// Apply the test-specific setup.
+				if tc.setup != nil {
+					tc.setup(t, payer, store, req)
+				}
 
-			resp, err := server.TrackOnion(tc.getCtx(), req)
+				ctx := t.Context()
+				if tc.getCtx != nil {
+					ctx = tc.getCtx()
+				}
 
-			// Check for gRPC level errors.
-			if tc.expectedErrCode != codes.OK {
+				resp, err := server.TrackOnion(ctx, req)
+
+				// An expected result means the call itself
+				// succeeds and the result rides in the
+				// response body.
+				if tc.expectedResult != "" {
+					require.NoError(t, err)
+					require.NotNil(t, resp)
+					requireTrackResult(
+						t, resp, tc.expectedResult,
+					)
+					if tc.check != nil {
+						tc.check(t, payer, resp)
+					}
+
+					return
+				}
+
+				// Otherwise the call itself failed, so we
+				// expect a gRPC status error carrying the code.
 				require.Error(t, err)
 				s, ok := status.FromError(err)
 				require.True(t, ok)
 				require.Equal(t, tc.expectedErrCode, s.Code())
+			})
+		}
+	}
+}
 
-				return
-			}
+// requireTrackResult asserts the response carries the named result.
+func requireTrackResult(t *testing.T, resp *TrackOnionResponse, want string) {
+	t.Helper()
 
-			// If no gRPC error was expected, check the response.
-			require.NoError(t, err)
-			tc.checkResponse(t, resp)
-		})
+	switch want {
+	case resultNone:
+		require.Nil(t, resp.Result, "want no result")
+
+	case resultPreimage:
+		require.NotEmpty(t, resp.GetPreimage(), "want preimage")
+
+	case resultFailure:
+		require.NotNil(t, resp.GetFailureDetails(), "want failure")
+
+	case resultInFlight:
+		require.NotNil(t, resp.GetInFlight(), "want in flight")
+
+	case resultNoRecord:
+		require.NotNil(t, resp.GetNoRecord(), "want no record")
+
+	default:
+		t.Fatalf("unknown result %q", want)
 	}
 }
 
@@ -1008,20 +1135,23 @@ func TestMarshallFailureDetails(t *testing.T) {
 			},
 		},
 		{
-			name: "internal error",
+			// An error that does not show the HTLC failed has no
+			// failure details.
+			name: "unrecognised error",
 			err:  errors.New("some unexpected error"),
-			expectedDetails: &FailureDetails{
-				ErrorMessage: "some unexpected error",
-				Failure: &FailureDetails_SwitchError{
-					SwitchError: &SwitchError{},
-				},
-			},
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			details := marshallFailureDetails(tc.err)
+			details, ok := marshallFailureDetails(tc.err)
+			if tc.expectedDetails == nil {
+				require.False(t, ok)
+				require.Nil(t, details)
+
+				return
+			}
+			require.True(t, ok)
 
 			require.Contains(t, details.ErrorMessage,
 				tc.expectedDetails.ErrorMessage)
@@ -1110,7 +1240,8 @@ func TestUnmarshallFailureDetails(t *testing.T) {
 
 			// Use the server-side helper to create the
 			// FailureDetails message.
-			details := marshallFailureDetails(tc.originalErr)
+			details, ok := marshallFailureDetails(tc.originalErr)
+			require.True(t, ok)
 
 			// Use the client-side helper to translate it back to a
 			// Go error.

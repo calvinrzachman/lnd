@@ -16,6 +16,7 @@ type mockPayer struct {
 	sendErr         error
 	getResultResult *htlcswitch.PaymentResult
 	getResultErr    error
+	getResultCalls  int
 	resultChan      chan *htlcswitch.PaymentResult
 }
 
@@ -31,6 +32,8 @@ func (m *mockPayer) GetAttemptResult(attemptID uint64,
 	paymentHash lntypes.Hash,
 	errorDecryptor htlcswitch.ErrorDecrypter) (
 	<-chan *htlcswitch.PaymentResult, error) {
+
+	m.getResultCalls++
 
 	if m.getResultErr != nil {
 		return nil, m.getResultErr
@@ -76,11 +79,13 @@ func (m *mockRouteProcessor) UnmarshallRoute(route *lnrpc.Route) (
 // mockAttemptStore is a mock implementation of the AttemptStore interface.
 type mockAttemptStore struct {
 	htlcswitch.AttemptStore
-	initErr    error
-	failErr    error
-	failCalls  int
-	deleteErr  error
-	deleteResp map[uint64]htlcswitch.DeletionStatus
+	initErr     error
+	failErr     error
+	failCalls   int
+	deleteErr   error
+	deleteResp  map[uint64]htlcswitch.DeletionStatus
+	hasFinal    bool
+	hasFinalErr error
 }
 
 // InitAttempt returns the mocked initErr.
@@ -95,6 +100,11 @@ func (m *mockAttemptStore) FailPendingAttempt(attemptID uint64,
 	m.failCalls++
 
 	return m.failErr
+}
+
+// HasFinalResult returns the mocked hasFinal and hasFinalErr.
+func (m *mockAttemptStore) HasFinalResult(attemptID uint64) (bool, error) {
+	return m.hasFinal, m.hasFinalErr
 }
 
 // DeleteAttempts returns the mocked deleteResp and deleteErr.

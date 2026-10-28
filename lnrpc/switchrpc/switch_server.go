@@ -638,26 +638,27 @@ func (s *Server) findEligibleChannelID(pubKey *btcec.PublicKey,
 			amount)
 }
 
-// TrackOnion provides callers the means to query whether or not a payment
-// dispatched via SendOnion succeeded or failed.
+// TrackOnion reports the result of an attempt dispatched with SendOnion.
 //
-// This is a unary, long-polling RPC which blocks until a definitive result
-// (success with preimage or a terminal failure) for the specified attempt ID
-// is available.
+// The answer is carried in the response body, as at most one of:
 //
-// Clients must be aware of this blocking nature and should typically use a
-// `context` with a timeout. If the RPC call is interrupted (e.g., due to a
-// timeout or network error) before a result is returned, the client is left
-// in an ambiguous state regarding the HTLC's status. In such cases, the
-// client must safely retry the *same* request with the original `paymentHash`
-// and `attemptID`. The server will either return the final result if it has
-// become available or resume waiting.
+// 1. preimage: the attempt settled.
 //
-// NOTE: It is crucial that clients **do not** interpret an ambiguous error as a
-// definitive failure. Doing so may cause the client to incorrectly mark the
-// attempt as failed and proceed to retry the payment with a new, distinct
-// `attempt_id`, which risks a duplicate payment if the original attempt
-// eventually succeeds.
+// 2. failure_details: the attempt failed and its HTLC is no longer in flight.
+//
+// 3. in_flight: the attempt has not resolved. Only returned in peek mode.
+//
+// 4. no_record: this server holds no record of the attempt.
+//
+// A response with no result set means the attempt may still be live. The
+// server answers that way when it holds a result it cannot describe.
+//
+// In the default wait mode the call blocks until the attempt resolves. In peek
+// mode it answers at once from the attempt store and never subscribes for a
+// result, so it holds nothing on the server.
+//
+// A gRPC error means the call failed rather than describing the attempt, and
+// the client retries the same request.
 func (s *Server) TrackOnion(ctx context.Context,
 	req *TrackOnionRequest) (*TrackOnionResponse, error) {
 
@@ -667,8 +668,15 @@ func (s *Server) TrackOnion(ctx context.Context,
 			"invalid payment_hash=%x: %v", req.PaymentHash, err)
 	}
 
-	log.Debugf("Looking up status of onion attempt_id=%d for payment=%v",
-		req.AttemptId, hash)
+	switch req.TrackMode {
+	case TrackMode_TRACK_MODE_WAIT, TrackMode_TRACK_MODE_PEEK:
+	default:
+		return nil, status.Errorf(codes.InvalidArgument,
+			"unknown track_mode=%v", req.TrackMode)
+	}
+
+	log.Debugf("Looking up status of onion attempt_id=%d for payment=%v "+
+		"(mode=%v)", req.AttemptId, hash, req.TrackMode)
 
 	// Attempt to build the error decryptor with the provided session key
 	// and hop public keys.
@@ -685,22 +693,45 @@ func (s *Server) TrackOnion(ctx context.Context,
 			"provided. Will defer error handling to caller")
 	}
 
+	// A peek answers from the attempt store and must never subscribe, so
+	// an unresolved or unknown attempt is answered here.
+	if req.TrackMode == TrackMode_TRACK_MODE_PEEK {
+		final, err := s.cfg.AttemptStore.HasFinalResult(req.AttemptId)
+		switch {
+		case errors.Is(err, htlcswitch.ErrPaymentIDNotFound):
+			return noRecord(), nil
+
+		case err != nil:
+			log.Errorf("Unable to read attempt_id=%d: %v",
+				req.AttemptId, err)
+
+			return nil, status.Errorf(codes.Internal,
+				"unable to read attempt: %v", err)
+
+		case !final:
+			return inFlight(), nil
+		}
+
+		// The attempt has a final result, which never reverts to
+		// pending, so GetAttemptResult below answers at once from the
+		// store without registering a subscriber.
+	}
+
 	// Query the switch for the result of the payment attempt via onion.
 	resultChan, err := s.cfg.HtlcDispatcher.GetAttemptResult(
 		req.AttemptId, hash, errorDecryptor,
 	)
 	if err != nil {
-		log.Errorf("GetAttemptResult failed for attempt_id=%d of "+
-			" payment=%x: %v", req.AttemptId, hash, err)
-
-		// If the payment ID is not found, we return a NotFound error.
 		if errors.Is(err, htlcswitch.ErrPaymentIDNotFound) {
-			return nil, status.Errorf(codes.NotFound,
-				"payment with attempt ID %d not found",
-				req.AttemptId)
+			log.Debugf("No record of attempt_id=%d for payment=%v",
+				req.AttemptId, hash)
+
+			return noRecord(), nil
 		}
 
-		// For other errors, we return an internal error.
+		log.Errorf("GetAttemptResult failed for attempt_id=%d of "+
+			"payment=%v: %v", req.AttemptId, hash, err)
+
 		return nil, status.Errorf(codes.Internal,
 			"GetAttemptResult failed: %v", err)
 	}
@@ -727,13 +758,30 @@ func (s *Server) TrackOnion(ctx context.Context,
 		return nil, status.FromContextError(ctx.Err()).Err()
 	}
 
-	// The attempt result arrived so the HTLC is no longer in-flight. If
-	// the payment failed, we build a structured response for the client.
-	if result.Error != nil {
-		log.Debugf("HTLC attempt %d failed for payment=%v: %v",
-			req.AttemptId, hash, result.Error)
+	return marshallAttemptResult(req.AttemptId, hash, result)
+}
 
-		details := marshallFailureDetails(result.Error)
+// marshallAttemptResult converts the result of a resolved attempt into the
+// TrackOnion response.
+func marshallAttemptResult(attemptID uint64, hash lntypes.Hash,
+	result *htlcswitch.PaymentResult) (*TrackOnionResponse, error) {
+
+	// If the payment failed, we build a structured response for the
+	// client. An error that does not show the HTLC failed is answered
+	// with no result set, which the client reads as possibly live.
+	if result.Error != nil {
+		details, ok := marshallFailureDetails(result.Error)
+		if !ok {
+			log.Errorf("Attempt %d for payment=%v ended with a "+
+				"result that does not show how the HTLC "+
+				"resolved, answering with no result: %v",
+				attemptID, hash, result.Error)
+
+			return &TrackOnionResponse{}, nil
+		}
+
+		log.Debugf("HTLC attempt %d failed for payment=%v: %v",
+			attemptID, hash, result.Error)
 
 		return &TrackOnionResponse{
 			Result: &TrackOnionResponse_FailureDetails{
@@ -746,7 +794,7 @@ func (s *Server) TrackOnion(ctx context.Context,
 	// is returned as-is, deferring decryption to the client.
 	if len(result.EncryptedError) > 0 {
 		log.Debugf("HTLC attempt %d failed for payment=%v with "+
-			"encrypted error", req.AttemptId, hash)
+			"encrypted error", attemptID, hash)
 
 		details := &FailureDetails{
 			ErrorMessage: "payment attempt failed with encrypted " +
@@ -774,13 +822,31 @@ func (s *Server) TrackOnion(ctx context.Context,
 	}
 
 	log.Debugf("Received preimage via onion attempt_id=%d for payment=%v",
-		req.AttemptId, hash)
+		attemptID, hash)
 
 	return &TrackOnionResponse{
 		Result: &TrackOnionResponse_Preimage{
 			Preimage: result.Preimage[:],
 		},
 	}, nil
+}
+
+// inFlight reports that the attempt has not resolved.
+func inFlight() *TrackOnionResponse {
+	return &TrackOnionResponse{
+		Result: &TrackOnionResponse_InFlight{
+			InFlight: &InFlight{},
+		},
+	}
+}
+
+// noRecord reports that this server holds no record of the attempt.
+func noRecord() *TrackOnionResponse {
+	return &TrackOnionResponse{
+		Result: &TrackOnionResponse_NoRecord{
+			NoRecord: &NoRecord{},
+		},
+	}
 }
 
 // buildErrorDecryptor constructs an error decrypter given a sphinx session
@@ -1020,8 +1086,10 @@ func (s *Server) DisableRemoteRouter(ctx context.Context,
 }
 
 // marshallFailureDetails creates the FailureDetails message for the
-// TrackOnion response body.
-func marshallFailureDetails(err error) *FailureDetails {
+// TrackOnion response body. It returns false when err does not show that the
+// HTLC failed, since a failure answer must only be given for an HTLC that is
+// no longer in flight.
+func marshallFailureDetails(err error) (*FailureDetails, bool) {
 	var (
 		clearTextErr htlcswitch.ClearTextError
 		fwdErr       *htlcswitch.ForwardingError
@@ -1079,7 +1147,7 @@ func marshallFailureDetails(err error) *FailureDetails {
 				SwitchError: &SwitchError{},
 			}
 
-			return details
+			return details, true
 		}
 
 		details.Failure = &FailureDetails_LocalFailure{
@@ -1088,23 +1156,20 @@ func marshallFailureDetails(err error) *FailureDetails {
 			},
 		}
 
-	// NOTE: ErrPaymentIDNotFound and ErrSwitchExiting are handled at
-	// the transport level and will not reach this function.
+	// NOTE: ErrPaymentIDNotFound and ErrSwitchExiting are handled before
+	// a result is read and will not reach this function.
 	case errors.Is(err, htlcswitch.ErrUnreadableFailureMessage):
 		details.Failure = &FailureDetails_UnreadableFailure{
 			UnreadableFailure: &UnreadableFailure{},
 		}
 
-	// All other unexpected errors will be mapped to a generic internal
-	// error. The specific reason is still available in the top-level
-	// error_message.
+	// Any other error, such as the switch reading a result that is
+	// neither a settle nor a fail, does not show that the HTLC failed.
 	default:
-		details.Failure = &FailureDetails_SwitchError{
-			SwitchError: &SwitchError{},
-		}
+		return nil, false
 	}
 
-	return details
+	return details, true
 }
 
 // UnmarshallFailureDetails translates a FailureDetails message from a
