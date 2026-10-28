@@ -630,6 +630,12 @@ type AttemptStore interface {
 	// returned for attempts that are unknown.
 	GetResult(attemptID uint64) (*networkResult, error)
 
+	// HasFinalResult reports whether a final result (settle or fail) has
+	// been stored for the given attempt ID. It returns false for an attempt
+	// initialized via InitAttempt whose result is still pending, and
+	// ErrPaymentIDNotFound for attempts that are unknown.
+	HasFinalResult(attemptID uint64) (bool, error)
+
 	// SubscribeResult subscribes to be notified when a result for a
 	// specific attempt ID becomes available. It returns a channel that will
 	// receive the result.

@@ -412,6 +412,39 @@ func TestNetworkResultStoreFailAndFetch(t *testing.T) {
 	})
 }
 
+// TestNetworkResultStoreHasFinalResult tests that HasFinalResult tells an
+// unknown attempt, a pending attempt and a resolved attempt apart.
+func TestNetworkResultStoreHasFinalResult(t *testing.T) {
+	t.Parallel()
+
+	db := channeldb.OpenForTesting(t, t.TempDir())
+	store, err := newNetworkResultStore(db, false)
+	require.NoError(t, err)
+
+	const id = 1
+
+	// An attempt the store has never seen is unknown.
+	_, err = store.HasFinalResult(id)
+	require.ErrorIs(t, err, ErrPaymentIDNotFound)
+
+	// An initialized attempt is pending until its result is stored.
+	require.NoError(t, store.InitAttempt(id))
+
+	final, err := store.HasFinalResult(id)
+	require.NoError(t, err)
+	require.False(t, final)
+
+	settleResult := &networkResult{
+		msg:         &lnwire.UpdateFulfillHTLC{},
+		unencrypted: true,
+	}
+	require.NoError(t, store.StoreResult(id, settleResult))
+
+	final, err = store.HasFinalResult(id)
+	require.NoError(t, err)
+	require.True(t, final)
+}
+
 // TestDeleteAttempts tests the DeleteAttempts method of the
 // networkResultStore, verifying that it correctly deletes terminal attempts,
 // refuses to delete pending attempts, and reports per-ID results.
