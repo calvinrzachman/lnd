@@ -183,6 +183,44 @@ func TestSendOnion(t *testing.T) {
 			wantAlreadyRegistered: true,
 		},
 		{
+			// Recording the failure is best effort. If the store
+			// write fails, the response must still describe what
+			// happened to the HTLC: this rejection is still true.
+			name: "rejection when the failure cannot be recorded",
+			setup: func(t *testing.T, s *Server,
+				req *SendOnionRequest) {
+
+				linkErr := htlcswitch.NewLinkError(
+					lnwire.NewTemporaryChannelFailure(nil),
+				)
+				payer, ok := s.cfg.HtlcDispatcher.(*mockPayer)
+				require.True(t, ok)
+				payer.sendErr = linkErr
+
+				store, ok := s.cfg.AttemptStore.(*mockAttemptStore)
+				require.True(t, ok)
+				store.failErr = errors.New("store unavailable")
+			},
+			expectedOutcome: outcomeRejected,
+			wantFailCalls:   1,
+		},
+		{
+			name: "ambiguous when the failure cannot be recorded",
+			setup: func(t *testing.T, s *Server,
+				req *SendOnionRequest) {
+
+				payer, ok := s.cfg.HtlcDispatcher.(*mockPayer)
+				require.True(t, ok)
+				payer.sendErr = errors.New("internal error")
+
+				store, ok := s.cfg.AttemptStore.(*mockAttemptStore)
+				require.True(t, ok)
+				store.failErr = errors.New("store unavailable")
+			},
+			expectedOutcome: outcomeAmbiguous,
+			wantFailCalls:   1,
+		},
+		{
 			name: "first hop pubkey with an eligible channel",
 			setup: func(t *testing.T, s *Server,
 				req *SendOnionRequest) {
