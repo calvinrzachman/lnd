@@ -402,9 +402,7 @@ func (x *Accepted) GetAlreadyRegistered() bool {
 type Rejected struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The BOLT #4 wire failure explaining the rejection, including any
-	// channel update, in the padded form written by lnwire.EncodeFailure: a
-	// two-byte length, the failure message, a two-byte pad length and the
-	// padding. Decode it with lnwire.DecodeFailure.
+	// channel update, as encoded by lnwire.EncodeFailure.
 	//
 	// This is always present and always decodable. A rejection the switch
 	// cannot describe is reported as Ambiguous instead, because a definite
@@ -466,9 +464,7 @@ type Ambiguous struct {
 	// Behaviour MUST NOT branch on this value. Every ambiguous outcome
 	// requires the same action, and a caller that treats one reason
 	// differently from another will eventually treat one of them unsafely.
-	// It is free text rather than an enum for exactly that reason. It may
-	// contain internal error text, which this authenticated, admin-level
-	// API returns as is.
+	// It is free text rather than an enum for exactly that reason.
 	Reason        string `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

@@ -120,7 +120,7 @@
     "/v2/switch/onion": {
       "post": {
         "summary": "SendOnion dispatches a pre-formed onion packet. It is the primary entry\npoint for a remote router, and it is idempotent: a client can and should\nretry it after a timeout or disconnection, reusing the same attempt_id so\nthe server recognises the retry rather than sending a second HTLC.",
-        "description": "The outcome is carried in the response, never in a gRPC error. Exactly one\nof Accepted, Rejected or Ambiguous is set, and each documents the action it\nobliges the caller to take. An outcome the client does not recognise, or a\nresponse with none set, MUST be treated as Ambiguous.\n\nA gRPC error means the call failed rather than the HTLC: a malformed\nrequest, an auth failure, a transport problem, or a server not running this\nsub-server. A client that cannot tell those apart MUST retry the same\nattempt_id, because a call that never reached the server and a call whose\nresponse was lost look identical from outside.\n\nA malformed request is the one gRPC error that touches the attempt: the\nserver registers the attempt_id before validating, so it records the\nattempt as failed and returns InvalidArgument. A retry under the same\nattempt_id is answered Accepted, and TrackOnion reports the failure. Use a\nnew attempt_id for a corrected request.",
+        "description": "The outcome is carried in the response, never in a gRPC error. Exactly one\nof Accepted, Rejected or Ambiguous is set, and each documents the action it\nobliges the caller to take. An outcome the client does not recognise, or a\nresponse with none set, MUST be treated as Ambiguous.\n\nA gRPC error means the call failed rather than the HTLC: a malformed\nrequest, an auth failure, a transport problem, or a server not running this\nsub-server. A client that cannot tell those apart MUST retry the same\nattempt_id, because a call that never reached the server and a call whose\nresponse was lost look identical from outside.\n\nA malformed request (InvalidArgument) also records the attempt as failed,\nso resend a corrected request under a new attempt_id.",
         "operationId": "Switch_SendOnion",
         "responses": {
           "200": {
@@ -393,7 +393,7 @@
       "properties": {
         "reason": {
           "type": "string",
-          "description": "A human-readable reason, for logs and metrics.\n\nBehaviour MUST NOT branch on this value. Every ambiguous outcome\nrequires the same action, and a caller that treats one reason\ndifferently from another will eventually treat one of them unsafely.\nIt is free text rather than an enum for exactly that reason. It may\ncontain internal error text, which this authenticated, admin-level\nAPI returns as is."
+          "description": "A human-readable reason, for logs and metrics.\n\nBehaviour MUST NOT branch on this value. Every ambiguous outcome\nrequires the same action, and a caller that treats one reason\ndifferently from another will eventually treat one of them unsafely.\nIt is free text rather than an enum for exactly that reason."
         }
       },
       "description": "Ambiguous means the switch cannot determine whether it took ownership of the\nattempt.\n\nThe caller MUST retry the same attempt_id until it receives Accepted or\nRejected, and MUST NOT record a terminal outcome for the attempt in the\nmeantime. Retrying is safe: the switch recognises an attempt it already\nholds and answers Accepted rather than dispatching a second HTLC."
@@ -564,7 +564,7 @@
         "wire_failure": {
           "type": "string",
           "format": "byte",
-          "description": "The BOLT #4 wire failure explaining the rejection, including any\nchannel update, in the padded form written by lnwire.EncodeFailure: a\ntwo-byte length, the failure message, a two-byte pad length and the\npadding. Decode it with lnwire.DecodeFailure.\n\nThis is always present and always decodable. A rejection the switch\ncannot describe is reported as Ambiguous instead, because a definite\nverdict the caller cannot act on is worse than admitting uncertainty:\nthe caller has nothing to give its router and nothing to penalise with."
+          "description": "The BOLT #4 wire failure explaining the rejection, including any\nchannel update, as encoded by lnwire.EncodeFailure.\n\nThis is always present and always decodable. A rejection the switch\ncannot describe is reported as Ambiguous instead, because a definite\nverdict the caller cannot act on is worse than admitting uncertainty:\nthe caller has nothing to give its router and nothing to penalise with."
         }
       },
       "description": "Rejected means the switch declined the HTLC before taking ownership of it.\nThe HTLC provably never left this node, so no funds are at risk and the\ncaller MAY fail this attempt and route elsewhere."

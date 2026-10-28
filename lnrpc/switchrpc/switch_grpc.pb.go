@@ -35,11 +35,8 @@ type SwitchClient interface {
 	//attempt_id, because a call that never reached the server and a call whose
 	//response was lost look identical from outside.
 	//
-	//A malformed request is the one gRPC error that touches the attempt: the
-	//server registers the attempt_id before validating, so it records the
-	//attempt as failed and returns InvalidArgument. A retry under the same
-	//attempt_id is answered Accepted, and TrackOnion reports the failure. Use a
-	//new attempt_id for a corrected request.
+	//A malformed request (InvalidArgument) also records the attempt as failed,
+	//so resend a corrected request under a new attempt_id.
 	SendOnion(ctx context.Context, in *SendOnionRequest, opts ...grpc.CallOption) (*SendOnionResponse, error)
 	//
 	//TrackOnion allows callers to query whether or not a payment dispatched via
@@ -174,11 +171,8 @@ type SwitchServer interface {
 	//attempt_id, because a call that never reached the server and a call whose
 	//response was lost look identical from outside.
 	//
-	//A malformed request is the one gRPC error that touches the attempt: the
-	//server registers the attempt_id before validating, so it records the
-	//attempt as failed and returns InvalidArgument. A retry under the same
-	//attempt_id is answered Accepted, and TrackOnion reports the failure. Use a
-	//new attempt_id for a corrected request.
+	//A malformed request (InvalidArgument) also records the attempt as failed,
+	//so resend a corrected request under a new attempt_id.
 	SendOnion(context.Context, *SendOnionRequest) (*SendOnionResponse, error)
 	//
 	//TrackOnion allows callers to query whether or not a payment dispatched via
