@@ -142,16 +142,18 @@
   without risking a duplicate payment. A retry with the same `attempt_id` is
   acknowledged rather than dispatched again.
 
-* The `switchrpc.TrackOnion` RPC has been
-  [overhauled](https://github.com/lightningnetwork/lnd/pull/10472) to provide a
-  more robust and type-safe error handling mechanism. The `TrackOnionResponse`
-  message now uses a top-level `oneof` to enforce a compile-time guarantee that
-  a response contains either a `preimage` (for success) or structured
-  `FailureDetails` (for a payment failure). This replaces the previous
-  string-based error reporting. Application-level payment failures are now
-  clearly separated from RPC-level failures (e.g., attempt not found), which are
-  communicated via standard gRPC status codes. This is a **breaking change** for
-  any clients of the `TrackOnion` RPC.
+* The `switchrpc.TrackOnion` RPC reports what is known about an attempt in
+  its response ([#10472](https://github.com/lightningnetwork/lnd/pull/10472),
+  [#YYYYY](https://github.com/lightningnetwork/lnd/pull/YYYYY)).
+  `TrackOnionResponse` carries at most one of `preimage` (settled),
+  `failure_details` (failed, with the structured failure), `InFlight` (not yet
+  resolved), or `NoRecord` (the server has no record of the attempt, which
+  does not mean it failed). A response with no result set, or one the caller
+  does not recognise, means the attempt may still be live. The `track_mode`
+  field selects between waiting for the attempt to resolve (the default) and
+  `TRACK_MODE_PEEK`, which answers at once from the attempt store. A gRPC error
+  means only that the call itself failed. This is a **breaking change** for any
+  clients of the `TrackOnion` RPC.
 
 * The `switchrpc.SendOnion` RPC reports what happened to an attempt in its
   response ([#10545](https://github.com/lightningnetwork/lnd/pull/10545),

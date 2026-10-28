@@ -105,7 +105,8 @@ func testSendOnion(ht *lntest.HarnessTest) {
 // then immediately sends the exact same onion with the same attempt ID. The
 // test asserts that the second attempt is rejected with a DUPLICATE_HTLC
 // error. It also verifies that sending again after the original HTLC has
-// settled is also rejected.
+// settled is also rejected, and that a peek reports the attempt in flight,
+// settled, and finally unknown once its record is deleted.
 func testSendOnionTwice(ht *lntest.HarnessTest) {
 	// Create a four-node context consisting of Alice, Bob, Carol, and
 	// Dave with the following topology:
@@ -174,6 +175,17 @@ func testSendOnionTwice(ht *lntest.HarnessTest) {
 	invoiceStream := dave.RPC.SubscribeSingleInvoice(payHash[:])
 	ht.AssertInvoiceState(invoiceStream, lnrpc.Invoice_ACCEPTED)
 
+	// While Dave holds the HTLC, a peek answers at once that the attempt
+	// is still in flight.
+	peekReq := &switchrpc.TrackOnionRequest{
+		AttemptId:   1,
+		PaymentHash: payHash[:],
+		TrackMode:   switchrpc.TrackMode_TRACK_MODE_PEEK,
+	}
+	peekResp := alice.RPC.TrackOnion(peekReq)
+	require.NotNil(ht, peekResp.GetInFlight(), "expected the held "+
+		"attempt to be in flight, got %v", peekResp.Result)
+
 	// While the first onion is still in-flight, we'll send the same onion
 	// again with the same attempt ID. This should error as our Switch will
 	// detect duplicate ADDs for *in-flight* HTLCs.
@@ -201,6 +213,10 @@ func testSendOnionTwice(ht *lntest.HarnessTest) {
 	}
 	trackResp := alice.RPC.TrackOnion(trackReq)
 	require.Equal(ht, preimage[:], trackResp.GetPreimage())
+
+	// Once the attempt has settled, a peek returns the preimage too.
+	peekResp = alice.RPC.TrackOnion(peekReq)
+	require.Equal(ht, preimage[:], peekResp.GetPreimage())
 
 	// Now that the original HTLC attempt has settled, we'll send the same
 	// onion again with the same attempt ID. Confirm that this is also
@@ -234,6 +250,16 @@ func testSendOnionTwice(ht *lntest.HarnessTest) {
 		switchrpc.AttemptDeletionStatus_DELETION_NOT_FOUND,
 		deleteResp.Results[0].Status,
 	)
+
+	// With the record gone, tracking the attempt in either mode answers
+	// that the server holds no record of it.
+	peekResp = alice.RPC.TrackOnion(peekReq)
+	require.NotNil(ht, peekResp.GetNoRecord(), "expected no record "+
+		"from a peek, got %v", peekResp.Result)
+
+	trackResp = alice.RPC.TrackOnion(trackReq)
+	require.NotNil(ht, trackResp.GetNoRecord(), "expected no record "+
+		"from a wait, got %v", trackResp.Result)
 }
 
 // testSendOnionConcurrency simulates a client that crashes and attempts to

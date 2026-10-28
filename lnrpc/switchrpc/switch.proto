@@ -32,35 +32,24 @@ service Switch {
     rpc SendOnion (SendOnionRequest) returns (SendOnionResponse);
 
     /*
-    TrackOnion allows callers to query whether or not a payment dispatched via
-    SendOnion succeeded or failed.
+    TrackOnion reports the result of an attempt dispatched with SendOnion. Call
+    it once SendOnion has answered Accepted; resolve any other SendOnion answer
+    with SendOnion.
 
-    This RPC is designed to be called after a successful dispatch has been
-    explicitly confirmed via the SendOnion RPC. It should not be used to
-    determine whether an HTLC dispatch was received in an ambiguous network
-    scenario. That ambiguity must be resolved by retrying the idempotent
-    SendOnion RPC until a definitive acknowledgement is received from the Switch
-    RPC server.
+    The answer is carried in the response, never in a gRPC error. At most one
+    of preimage, failure_details, in_flight or no_record is set, and each
+    documents the action it obliges the caller to take. A result the client
+    does not recognise, or a response with none set, means the attempt may
+    still be live: keep tracking it and never treat it as failed.
 
-    Once dispatch is confirmed, TrackOnion provides the mechanism to wait for
-    the result of the in-flight HTLC. A client must handle three distinct
-    categories of outcomes:
+    By default the call waits until the attempt resolves. With track_mode set
+    to TRACK_MODE_PEEK it answers at once, reporting an unresolved attempt as
+    InFlight.
 
-    1. PAYMENT SUCCESS (gRPC code OK, preimage set): The payment settled
-    successfully. The response contains the payment preimage.
-
-    2. PAYMENT FAILURE (gRPC code OK, failure_details set): The payment failed
-    at the application level. The failure_details oneof describes the specific
-    failure type: a ForwardingFailure from a remote hop, a LocalFailure
-    from the local node, an UnreadableFailure if the error could not be
-    decoded, or a SwitchError for other switch-level failures. When
-    encrypted_error_data is populated, the client may perform its own
-    decryption.
-
-    3. QUERY FAILURE (gRPC error status): The query itself could not be
-    completed. NotFound indicates the payment ID is unknown. Unavailable
-    signals the switch is shutting down. Canceled or DeadlineExceeded
-    reflects client-side timeouts. These are safe to retry.
+    A gRPC error means the call failed rather than describing the attempt: a
+    malformed request (InvalidArgument), an auth failure, a transport problem,
+    a passed deadline, an internal error, or a switch shutting down. Retry the
+    same request, correcting it first if it was malformed.
     */
     rpc TrackOnion (TrackOnionRequest) returns (TrackOnionResponse);
 
@@ -235,20 +224,86 @@ message TrackOnionRequest {
     // Optional: The public keys of the nodes in the route, used with the
     // session_key to decrypt any failure message.
     repeated bytes hop_pubkeys = 4;
+
+    // How to answer while the attempt has not resolved. The default waits for
+    // it to resolve.
+    TrackMode track_mode = 5;
 }
 
+// TrackMode selects how TrackOnion answers for an attempt that has not yet
+// resolved. A bounded wait may be added later as another value.
+enum TrackMode {
+    // Wait until the attempt resolves, then answer with its result. A caller
+    // that gives up on the wait should retry the same request. The switch
+    // keeps an abandoned wait's subscription until the attempt resolves.
+    TRACK_MODE_WAIT = 0;
+
+    // Answer at once, reporting an unresolved attempt as InFlight. A peek
+    // only reads the attempt store and holds nothing on the server, so it is
+    // the mode for callers that poll.
+    TRACK_MODE_PEEK = 1;
+}
+
+// TrackOnionResponse reports what this server knows about the attempt. At most
+// one result is set.
+//
+// A gRPC error from TrackOnion means the call itself failed: a malformed
+// request (InvalidArgument), an auth failure, a transport problem, a passed
+// deadline, an internal error, or a switch shutting down. It never describes
+// the attempt. The caller retries the same request, correcting it first if it
+// was malformed.
+//
+// FORWARD COMPATIBILITY, and this rule is load-bearing:
+//
+// A caller that receives a result it does not recognise, or a response with
+// no result set at all, MUST treat the attempt as possibly still live and keep
+// tracking it. It MUST NOT treat the attempt as failed.
+//
+// Reading "no preimage" as failure is the natural mistake here, and the
+// costly one: a caller that fails an attempt whose HTLC is still live and
+// routes another pays twice. The server also leaves the result unset when it
+// holds an answer it cannot describe, so this rule covers that case as well
+// as results added later.
 message TrackOnionResponse {
-    // The final result of the payment attempt, which is either a preimage
-    // (success) or detailed failure information.
     oneof result {
-        // The preimage obtained by making the payment. If this field is set,
-        // the payment succeeded.
+        // The attempt settled, and this is its payment preimage. The caller
+        // may record the payment as paid.
         bytes preimage = 1;
 
-        // The application-level failure for the payment attempt. If this field
-        // is set, the payment attempt failed.
+        // The attempt failed and its HTLC is no longer in flight. The caller
+        // may fail the attempt and route elsewhere.
         FailureDetails failure_details = 2;
+
+        // The attempt has not resolved. Only returned for TRACK_MODE_PEEK.
+        InFlight in_flight = 3;
+
+        // This server holds no record of the attempt.
+        NoRecord no_record = 4;
     }
+}
+
+// InFlight means the attempt has not resolved and its HTLC may be live. Keep
+// tracking it, and do not record a terminal outcome in the meantime.
+message InFlight {
+}
+
+// NoRecord means this server holds no record of the attempt_id.
+//
+// It does NOT mean the attempt failed: a SendOnion for this attempt_id may
+// still be on its way. Resolve it by resending the original SendOnion request
+// with the same attempt_id, which either dispatches the attempt or answers
+// Accepted for the one already held. A caller that already received Accepted
+// for this attempt_id MUST NOT resend it, and should halt and alert instead,
+// because the record has been removed and the HTLC's outcome can no longer be
+// learned here.
+//
+// This is a fact about the attempt rather than the call, and what it obliges
+// depends on what the caller already knows, so it is an answer and not a gRPC
+// error: as an error it would be the one exception to the rule that a gRPC
+// error means the call failed and should be retried. A server that never held
+// the attempt also answers NoRecord truthfully, so sending the track to the
+// server that accepted the attempt remains the caller's job.
+message NoRecord {
 }
 
 // FailureDetails provides structured information about why a payment attempt
@@ -285,8 +340,8 @@ message FailureDetails {
         // cannot be recovered.
         UnreadableFailure unreadable_failure = 5;
 
-        // switch_error indicates an unexpected internal error that does
-        // not fall into any of the above categories.
+        // switch_error is set when the HTLC failed but the server could
+        // not encode its failure message. The reason is in error_message.
         SwitchError switch_error = 6;
     }
 }
@@ -315,7 +370,8 @@ message LocalFailure {
     bytes wire_message = 1;
 }
 
-// SwitchError indicates that an error occurred within the switch subsystem.
+// SwitchError indicates that the HTLC failed but its failure message could not
+// be encoded.
 message SwitchError {
 }
 

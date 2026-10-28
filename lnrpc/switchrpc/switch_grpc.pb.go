@@ -39,35 +39,24 @@ type SwitchClient interface {
 	//so resend a corrected request under a new attempt_id.
 	SendOnion(ctx context.Context, in *SendOnionRequest, opts ...grpc.CallOption) (*SendOnionResponse, error)
 	//
-	//TrackOnion allows callers to query whether or not a payment dispatched via
-	//SendOnion succeeded or failed.
+	//TrackOnion reports the result of an attempt dispatched with SendOnion. Call
+	//it once SendOnion has answered Accepted; resolve any other SendOnion answer
+	//with SendOnion.
 	//
-	//This RPC is designed to be called after a successful dispatch has been
-	//explicitly confirmed via the SendOnion RPC. It should not be used to
-	//determine whether an HTLC dispatch was received in an ambiguous network
-	//scenario. That ambiguity must be resolved by retrying the idempotent
-	//SendOnion RPC until a definitive acknowledgement is received from the Switch
-	//RPC server.
+	//The answer is carried in the response, never in a gRPC error. At most one
+	//of preimage, failure_details, in_flight or no_record is set, and each
+	//documents the action it obliges the caller to take. A result the client
+	//does not recognise, or a response with none set, means the attempt may
+	//still be live: keep tracking it and never treat it as failed.
 	//
-	//Once dispatch is confirmed, TrackOnion provides the mechanism to wait for
-	//the result of the in-flight HTLC. A client must handle three distinct
-	//categories of outcomes:
+	//By default the call waits until the attempt resolves. With track_mode set
+	//to TRACK_MODE_PEEK it answers at once, reporting an unresolved attempt as
+	//InFlight.
 	//
-	//1. PAYMENT SUCCESS (gRPC code OK, preimage set): The payment settled
-	//successfully. The response contains the payment preimage.
-	//
-	//2. PAYMENT FAILURE (gRPC code OK, failure_details set): The payment failed
-	//at the application level. The failure_details oneof describes the specific
-	//failure type: a ForwardingFailure from a remote hop, a LocalFailure
-	//from the local node, an UnreadableFailure if the error could not be
-	//decoded, or a SwitchError for other switch-level failures. When
-	//encrypted_error_data is populated, the client may perform its own
-	//decryption.
-	//
-	//3. QUERY FAILURE (gRPC error status): The query itself could not be
-	//completed. NotFound indicates the payment ID is unknown. Unavailable
-	//signals the switch is shutting down. Canceled or DeadlineExceeded
-	//reflects client-side timeouts. These are safe to retry.
+	//A gRPC error means the call failed rather than describing the attempt: a
+	//malformed request (InvalidArgument), an auth failure, a transport problem,
+	//a passed deadline, an internal error, or a switch shutting down. Retry the
+	//same request, correcting it first if it was malformed.
 	TrackOnion(ctx context.Context, in *TrackOnionRequest, opts ...grpc.CallOption) (*TrackOnionResponse, error)
 	//
 	//BuildOnion attempts to build an onion packet for the specified route.
@@ -175,35 +164,24 @@ type SwitchServer interface {
 	//so resend a corrected request under a new attempt_id.
 	SendOnion(context.Context, *SendOnionRequest) (*SendOnionResponse, error)
 	//
-	//TrackOnion allows callers to query whether or not a payment dispatched via
-	//SendOnion succeeded or failed.
+	//TrackOnion reports the result of an attempt dispatched with SendOnion. Call
+	//it once SendOnion has answered Accepted; resolve any other SendOnion answer
+	//with SendOnion.
 	//
-	//This RPC is designed to be called after a successful dispatch has been
-	//explicitly confirmed via the SendOnion RPC. It should not be used to
-	//determine whether an HTLC dispatch was received in an ambiguous network
-	//scenario. That ambiguity must be resolved by retrying the idempotent
-	//SendOnion RPC until a definitive acknowledgement is received from the Switch
-	//RPC server.
+	//The answer is carried in the response, never in a gRPC error. At most one
+	//of preimage, failure_details, in_flight or no_record is set, and each
+	//documents the action it obliges the caller to take. A result the client
+	//does not recognise, or a response with none set, means the attempt may
+	//still be live: keep tracking it and never treat it as failed.
 	//
-	//Once dispatch is confirmed, TrackOnion provides the mechanism to wait for
-	//the result of the in-flight HTLC. A client must handle three distinct
-	//categories of outcomes:
+	//By default the call waits until the attempt resolves. With track_mode set
+	//to TRACK_MODE_PEEK it answers at once, reporting an unresolved attempt as
+	//InFlight.
 	//
-	//1. PAYMENT SUCCESS (gRPC code OK, preimage set): The payment settled
-	//successfully. The response contains the payment preimage.
-	//
-	//2. PAYMENT FAILURE (gRPC code OK, failure_details set): The payment failed
-	//at the application level. The failure_details oneof describes the specific
-	//failure type: a ForwardingFailure from a remote hop, a LocalFailure
-	//from the local node, an UnreadableFailure if the error could not be
-	//decoded, or a SwitchError for other switch-level failures. When
-	//encrypted_error_data is populated, the client may perform its own
-	//decryption.
-	//
-	//3. QUERY FAILURE (gRPC error status): The query itself could not be
-	//completed. NotFound indicates the payment ID is unknown. Unavailable
-	//signals the switch is shutting down. Canceled or DeadlineExceeded
-	//reflects client-side timeouts. These are safe to retry.
+	//A gRPC error means the call failed rather than describing the attempt: a
+	//malformed request (InvalidArgument), an auth failure, a transport problem,
+	//a passed deadline, an internal error, or a switch shutting down. Retry the
+	//same request, correcting it first if it was malformed.
 	TrackOnion(context.Context, *TrackOnionRequest) (*TrackOnionResponse, error)
 	//
 	//BuildOnion attempts to build an onion packet for the specified route.
