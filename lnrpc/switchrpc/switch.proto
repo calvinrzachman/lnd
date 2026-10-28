@@ -178,14 +178,6 @@ message Accepted {
     // for it already existed. Required behaviour is identical either way; this
     // is diagnostic.
     bool already_registered = 1;
-
-    // The payment hash of the request this outcome answers.
-    //
-    // NOTE: The attempt store does not yet record a payment hash, so this
-    // echoes the request rather than the hash the stored attempt is bound
-    // to. It does not yet prove that an earlier registration under the same
-    // attempt_id was for the same payment.
-    bytes payment_hash = 2;
 }
 
 // Rejected means the switch declined the HTLC before taking ownership of it.

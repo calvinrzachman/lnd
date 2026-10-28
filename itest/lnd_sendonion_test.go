@@ -185,8 +185,6 @@ func testSendOnionTwice(ht *lntest.HarnessTest) {
 	require.NotNil(ht, accepted, "expected an acknowledgement")
 	require.True(ht, accepted.AlreadyRegistered,
 		"the switch already held this attempt and must say so")
-	require.Equal(ht, payHash[:], accepted.PaymentHash,
-		"the acknowledgement must echo the hash we asked about")
 
 	// Dave settles the invoice.
 	dave.RPC.SettleInvoice(preimage[:])

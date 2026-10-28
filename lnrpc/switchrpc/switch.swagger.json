@@ -384,11 +384,6 @@
         "already_registered": {
           "type": "boolean",
           "description": "Set when the switch already held this attempt from an earlier call,\neither because the attempt was already registered or because a circuit\nfor it already existed. Required behaviour is identical either way; this\nis diagnostic."
-        },
-        "payment_hash": {
-          "type": "string",
-          "format": "byte",
-          "description": "The payment hash of the request this outcome answers.\n\nNOTE: The attempt store does not yet record a payment hash, so this\nechoes the request rather than the hash the stored attempt is bound\nto. It does not yet prove that an earlier registration under the same\nattempt_id was for the same payment."
         }
       },
       "description": "Accepted means the switch has taken ownership of this attempt. Await the\nresult with TrackOnion.\n\nDo NOT conclude success or failure from this message. It reports who owns\nthe attempt, not how it ended."

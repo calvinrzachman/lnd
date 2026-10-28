@@ -297,7 +297,7 @@ func (s *Server) SendOnion(_ context.Context,
 		if errors.Is(initErr, htlcswitch.ErrPaymentIDAlreadyExists) {
 			log.Debugf("Attempt id=%v already exists", attemptID)
 
-			return acknowledged(req.PaymentHash), nil
+			return acknowledged(), nil
 		}
 
 		// We cannot tell whether the record was written, so the caller
@@ -348,7 +348,7 @@ func (s *Server) SendOnion(_ context.Context,
 			log.Debugf("Duplicate dispatch for attempt id=%v",
 				attemptID)
 
-			return acknowledged(req.PaymentHash), nil
+			return acknowledged(), nil
 		}
 
 		// Any other error from SendHTLC means this call queued
@@ -364,29 +364,26 @@ func (s *Server) SendOnion(_ context.Context,
 	}
 
 	// The switch has taken ownership of the attempt.
-	return dispatched(req.PaymentHash), nil
+	return dispatched(), nil
 }
 
 // dispatched reports that the switch has taken ownership of a freshly
 // dispatched attempt.
-func dispatched(paymentHash []byte) *SendOnionResponse {
+func dispatched() *SendOnionResponse {
 	return &SendOnionResponse{
 		Outcome: &SendOnionResponse_Accepted{
-			Accepted: &Accepted{
-				PaymentHash: paymentHash,
-			},
+			Accepted: &Accepted{},
 		},
 	}
 }
 
 // acknowledged reports that the switch already held this attempt, so the
 // caller should stop retrying and track it.
-func acknowledged(paymentHash []byte) *SendOnionResponse {
+func acknowledged() *SendOnionResponse {
 	return &SendOnionResponse{
 		Outcome: &SendOnionResponse_Accepted{
 			Accepted: &Accepted{
 				AlreadyRegistered: true,
-				PaymentHash:       paymentHash,
 			},
 		},
 	}

@@ -350,15 +350,8 @@ type Accepted struct {
 	// for it already existed. Required behaviour is identical either way; this
 	// is diagnostic.
 	AlreadyRegistered bool `protobuf:"varint,1,opt,name=already_registered,json=alreadyRegistered,proto3" json:"already_registered,omitempty"`
-	// The payment hash of the request this outcome answers.
-	//
-	// NOTE: The attempt store does not yet record a payment hash, so this
-	// echoes the request rather than the hash the stored attempt is bound
-	// to. It does not yet prove that an earlier registration under the same
-	// attempt_id was for the same payment.
-	PaymentHash   []byte `protobuf:"bytes,2,opt,name=payment_hash,json=paymentHash,proto3" json:"payment_hash,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *Accepted) Reset() {
@@ -396,13 +389,6 @@ func (x *Accepted) GetAlreadyRegistered() bool {
 		return x.AlreadyRegistered
 	}
 	return false
-}
-
-func (x *Accepted) GetPaymentHash() []byte {
-	if x != nil {
-		return x.PaymentHash
-	}
-	return nil
 }
 
 // Rejected means the switch declined the HTLC before taking ownership of it.
@@ -1410,10 +1396,9 @@ const file_switchrpc_switch_proto_rawDesc = "" +
 	"\baccepted\x18\x01 \x01(\v2\x13.switchrpc.AcceptedH\x00R\baccepted\x121\n" +
 	"\brejected\x18\x02 \x01(\v2\x13.switchrpc.RejectedH\x00R\brejected\x124\n" +
 	"\tambiguous\x18\x03 \x01(\v2\x14.switchrpc.AmbiguousH\x00R\tambiguousB\t\n" +
-	"\aoutcome\"\\\n" +
+	"\aoutcome\"9\n" +
 	"\bAccepted\x12-\n" +
-	"\x12already_registered\x18\x01 \x01(\bR\x11alreadyRegistered\x12!\n" +
-	"\fpayment_hash\x18\x02 \x01(\fR\vpaymentHash\"-\n" +
+	"\x12already_registered\x18\x01 \x01(\bR\x11alreadyRegistered\"-\n" +
 	"\bRejected\x12!\n" +
 	"\fwire_failure\x18\x01 \x01(\fR\vwireFailure\"#\n" +
 	"\tAmbiguous\x12\x16\n" +
