@@ -25,6 +25,12 @@ service Switch {
     sub-server. A client that cannot tell those apart MUST retry the same
     attempt_id, because a call that never reached the server and a call whose
     response was lost look identical from outside.
+
+    A malformed request is the one gRPC error that touches the attempt: the
+    server registers the attempt_id before validating, so it records the
+    attempt as failed and returns InvalidArgument. A retry under the same
+    attempt_id is answered Accepted, and TrackOnion reports the failure. Use a
+    new attempt_id for a corrected request.
     */
     rpc SendOnion (SendOnionRequest) returns (SendOnionResponse);
 
@@ -189,8 +195,10 @@ message Accepted {
 // The HTLC provably never left this node, so no funds are at risk and the
 // caller MAY fail this attempt and route elsewhere.
 message Rejected {
-    // The BOLT #4 wire failure explaining the rejection, serialized as it
-    // would appear on the wire, including any channel update.
+    // The BOLT #4 wire failure explaining the rejection, including any
+    // channel update, in the padded form written by lnwire.EncodeFailure: a
+    // two-byte length, the failure message, a two-byte pad length and the
+    // padding. Decode it with lnwire.DecodeFailure.
     //
     // This is always present and always decodable. A rejection the switch
     // cannot describe is reported as Ambiguous instead, because a definite
@@ -212,7 +220,9 @@ message Ambiguous {
     // Behaviour MUST NOT branch on this value. Every ambiguous outcome
     // requires the same action, and a caller that treats one reason
     // differently from another will eventually treat one of them unsafely.
-    // It is free text rather than an enum for exactly that reason.
+    // It is free text rather than an enum for exactly that reason. It may
+    // contain internal error text, which this authenticated, admin-level
+    // API returns as is.
     string reason = 1;
 }
 
