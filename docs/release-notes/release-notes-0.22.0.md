@@ -147,8 +147,9 @@
   [#YYYYY](https://github.com/lightningnetwork/lnd/pull/YYYYY)).
   `TrackOnionResponse` carries at most one of `preimage` (settled),
   `failure_details` (failed, with the structured failure), `InFlight` (not yet
-  resolved), or `NoRecord` (the server has no record of the attempt, which
-  does not mean it failed). A response with no result set, or one the caller
+  resolved), `NoRecord` (the server has no record of the attempt, which does
+  not mean it failed), or `Mismatch` (the attempt settled for a different
+  payment hash, and its preimage is withheld). A response with no result set, or one the caller
   does not recognise, means the attempt may still be live. The `track_mode`
   field selects between waiting for the attempt to resolve (the default) and
   `TRACK_MODE_PEEK`, which answers at once from the attempt store. A gRPC error

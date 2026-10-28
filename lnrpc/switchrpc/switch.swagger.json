@@ -154,7 +154,7 @@
     "/v2/switch/track": {
       "post": {
         "summary": "TrackOnion reports the result of an attempt dispatched with SendOnion. Call\nit once SendOnion has answered Accepted; resolve any other SendOnion answer\nwith SendOnion.",
-        "description": "The answer is carried in the response, never in a gRPC error. At most one\nof preimage, failure_details, in_flight or no_record is set, and each\ndocuments the action it obliges the caller to take. A result the client\ndoes not recognise, or a response with none set, means the attempt may\nstill be live: keep tracking it and never treat it as failed.\n\nBy default the call waits until the attempt resolves. With track_mode set\nto TRACK_MODE_PEEK it answers at once, reporting an unresolved attempt as\nInFlight.\n\nA gRPC error means the call failed rather than describing the attempt: a\nmalformed request (InvalidArgument), an auth failure, a transport problem,\na passed deadline, an internal error, or a switch shutting down. Retry the\nsame request, correcting it first if it was malformed.",
+        "description": "The answer is carried in the response, never in a gRPC error. At most one\nof preimage, failure_details, in_flight, no_record or mismatch is set, and\neach documents the action it obliges the caller to take. A result the client\ndoes not recognise, or a response with none set, means the attempt may\nstill be live: keep tracking it and never treat it as failed.\n\nBy default the call waits until the attempt resolves. With track_mode set\nto TRACK_MODE_PEEK it answers at once, reporting an unresolved attempt as\nInFlight.\n\nA gRPC error means the call failed rather than describing the attempt: a\nmalformed request (InvalidArgument), an auth failure, a transport problem,\na passed deadline, an internal error, or a switch shutting down. Retry the\nsame request, correcting it first if it was malformed.",
         "operationId": "Switch_TrackOnion",
         "responses": {
           "200": {
@@ -562,6 +562,10 @@
       },
       "description": "LocalFailure represents a failure that originates at the local node, as\nreported by TrackOnion. SendOnion reports a local rejection through the\nRejected outcome instead, which carries the raw wire failure directly.\n\nNo onion decryption is involved because the failure occurred before the\nHTLC left our node."
     },
+    "switchrpcMismatch": {
+      "type": "object",
+      "description": "Mismatch means the attempt settled with a preimage that does not hash to the\nrequest's payment_hash, so this attempt_id is bound to a different payment.\nThe preimage is withheld, since it is that other payment's secret.\n\nThe caller MUST NOT record the payment as paid, and should halt and alert:\nthe attempt_id has been used for more than one payment."
+    },
     "switchrpcNoRecord": {
       "type": "object",
       "description": "NoRecord means this server holds no record of the attempt_id.\n\nIt does NOT mean the attempt failed: a SendOnion for this attempt_id may\nstill be on its way. Resolve it by resending the original SendOnion request\nwith the same attempt_id, which either dispatches the attempt or answers\nAccepted for the one already held. A caller that already received Accepted\nfor this attempt_id MUST NOT resend it, and should halt and alert instead,\nbecause the record has been removed and the HTLC's outcome can no longer be\nlearned here.\n\nThis is a fact about the attempt rather than the call, and what it obliges\ndepends on what the caller already knows, so it is an answer and not a gRPC\nerror: as an error it would be the one exception to the rule that a gRPC\nerror means the call failed and should be retried. A server that never held\nthe attempt also answers NoRecord truthfully, so sending the track to the\nserver that accepted the attempt remains the caller's job."
@@ -701,7 +705,7 @@
         "preimage": {
           "type": "string",
           "format": "byte",
-          "description": "The attempt settled, and this is its payment preimage. The caller\nmay record the payment as paid."
+          "description": "The attempt settled, and this is its payment preimage, which hashes\nto the request's payment_hash. The caller may record the payment as\npaid."
         },
         "failure_details": {
           "$ref": "#/definitions/switchrpcFailureDetails",
@@ -714,6 +718,10 @@
         "no_record": {
           "$ref": "#/definitions/switchrpcNoRecord",
           "description": "This server holds no record of the attempt."
+        },
+        "mismatch": {
+          "$ref": "#/definitions/switchrpcMismatch",
+          "description": "The attempt settled for a different payment hash."
         }
       },
       "description": "TrackOnionResponse reports what this server knows about the attempt. At most\none result is set.\n\nA gRPC error from TrackOnion means the call itself failed: a malformed\nrequest (InvalidArgument), an auth failure, a transport problem, a passed\ndeadline, an internal error, or a switch shutting down. It never describes\nthe attempt. The caller retries the same request, correcting it first if it\nwas malformed.\n\nFORWARD COMPATIBILITY, and this rule is load-bearing:\n\nA caller that receives a result it does not recognise, or a response with\nno result set at all, MUST treat the attempt as possibly still live and keep\ntracking it. It MUST NOT treat the attempt as failed.\n\nReading \"no preimage\" as failure is the natural mistake here, and the\ncostly one: a caller that fails an attempt whose HTLC is still live and\nroutes another pays twice. The server also leaves the result unset when it\nholds an answer it cannot describe, so this rule covers that case as well\nas results added later."

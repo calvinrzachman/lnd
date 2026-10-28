@@ -37,8 +37,8 @@ service Switch {
     with SendOnion.
 
     The answer is carried in the response, never in a gRPC error. At most one
-    of preimage, failure_details, in_flight or no_record is set, and each
-    documents the action it obliges the caller to take. A result the client
+    of preimage, failure_details, in_flight, no_record or mismatch is set, and
+    each documents the action it obliges the caller to take. A result the client
     does not recognise, or a response with none set, means the attempt may
     still be live: keep tracking it and never treat it as failed.
 
@@ -266,8 +266,9 @@ enum TrackMode {
 // as results added later.
 message TrackOnionResponse {
     oneof result {
-        // The attempt settled, and this is its payment preimage. The caller
-        // may record the payment as paid.
+        // The attempt settled, and this is its payment preimage, which hashes
+        // to the request's payment_hash. The caller may record the payment as
+        // paid.
         bytes preimage = 1;
 
         // The attempt failed and its HTLC is no longer in flight. The caller
@@ -279,6 +280,9 @@ message TrackOnionResponse {
 
         // This server holds no record of the attempt.
         NoRecord no_record = 4;
+
+        // The attempt settled for a different payment hash.
+        Mismatch mismatch = 5;
     }
 }
 
@@ -304,6 +308,15 @@ message InFlight {
 // the attempt also answers NoRecord truthfully, so sending the track to the
 // server that accepted the attempt remains the caller's job.
 message NoRecord {
+}
+
+// Mismatch means the attempt settled with a preimage that does not hash to the
+// request's payment_hash, so this attempt_id is bound to a different payment.
+// The preimage is withheld, since it is that other payment's secret.
+//
+// The caller MUST NOT record the payment as paid, and should halt and alert:
+// the attempt_id has been used for more than one payment.
+message Mismatch {
 }
 
 // FailureDetails provides structured information about why a payment attempt

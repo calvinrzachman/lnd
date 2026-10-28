@@ -675,6 +675,7 @@ type TrackOnionResponse struct {
 	//	*TrackOnionResponse_FailureDetails
 	//	*TrackOnionResponse_InFlight
 	//	*TrackOnionResponse_NoRecord
+	//	*TrackOnionResponse_Mismatch
 	Result        isTrackOnionResponse_Result `protobuf_oneof:"result"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -753,13 +754,23 @@ func (x *TrackOnionResponse) GetNoRecord() *NoRecord {
 	return nil
 }
 
+func (x *TrackOnionResponse) GetMismatch() *Mismatch {
+	if x != nil {
+		if x, ok := x.Result.(*TrackOnionResponse_Mismatch); ok {
+			return x.Mismatch
+		}
+	}
+	return nil
+}
+
 type isTrackOnionResponse_Result interface {
 	isTrackOnionResponse_Result()
 }
 
 type TrackOnionResponse_Preimage struct {
-	// The attempt settled, and this is its payment preimage. The caller
-	// may record the payment as paid.
+	// The attempt settled, and this is its payment preimage, which hashes
+	// to the request's payment_hash. The caller may record the payment as
+	// paid.
 	Preimage []byte `protobuf:"bytes,1,opt,name=preimage,proto3,oneof"`
 }
 
@@ -779,6 +790,11 @@ type TrackOnionResponse_NoRecord struct {
 	NoRecord *NoRecord `protobuf:"bytes,4,opt,name=no_record,json=noRecord,proto3,oneof"`
 }
 
+type TrackOnionResponse_Mismatch struct {
+	// The attempt settled for a different payment hash.
+	Mismatch *Mismatch `protobuf:"bytes,5,opt,name=mismatch,proto3,oneof"`
+}
+
 func (*TrackOnionResponse_Preimage) isTrackOnionResponse_Result() {}
 
 func (*TrackOnionResponse_FailureDetails) isTrackOnionResponse_Result() {}
@@ -786,6 +802,8 @@ func (*TrackOnionResponse_FailureDetails) isTrackOnionResponse_Result() {}
 func (*TrackOnionResponse_InFlight) isTrackOnionResponse_Result() {}
 
 func (*TrackOnionResponse_NoRecord) isTrackOnionResponse_Result() {}
+
+func (*TrackOnionResponse_Mismatch) isTrackOnionResponse_Result() {}
 
 // InFlight means the attempt has not resolved and its HTLC may be live. Keep
 // tracking it, and do not record a terminal outcome in the meantime.
@@ -877,6 +895,48 @@ func (*NoRecord) Descriptor() ([]byte, []int) {
 	return file_switchrpc_switch_proto_rawDescGZIP(), []int{8}
 }
 
+// Mismatch means the attempt settled with a preimage that does not hash to the
+// request's payment_hash, so this attempt_id is bound to a different payment.
+// The preimage is withheld, since it is that other payment's secret.
+//
+// The caller MUST NOT record the payment as paid, and should halt and alert:
+// the attempt_id has been used for more than one payment.
+type Mismatch struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Mismatch) Reset() {
+	*x = Mismatch{}
+	mi := &file_switchrpc_switch_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Mismatch) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Mismatch) ProtoMessage() {}
+
+func (x *Mismatch) ProtoReflect() protoreflect.Message {
+	mi := &file_switchrpc_switch_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Mismatch.ProtoReflect.Descriptor instead.
+func (*Mismatch) Descriptor() ([]byte, []int) {
+	return file_switchrpc_switch_proto_rawDescGZIP(), []int{9}
+}
+
 // FailureDetails provides structured information about why a payment attempt
 // failed on the network. This message is included in a successful
 // TrackOnionResponse when the queried attempt ultimately failed.
@@ -901,7 +961,7 @@ type FailureDetails struct {
 
 func (x *FailureDetails) Reset() {
 	*x = FailureDetails{}
-	mi := &file_switchrpc_switch_proto_msgTypes[9]
+	mi := &file_switchrpc_switch_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -913,7 +973,7 @@ func (x *FailureDetails) String() string {
 func (*FailureDetails) ProtoMessage() {}
 
 func (x *FailureDetails) ProtoReflect() protoreflect.Message {
-	mi := &file_switchrpc_switch_proto_msgTypes[9]
+	mi := &file_switchrpc_switch_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -926,7 +986,7 @@ func (x *FailureDetails) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FailureDetails.ProtoReflect.Descriptor instead.
 func (*FailureDetails) Descriptor() ([]byte, []int) {
-	return file_switchrpc_switch_proto_rawDescGZIP(), []int{9}
+	return file_switchrpc_switch_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *FailureDetails) GetErrorMessage() string {
@@ -1057,7 +1117,7 @@ type ForwardingFailure struct {
 
 func (x *ForwardingFailure) Reset() {
 	*x = ForwardingFailure{}
-	mi := &file_switchrpc_switch_proto_msgTypes[10]
+	mi := &file_switchrpc_switch_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1069,7 +1129,7 @@ func (x *ForwardingFailure) String() string {
 func (*ForwardingFailure) ProtoMessage() {}
 
 func (x *ForwardingFailure) ProtoReflect() protoreflect.Message {
-	mi := &file_switchrpc_switch_proto_msgTypes[10]
+	mi := &file_switchrpc_switch_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1082,7 +1142,7 @@ func (x *ForwardingFailure) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ForwardingFailure.ProtoReflect.Descriptor instead.
 func (*ForwardingFailure) Descriptor() ([]byte, []int) {
-	return file_switchrpc_switch_proto_rawDescGZIP(), []int{10}
+	return file_switchrpc_switch_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ForwardingFailure) GetFailureSourceIndex() uint32 {
@@ -1115,7 +1175,7 @@ type LocalFailure struct {
 
 func (x *LocalFailure) Reset() {
 	*x = LocalFailure{}
-	mi := &file_switchrpc_switch_proto_msgTypes[11]
+	mi := &file_switchrpc_switch_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1127,7 +1187,7 @@ func (x *LocalFailure) String() string {
 func (*LocalFailure) ProtoMessage() {}
 
 func (x *LocalFailure) ProtoReflect() protoreflect.Message {
-	mi := &file_switchrpc_switch_proto_msgTypes[11]
+	mi := &file_switchrpc_switch_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1140,7 +1200,7 @@ func (x *LocalFailure) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LocalFailure.ProtoReflect.Descriptor instead.
 func (*LocalFailure) Descriptor() ([]byte, []int) {
-	return file_switchrpc_switch_proto_rawDescGZIP(), []int{11}
+	return file_switchrpc_switch_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *LocalFailure) GetWireMessage() []byte {
@@ -1160,7 +1220,7 @@ type SwitchError struct {
 
 func (x *SwitchError) Reset() {
 	*x = SwitchError{}
-	mi := &file_switchrpc_switch_proto_msgTypes[12]
+	mi := &file_switchrpc_switch_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1172,7 +1232,7 @@ func (x *SwitchError) String() string {
 func (*SwitchError) ProtoMessage() {}
 
 func (x *SwitchError) ProtoReflect() protoreflect.Message {
-	mi := &file_switchrpc_switch_proto_msgTypes[12]
+	mi := &file_switchrpc_switch_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1185,7 +1245,7 @@ func (x *SwitchError) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SwitchError.ProtoReflect.Descriptor instead.
 func (*SwitchError) Descriptor() ([]byte, []int) {
-	return file_switchrpc_switch_proto_rawDescGZIP(), []int{12}
+	return file_switchrpc_switch_proto_rawDescGZIP(), []int{13}
 }
 
 // UnreadableFailure indicates that decryption keys were provided and
@@ -1199,7 +1259,7 @@ type UnreadableFailure struct {
 
 func (x *UnreadableFailure) Reset() {
 	*x = UnreadableFailure{}
-	mi := &file_switchrpc_switch_proto_msgTypes[13]
+	mi := &file_switchrpc_switch_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1211,7 +1271,7 @@ func (x *UnreadableFailure) String() string {
 func (*UnreadableFailure) ProtoMessage() {}
 
 func (x *UnreadableFailure) ProtoReflect() protoreflect.Message {
-	mi := &file_switchrpc_switch_proto_msgTypes[13]
+	mi := &file_switchrpc_switch_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1224,7 +1284,7 @@ func (x *UnreadableFailure) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnreadableFailure.ProtoReflect.Descriptor instead.
 func (*UnreadableFailure) Descriptor() ([]byte, []int) {
-	return file_switchrpc_switch_proto_rawDescGZIP(), []int{13}
+	return file_switchrpc_switch_proto_rawDescGZIP(), []int{14}
 }
 
 // BuildOnionRequest includes the necessary information to construct a Sphinx
@@ -1244,7 +1304,7 @@ type BuildOnionRequest struct {
 
 func (x *BuildOnionRequest) Reset() {
 	*x = BuildOnionRequest{}
-	mi := &file_switchrpc_switch_proto_msgTypes[14]
+	mi := &file_switchrpc_switch_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1256,7 +1316,7 @@ func (x *BuildOnionRequest) String() string {
 func (*BuildOnionRequest) ProtoMessage() {}
 
 func (x *BuildOnionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_switchrpc_switch_proto_msgTypes[14]
+	mi := &file_switchrpc_switch_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1269,7 +1329,7 @@ func (x *BuildOnionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BuildOnionRequest.ProtoReflect.Descriptor instead.
 func (*BuildOnionRequest) Descriptor() ([]byte, []int) {
-	return file_switchrpc_switch_proto_rawDescGZIP(), []int{14}
+	return file_switchrpc_switch_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *BuildOnionRequest) GetRoute() *lnrpc.Route {
@@ -1309,7 +1369,7 @@ type BuildOnionResponse struct {
 
 func (x *BuildOnionResponse) Reset() {
 	*x = BuildOnionResponse{}
-	mi := &file_switchrpc_switch_proto_msgTypes[15]
+	mi := &file_switchrpc_switch_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1321,7 +1381,7 @@ func (x *BuildOnionResponse) String() string {
 func (*BuildOnionResponse) ProtoMessage() {}
 
 func (x *BuildOnionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_switchrpc_switch_proto_msgTypes[15]
+	mi := &file_switchrpc_switch_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1334,7 +1394,7 @@ func (x *BuildOnionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BuildOnionResponse.ProtoReflect.Descriptor instead.
 func (*BuildOnionResponse) Descriptor() ([]byte, []int) {
-	return file_switchrpc_switch_proto_rawDescGZIP(), []int{15}
+	return file_switchrpc_switch_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *BuildOnionResponse) GetOnionBlob() []byte {
@@ -1370,7 +1430,7 @@ type DeleteAttemptsRequest struct {
 
 func (x *DeleteAttemptsRequest) Reset() {
 	*x = DeleteAttemptsRequest{}
-	mi := &file_switchrpc_switch_proto_msgTypes[16]
+	mi := &file_switchrpc_switch_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1382,7 +1442,7 @@ func (x *DeleteAttemptsRequest) String() string {
 func (*DeleteAttemptsRequest) ProtoMessage() {}
 
 func (x *DeleteAttemptsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_switchrpc_switch_proto_msgTypes[16]
+	mi := &file_switchrpc_switch_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1395,7 +1455,7 @@ func (x *DeleteAttemptsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteAttemptsRequest.ProtoReflect.Descriptor instead.
 func (*DeleteAttemptsRequest) Descriptor() ([]byte, []int) {
-	return file_switchrpc_switch_proto_rawDescGZIP(), []int{16}
+	return file_switchrpc_switch_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *DeleteAttemptsRequest) GetAttemptIds() []uint64 {
@@ -1416,7 +1476,7 @@ type DeleteAttemptsResponse struct {
 
 func (x *DeleteAttemptsResponse) Reset() {
 	*x = DeleteAttemptsResponse{}
-	mi := &file_switchrpc_switch_proto_msgTypes[17]
+	mi := &file_switchrpc_switch_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1428,7 +1488,7 @@ func (x *DeleteAttemptsResponse) String() string {
 func (*DeleteAttemptsResponse) ProtoMessage() {}
 
 func (x *DeleteAttemptsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_switchrpc_switch_proto_msgTypes[17]
+	mi := &file_switchrpc_switch_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1441,7 +1501,7 @@ func (x *DeleteAttemptsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteAttemptsResponse.ProtoReflect.Descriptor instead.
 func (*DeleteAttemptsResponse) Descriptor() ([]byte, []int) {
-	return file_switchrpc_switch_proto_rawDescGZIP(), []int{17}
+	return file_switchrpc_switch_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *DeleteAttemptsResponse) GetResults() []*AttemptDeletionResult {
@@ -1464,7 +1524,7 @@ type AttemptDeletionResult struct {
 
 func (x *AttemptDeletionResult) Reset() {
 	*x = AttemptDeletionResult{}
-	mi := &file_switchrpc_switch_proto_msgTypes[18]
+	mi := &file_switchrpc_switch_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1476,7 +1536,7 @@ func (x *AttemptDeletionResult) String() string {
 func (*AttemptDeletionResult) ProtoMessage() {}
 
 func (x *AttemptDeletionResult) ProtoReflect() protoreflect.Message {
-	mi := &file_switchrpc_switch_proto_msgTypes[18]
+	mi := &file_switchrpc_switch_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1489,7 +1549,7 @@ func (x *AttemptDeletionResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttemptDeletionResult.ProtoReflect.Descriptor instead.
 func (*AttemptDeletionResult) Descriptor() ([]byte, []int) {
-	return file_switchrpc_switch_proto_rawDescGZIP(), []int{18}
+	return file_switchrpc_switch_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *AttemptDeletionResult) GetAttemptId() uint64 {
@@ -1514,7 +1574,7 @@ type DisableRemoteRouterRequest struct {
 
 func (x *DisableRemoteRouterRequest) Reset() {
 	*x = DisableRemoteRouterRequest{}
-	mi := &file_switchrpc_switch_proto_msgTypes[19]
+	mi := &file_switchrpc_switch_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1526,7 +1586,7 @@ func (x *DisableRemoteRouterRequest) String() string {
 func (*DisableRemoteRouterRequest) ProtoMessage() {}
 
 func (x *DisableRemoteRouterRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_switchrpc_switch_proto_msgTypes[19]
+	mi := &file_switchrpc_switch_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1539,7 +1599,7 @@ func (x *DisableRemoteRouterRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DisableRemoteRouterRequest.ProtoReflect.Descriptor instead.
 func (*DisableRemoteRouterRequest) Descriptor() ([]byte, []int) {
-	return file_switchrpc_switch_proto_rawDescGZIP(), []int{19}
+	return file_switchrpc_switch_proto_rawDescGZIP(), []int{20}
 }
 
 type DisableRemoteRouterResponse struct {
@@ -1550,7 +1610,7 @@ type DisableRemoteRouterResponse struct {
 
 func (x *DisableRemoteRouterResponse) Reset() {
 	*x = DisableRemoteRouterResponse{}
-	mi := &file_switchrpc_switch_proto_msgTypes[20]
+	mi := &file_switchrpc_switch_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1562,7 +1622,7 @@ func (x *DisableRemoteRouterResponse) String() string {
 func (*DisableRemoteRouterResponse) ProtoMessage() {}
 
 func (x *DisableRemoteRouterResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_switchrpc_switch_proto_msgTypes[20]
+	mi := &file_switchrpc_switch_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1575,7 +1635,7 @@ func (x *DisableRemoteRouterResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DisableRemoteRouterResponse.ProtoReflect.Descriptor instead.
 func (*DisableRemoteRouterResponse) Descriptor() ([]byte, []int) {
-	return file_switchrpc_switch_proto_rawDescGZIP(), []int{20}
+	return file_switchrpc_switch_proto_rawDescGZIP(), []int{21}
 }
 
 var File_switchrpc_switch_proto protoreflect.FileDescriptor
@@ -1624,17 +1684,20 @@ const file_switchrpc_switch_proto_rawDesc = "" +
 	"hopPubkeys\x123\n" +
 	"\n" +
 	"track_mode\x18\x05 \x01(\x0e2\x14.switchrpc.TrackModeR\ttrackModeB\x0e\n" +
-	"\f_session_key\"\xea\x01\n" +
+	"\f_session_key\"\x9d\x02\n" +
 	"\x12TrackOnionResponse\x12\x1c\n" +
 	"\bpreimage\x18\x01 \x01(\fH\x00R\bpreimage\x12D\n" +
 	"\x0ffailure_details\x18\x02 \x01(\v2\x19.switchrpc.FailureDetailsH\x00R\x0efailureDetails\x122\n" +
 	"\tin_flight\x18\x03 \x01(\v2\x13.switchrpc.InFlightH\x00R\binFlight\x122\n" +
-	"\tno_record\x18\x04 \x01(\v2\x13.switchrpc.NoRecordH\x00R\bnoRecordB\b\n" +
+	"\tno_record\x18\x04 \x01(\v2\x13.switchrpc.NoRecordH\x00R\bnoRecord\x121\n" +
+	"\bmismatch\x18\x05 \x01(\v2\x13.switchrpc.MismatchH\x00R\bmismatchB\b\n" +
 	"\x06result\"\n" +
 	"\n" +
 	"\bInFlight\"\n" +
 	"\n" +
-	"\bNoRecord\"\x8f\x03\n" +
+	"\bNoRecord\"\n" +
+	"\n" +
+	"\bMismatch\"\x8f\x03\n" +
 	"\x0eFailureDetails\x12#\n" +
 	"\rerror_message\x18\x01 \x01(\tR\ferrorMessage\x12>\n" +
 	"\rlocal_failure\x18\x02 \x01(\v2\x17.switchrpc.LocalFailureH\x00R\flocalFailure\x12M\n" +
@@ -1704,7 +1767,7 @@ func file_switchrpc_switch_proto_rawDescGZIP() []byte {
 }
 
 var file_switchrpc_switch_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_switchrpc_switch_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_switchrpc_switch_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_switchrpc_switch_proto_goTypes = []any{
 	(TrackMode)(0),                      // 0: switchrpc.TrackMode
 	(AttemptDeletionStatus)(0),          // 1: switchrpc.AttemptDeletionStatus
@@ -1717,52 +1780,54 @@ var file_switchrpc_switch_proto_goTypes = []any{
 	(*TrackOnionResponse)(nil),          // 8: switchrpc.TrackOnionResponse
 	(*InFlight)(nil),                    // 9: switchrpc.InFlight
 	(*NoRecord)(nil),                    // 10: switchrpc.NoRecord
-	(*FailureDetails)(nil),              // 11: switchrpc.FailureDetails
-	(*ForwardingFailure)(nil),           // 12: switchrpc.ForwardingFailure
-	(*LocalFailure)(nil),                // 13: switchrpc.LocalFailure
-	(*SwitchError)(nil),                 // 14: switchrpc.SwitchError
-	(*UnreadableFailure)(nil),           // 15: switchrpc.UnreadableFailure
-	(*BuildOnionRequest)(nil),           // 16: switchrpc.BuildOnionRequest
-	(*BuildOnionResponse)(nil),          // 17: switchrpc.BuildOnionResponse
-	(*DeleteAttemptsRequest)(nil),       // 18: switchrpc.DeleteAttemptsRequest
-	(*DeleteAttemptsResponse)(nil),      // 19: switchrpc.DeleteAttemptsResponse
-	(*AttemptDeletionResult)(nil),       // 20: switchrpc.AttemptDeletionResult
-	(*DisableRemoteRouterRequest)(nil),  // 21: switchrpc.DisableRemoteRouterRequest
-	(*DisableRemoteRouterResponse)(nil), // 22: switchrpc.DisableRemoteRouterResponse
-	nil,                                 // 23: switchrpc.SendOnionRequest.CustomRecordsEntry
-	(*lnrpc.Route)(nil),                 // 24: lnrpc.Route
+	(*Mismatch)(nil),                    // 11: switchrpc.Mismatch
+	(*FailureDetails)(nil),              // 12: switchrpc.FailureDetails
+	(*ForwardingFailure)(nil),           // 13: switchrpc.ForwardingFailure
+	(*LocalFailure)(nil),                // 14: switchrpc.LocalFailure
+	(*SwitchError)(nil),                 // 15: switchrpc.SwitchError
+	(*UnreadableFailure)(nil),           // 16: switchrpc.UnreadableFailure
+	(*BuildOnionRequest)(nil),           // 17: switchrpc.BuildOnionRequest
+	(*BuildOnionResponse)(nil),          // 18: switchrpc.BuildOnionResponse
+	(*DeleteAttemptsRequest)(nil),       // 19: switchrpc.DeleteAttemptsRequest
+	(*DeleteAttemptsResponse)(nil),      // 20: switchrpc.DeleteAttemptsResponse
+	(*AttemptDeletionResult)(nil),       // 21: switchrpc.AttemptDeletionResult
+	(*DisableRemoteRouterRequest)(nil),  // 22: switchrpc.DisableRemoteRouterRequest
+	(*DisableRemoteRouterResponse)(nil), // 23: switchrpc.DisableRemoteRouterResponse
+	nil,                                 // 24: switchrpc.SendOnionRequest.CustomRecordsEntry
+	(*lnrpc.Route)(nil),                 // 25: lnrpc.Route
 }
 var file_switchrpc_switch_proto_depIdxs = []int32{
-	23, // 0: switchrpc.SendOnionRequest.custom_records:type_name -> switchrpc.SendOnionRequest.CustomRecordsEntry
+	24, // 0: switchrpc.SendOnionRequest.custom_records:type_name -> switchrpc.SendOnionRequest.CustomRecordsEntry
 	4,  // 1: switchrpc.SendOnionResponse.accepted:type_name -> switchrpc.Accepted
 	5,  // 2: switchrpc.SendOnionResponse.rejected:type_name -> switchrpc.Rejected
 	6,  // 3: switchrpc.SendOnionResponse.ambiguous:type_name -> switchrpc.Ambiguous
 	0,  // 4: switchrpc.TrackOnionRequest.track_mode:type_name -> switchrpc.TrackMode
-	11, // 5: switchrpc.TrackOnionResponse.failure_details:type_name -> switchrpc.FailureDetails
+	12, // 5: switchrpc.TrackOnionResponse.failure_details:type_name -> switchrpc.FailureDetails
 	9,  // 6: switchrpc.TrackOnionResponse.in_flight:type_name -> switchrpc.InFlight
 	10, // 7: switchrpc.TrackOnionResponse.no_record:type_name -> switchrpc.NoRecord
-	13, // 8: switchrpc.FailureDetails.local_failure:type_name -> switchrpc.LocalFailure
-	12, // 9: switchrpc.FailureDetails.forwarding_failure:type_name -> switchrpc.ForwardingFailure
-	15, // 10: switchrpc.FailureDetails.unreadable_failure:type_name -> switchrpc.UnreadableFailure
-	14, // 11: switchrpc.FailureDetails.switch_error:type_name -> switchrpc.SwitchError
-	24, // 12: switchrpc.BuildOnionRequest.route:type_name -> lnrpc.Route
-	20, // 13: switchrpc.DeleteAttemptsResponse.results:type_name -> switchrpc.AttemptDeletionResult
-	1,  // 14: switchrpc.AttemptDeletionResult.status:type_name -> switchrpc.AttemptDeletionStatus
-	2,  // 15: switchrpc.Switch.SendOnion:input_type -> switchrpc.SendOnionRequest
-	7,  // 16: switchrpc.Switch.TrackOnion:input_type -> switchrpc.TrackOnionRequest
-	16, // 17: switchrpc.Switch.BuildOnion:input_type -> switchrpc.BuildOnionRequest
-	18, // 18: switchrpc.Switch.DeleteAttempts:input_type -> switchrpc.DeleteAttemptsRequest
-	21, // 19: switchrpc.Switch.DisableRemoteRouter:input_type -> switchrpc.DisableRemoteRouterRequest
-	3,  // 20: switchrpc.Switch.SendOnion:output_type -> switchrpc.SendOnionResponse
-	8,  // 21: switchrpc.Switch.TrackOnion:output_type -> switchrpc.TrackOnionResponse
-	17, // 22: switchrpc.Switch.BuildOnion:output_type -> switchrpc.BuildOnionResponse
-	19, // 23: switchrpc.Switch.DeleteAttempts:output_type -> switchrpc.DeleteAttemptsResponse
-	22, // 24: switchrpc.Switch.DisableRemoteRouter:output_type -> switchrpc.DisableRemoteRouterResponse
-	20, // [20:25] is the sub-list for method output_type
-	15, // [15:20] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	11, // 8: switchrpc.TrackOnionResponse.mismatch:type_name -> switchrpc.Mismatch
+	14, // 9: switchrpc.FailureDetails.local_failure:type_name -> switchrpc.LocalFailure
+	13, // 10: switchrpc.FailureDetails.forwarding_failure:type_name -> switchrpc.ForwardingFailure
+	16, // 11: switchrpc.FailureDetails.unreadable_failure:type_name -> switchrpc.UnreadableFailure
+	15, // 12: switchrpc.FailureDetails.switch_error:type_name -> switchrpc.SwitchError
+	25, // 13: switchrpc.BuildOnionRequest.route:type_name -> lnrpc.Route
+	21, // 14: switchrpc.DeleteAttemptsResponse.results:type_name -> switchrpc.AttemptDeletionResult
+	1,  // 15: switchrpc.AttemptDeletionResult.status:type_name -> switchrpc.AttemptDeletionStatus
+	2,  // 16: switchrpc.Switch.SendOnion:input_type -> switchrpc.SendOnionRequest
+	7,  // 17: switchrpc.Switch.TrackOnion:input_type -> switchrpc.TrackOnionRequest
+	17, // 18: switchrpc.Switch.BuildOnion:input_type -> switchrpc.BuildOnionRequest
+	19, // 19: switchrpc.Switch.DeleteAttempts:input_type -> switchrpc.DeleteAttemptsRequest
+	22, // 20: switchrpc.Switch.DisableRemoteRouter:input_type -> switchrpc.DisableRemoteRouterRequest
+	3,  // 21: switchrpc.Switch.SendOnion:output_type -> switchrpc.SendOnionResponse
+	8,  // 22: switchrpc.Switch.TrackOnion:output_type -> switchrpc.TrackOnionResponse
+	18, // 23: switchrpc.Switch.BuildOnion:output_type -> switchrpc.BuildOnionResponse
+	20, // 24: switchrpc.Switch.DeleteAttempts:output_type -> switchrpc.DeleteAttemptsResponse
+	23, // 25: switchrpc.Switch.DisableRemoteRouter:output_type -> switchrpc.DisableRemoteRouterResponse
+	21, // [21:26] is the sub-list for method output_type
+	16, // [16:21] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_switchrpc_switch_proto_init() }
@@ -1782,22 +1847,23 @@ func file_switchrpc_switch_proto_init() {
 		(*TrackOnionResponse_FailureDetails)(nil),
 		(*TrackOnionResponse_InFlight)(nil),
 		(*TrackOnionResponse_NoRecord)(nil),
+		(*TrackOnionResponse_Mismatch)(nil),
 	}
-	file_switchrpc_switch_proto_msgTypes[9].OneofWrappers = []any{
+	file_switchrpc_switch_proto_msgTypes[10].OneofWrappers = []any{
 		(*FailureDetails_LocalFailure)(nil),
 		(*FailureDetails_ForwardingFailure)(nil),
 		(*FailureDetails_EncryptedErrorData)(nil),
 		(*FailureDetails_UnreadableFailure)(nil),
 		(*FailureDetails_SwitchError)(nil),
 	}
-	file_switchrpc_switch_proto_msgTypes[14].OneofWrappers = []any{}
+	file_switchrpc_switch_proto_msgTypes[15].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_switchrpc_switch_proto_rawDesc), len(file_switchrpc_switch_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   22,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

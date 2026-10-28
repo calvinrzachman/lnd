@@ -463,6 +463,7 @@ const (
 	resultFailure  = "failure"
 	resultInFlight = "in flight"
 	resultNoRecord = "no record"
+	resultMismatch = "mismatch"
 )
 
 // TestTrackOnion is a unit test that rigorously verifies the behavior of the
@@ -535,6 +536,25 @@ func TestTrackOnion(t *testing.T) {
 				resp *TrackOnionResponse) {
 
 				require.Equal(t, preimageBytes, resp.GetPreimage())
+			},
+		},
+		{
+			// A settle for a different payment hash must never
+			// reveal that payment's preimage.
+			name:  "payment settled for a different hash",
+			modes: bothModes,
+			setup: func(t *testing.T, payer *mockPayer,
+				store *mockAttemptStore, req *TrackOnionRequest) {
+
+				payer.getResultResult = &htlcswitch.PaymentResult{
+					Preimage: lntypes.Preimage{4, 5, 6},
+				}
+			},
+			expectedResult: resultMismatch,
+			check: func(t *testing.T, payer *mockPayer,
+				resp *TrackOnionResponse) {
+
+				require.Empty(t, resp.GetPreimage())
 			},
 		},
 		{
@@ -844,6 +864,9 @@ func requireTrackResult(t *testing.T, resp *TrackOnionResponse, want string) {
 
 	case resultNoRecord:
 		require.NotNil(t, resp.GetNoRecord(), "want no record")
+
+	case resultMismatch:
+		require.NotNil(t, resp.GetMismatch(), "want mismatch")
 
 	default:
 		t.Fatalf("unknown result %q", want)
