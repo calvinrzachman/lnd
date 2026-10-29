@@ -1245,3 +1245,151 @@ func TestMarkerCollision(t *testing.T) {
 		"marked for external lifecycle management",
 	)
 }
+
+// TestNetworkResultStoreLifecycleMode pins the lifecycle mode check that
+// newNetworkResultStore runs on startup. The check consults only the external
+// lifecycle marker, never the attempt store, so the outcome of a mode switch
+// depends on its direction and not on whether attempts are present.
+func TestNetworkResultStoreLifecycleMode(t *testing.T) {
+	t.Parallel()
+
+	const (
+		local    = false
+		external = true
+	)
+
+	// markerErr is a substring of the error returned when a local mode
+	// store is opened on a database that holds the marker.
+	const markerErr = "marked for external lifecycle management"
+
+	ptr := func(b bool) *bool { return &b }
+
+	markerSet := func(t *testing.T, db kvdb.Backend) bool {
+		t.Helper()
+
+		var marked bool
+		err := db.View(func(tx kvdb.RTx) error {
+			marked = tx.ReadBucket(
+				externalLifecycleMarkerBucket,
+			) != nil
+
+			return nil
+		}, func() {
+			marked = false
+		})
+		require.NoError(t, err)
+
+		return marked
+	}
+
+	testCases := []struct {
+		name string
+
+		// prior is the mode of an earlier store on the same database,
+		// or nil for a fresh database.
+		prior *bool
+
+		// withAttempt initializes an attempt through the prior store.
+		withAttempt bool
+
+		mode       bool
+		wantErr    bool
+		wantMarker bool
+	}{
+		{
+			name:       "fresh local",
+			mode:       local,
+			wantMarker: false,
+		},
+		{
+			name:       "fresh external",
+			mode:       external,
+			wantMarker: true,
+		},
+		{
+			name:        "reopen local",
+			prior:       ptr(local),
+			withAttempt: true,
+			mode:        local,
+			wantMarker:  false,
+		},
+		{
+			name:        "reopen external",
+			prior:       ptr(external),
+			withAttempt: true,
+			mode:        external,
+			wantMarker:  true,
+		},
+		{
+			// Local to external is allowed, the marker is simply
+			// written.
+			name:       "local to external, no attempts",
+			prior:      ptr(local),
+			mode:       external,
+			wantMarker: true,
+		},
+		{
+			// The constructor does not look at the attempt store,
+			// so an empty store does not clear the way back. Only
+			// DisableRemoteRouter removes the marker.
+			name:       "external to local, no attempts",
+			prior:      ptr(external),
+			mode:       local,
+			wantErr:    true,
+			wantMarker: true,
+		},
+		{
+			// Attempts written in local mode do not block a switch
+			// to external mode.
+			name:        "local to external, attempts present",
+			prior:       ptr(local),
+			withAttempt: true,
+			mode:        external,
+			wantMarker:  true,
+		},
+		{
+			name:        "external to local, attempts present",
+			prior:       ptr(external),
+			withAttempt: true,
+			mode:        local,
+			wantErr:     true,
+			wantMarker:  true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			db := channeldb.OpenForTesting(t, t.TempDir())
+
+			if tc.prior != nil {
+				prior, err := newNetworkResultStore(
+					db, *tc.prior,
+				)
+				require.NoError(t, err)
+
+				if tc.withAttempt {
+					require.NoError(t, prior.InitAttempt(1))
+				}
+			}
+
+			store, err := newNetworkResultStore(db, tc.mode)
+			require.Equal(t, tc.wantMarker, markerSet(t, db))
+
+			if tc.wantErr {
+				require.ErrorContains(t, err, markerErr)
+				require.Nil(t, store)
+
+				return
+			}
+			require.NoError(t, err)
+
+			// A successful open leaves earlier attempts in place.
+			if tc.withAttempt {
+				_, err := store.GetResult(1)
+				require.ErrorIs(t, err, ErrAttemptResultPending)
+			}
+		})
+	}
+}
