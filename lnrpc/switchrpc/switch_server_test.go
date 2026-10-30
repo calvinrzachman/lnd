@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/lightningnetwork/lnd/htlcswitch"
@@ -577,6 +578,42 @@ func TestTrackOnion(t *testing.T) {
 			tc.checkResponse(t, resp)
 		})
 	}
+}
+
+// TestTrackOnionReleasesSubscription asserts that TrackOnion hands its RPC
+// context to the dispatcher, so that a client which cancels or times out
+// leaves no pending result subscription behind.
+func TestTrackOnionReleasesSubscription(t *testing.T) {
+	t.Parallel()
+
+	payer := &mockPayer{}
+	server, _, err := New(&Config{HtlcDispatcher: payer})
+	require.NoError(t, err)
+
+	req := &TrackOnionRequest{
+		PaymentHash: make([]byte, 32),
+		AttemptId:   1,
+	}
+
+	const numCalls = 5
+	for range numCalls {
+		ctx, cancel := context.WithTimeout(
+			t.Context(), 10*time.Millisecond,
+		)
+		_, err := server.TrackOnion(ctx, req)
+		cancel()
+
+		require.Equal(t, codes.DeadlineExceeded, status.Code(err))
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err = server.TrackOnion(ctx, req)
+	require.Equal(t, codes.Canceled, status.Code(err))
+
+	require.Eventually(t, func() bool {
+		return payer.subscribers.Load() == 0
+	}, 5*time.Second, 10*time.Millisecond)
 }
 
 // TestBuildOnion is a unit test that verifies the behavior of the BuildOnion
