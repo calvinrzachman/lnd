@@ -68,12 +68,17 @@ type HtlcDispatcher interface {
 
 	// GetAttemptResultWithContext returns a channel that delivers the
 	// result of the given attempt. The wait is abandoned, and the channel
-	// closed, when ctx is cancelled or the switch shuts down.
+	// closed, when ctx is cancelled or the switch shuts down. A closed
+	// channel is not a result: the HTLC may still be in flight.
 	GetAttemptResultWithContext(ctx context.Context, attemptID uint64,
 		paymentHash lntypes.Hash,
 		deobfuscator htlcswitch.ErrorDecrypter) (
 		<-chan *htlcswitch.PaymentResult, error)
 }
+
+// The switch is assigned to Config.HtlcDispatcher by reflection, so check at
+// compile time that it implements the interface.
+var _ HtlcDispatcher = (*htlcswitch.Switch)(nil)
 
 // RemoteRouterController defines a restricted interface for managing the remote
 // router state.
