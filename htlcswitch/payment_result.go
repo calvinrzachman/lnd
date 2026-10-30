@@ -469,7 +469,7 @@ func (store *networkResultStore) UnsubscribeResult(attemptID uint64,
 			continue
 		}
 
-		subs = append(subs[:i], subs[i+1:]...)
+		subs = slices.Delete(subs, i, i+1)
 		if len(subs) == 0 {
 			delete(store.results, attemptID)
 		} else {

@@ -1276,6 +1276,10 @@ func TestNetworkResultStoreUnsubscribe(t *testing.T) {
 	// Removing the abandoned subscriber leaves only the active one.
 	store.UnsubscribeResult(id, abandoned)
 	require.Equal(t, 1, numSubscribers(store, id))
+	store.resultsMtx.Lock()
+	remaining := (<-chan *networkResult)(store.results[id][0])
+	require.True(t, remaining == active)
+	store.resultsMtx.Unlock()
 
 	// Removing it again is a no-op.
 	store.UnsubscribeResult(id, abandoned)
@@ -1340,21 +1344,29 @@ func TestNetworkResultStoreUnsubscribeRace(t *testing.T) {
 		isResolution: true,
 	}
 
-	// Remove every even subscriber while the result is stored.
-	var wg sync.WaitGroup
+	// Remove every even subscriber while the result is stored. A shared
+	// start signal releases all goroutines together so the removals and
+	// the delivery actually overlap.
+	var (
+		wg    sync.WaitGroup
+		start = make(chan struct{})
+	)
 	for i := 0; i < numSubs; i += 2 {
 		wg.Add(1)
 		go func(sub <-chan *networkResult) {
 			defer wg.Done()
+			<-start
 			store.UnsubscribeResult(id, sub)
 		}(subs[i])
 	}
 
 	stored := make(chan error, 1)
 	go func() {
+		<-start
 		stored <- store.StoreResult(id, result)
 	}()
 
+	close(start)
 	wg.Wait()
 	select {
 	case err := <-stored:
