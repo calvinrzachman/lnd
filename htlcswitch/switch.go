@@ -591,6 +591,11 @@ func (s *Switch) GetAttemptResult(attemptID uint64, paymentHash lntypes.Hash,
 // cancellation the result subscription is released and the returned channel
 // is closed without a value. As with switch shutdown, a closed channel says
 // nothing about the HTLC, which may still be in flight.
+//
+// NOTE: lnd's router must keep using GetAttemptResult. Passing a payment's
+// context here would stop the wait when the payment times out while its
+// HTLCs are still in flight, leaving them untracked until restart. A caller
+// that needs cancellation must pass a context that lives as long as it does.
 func (s *Switch) GetAttemptResultWithContext(ctx context.Context,
 	attemptID uint64, paymentHash lntypes.Hash,
 	deobfuscator ErrorDecrypter) (<-chan *PaymentResult, error) {
