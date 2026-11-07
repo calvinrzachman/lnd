@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/kvdb"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/stretchr/testify/require"
 )
@@ -293,4 +294,138 @@ func TestDisableRemoteRouterExternalIndex(t *testing.T) {
 	require.Equal(t, []DeletionStatus{DeletionOK}, statuses)
 
 	require.NoError(t, store.DisableRemoteRouter())
+}
+
+// requireRecord asserts whether a record exists for the internal attempt ID.
+func requireRecord(t *testing.T, store *networkResultStore, id uint64,
+	want bool) {
+
+	t.Helper()
+
+	var exists bool
+	err := kvdb.View(store.backend, func(tx kvdb.RTx) error {
+		exists = resultExists(tx, id)
+
+		return nil
+	}, func() {})
+	require.NoError(t, err)
+	require.Equal(t, want, exists, "record for attempt %d", id)
+}
+
+// TestCleanStoreOwnerAware checks that CleanStore never removes an attempt
+// named in the external attempt index, while it still removes unindexed
+// results that are not in the keep set.
+func TestCleanStoreOwnerAware(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestExternalStore(t)
+	nextID, _ := testIDSource(100)
+
+	// Register two external attempts, one left pending and one settled.
+	pendingID, err := store.InitExternalAttempt(
+		[]byte("ext-pending"), [32]byte{1}, nextID,
+	)
+	require.NoError(t, err)
+
+	settledID, err := store.InitExternalAttempt(
+		[]byte("ext-settled"), [32]byte{2}, nextID,
+	)
+	require.NoError(t, err)
+	settleAttempt(t, store, settledID)
+
+	// Write two results for the local router, with no index entry.
+	const (
+		routerStale uint64 = 5
+		routerKept  uint64 = 6
+	)
+	settleAttempt(t, store, routerStale)
+	settleAttempt(t, store, routerKept)
+
+	// With an empty keep set, only the indexed attempts survive.
+	require.NoError(t, store.CleanStore(map[uint64]struct{}{}))
+	requireRecord(t, store, pendingID, true)
+	requireRecord(t, store, settledID, true)
+	requireRecord(t, store, routerStale, false)
+	requireRecord(t, store, routerKept, false)
+
+	// A keep-listed result survives alongside the indexed attempts, while
+	// an unlisted one is removed.
+	settleAttempt(t, store, routerStale)
+	settleAttempt(t, store, routerKept)
+	require.NoError(t, store.CleanStore(map[uint64]struct{}{
+		routerKept: {},
+	}))
+	requireRecord(t, store, pendingID, true)
+	requireRecord(t, store, settledID, true)
+	requireRecord(t, store, routerStale, false)
+	requireRecord(t, store, routerKept, true)
+
+	// The index itself is untouched, so both keys still resolve.
+	for _, key := range []string{"ext-pending", "ext-settled"} {
+		_, err := store.LookupExternalAttempt([]byte(key))
+		require.NoError(t, err)
+	}
+}
+
+// TestCleanStoreAfterExternalDelete checks that deleting an external attempt
+// by key removes its index entry, so it no longer protects anything and a
+// later CleanStore may remove whatever is left.
+func TestCleanStoreAfterExternalDelete(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestExternalStore(t)
+	nextID, _ := testIDSource(100)
+
+	key := []byte("ext-settled")
+	id, err := store.InitExternalAttempt(key, [32]byte{1}, nextID)
+	require.NoError(t, err)
+	settleAttempt(t, store, id)
+
+	statuses, err := store.DeleteExternalAttempts([][]byte{key})
+	require.NoError(t, err)
+	require.Equal(t, []DeletionStatus{DeletionOK}, statuses)
+
+	_, err = store.LookupExternalAttempt(key)
+	require.ErrorIs(t, err, ErrPaymentIDNotFound)
+
+	var indexed map[uint64]struct{}
+	err = kvdb.View(store.backend, func(tx kvdb.RTx) error {
+		indexed, err = fetchIndexedAttemptIDs(tx)
+
+		return err
+	}, func() {})
+	require.NoError(t, err)
+	require.Empty(t, indexed)
+
+	// A result written under the freed ID, with no index entry, is no
+	// longer protected and is removed.
+	settleAttempt(t, store, id)
+	require.NoError(t, store.CleanStore(map[uint64]struct{}{}))
+	requireRecord(t, store, id, false)
+}
+
+// TestCleanStoreUnreadableIndex checks that CleanStore removes nothing when
+// an index entry cannot be decoded, since the attempt it protects is unknown.
+func TestCleanStoreUnreadableIndex(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestExternalStore(t)
+
+	const routerStale uint64 = 5
+	settleAttempt(t, store, routerStale)
+
+	err := kvdb.Update(store.backend, func(tx kvdb.RwTx) error {
+		index, err := tx.CreateTopLevelBucket(
+			externalAttemptIndexBucketKey,
+		)
+		if err != nil {
+			return err
+		}
+
+		return index.Put([]byte("corrupt"), []byte{0xff})
+	}, func() {})
+	require.NoError(t, err)
+
+	require.NoError(t, store.CleanStore(map[uint64]struct{}{}))
+	requireRecord(t, store, routerStale, true)
 }
