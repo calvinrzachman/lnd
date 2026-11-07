@@ -684,8 +684,9 @@ type AttemptStore interface {
 	SubscribeResult(attemptID uint64) (<-chan *networkResult, error)
 
 	// CleanStore removes all attempt results from the store except for
-	// those listed in the keepPids map. This allows for a "delete all
-	// except" approach to cleanup.
+	// those listed in the keepPids map and those named in the external
+	// attempt index. This allows for a "delete all except" approach to
+	// cleanup that never touches an external dispatcher's attempts.
 	CleanStore(keepPids map[uint64]struct{}) error
 
 	// DisableRemoteRouter checks for attempt entries and, if none are
