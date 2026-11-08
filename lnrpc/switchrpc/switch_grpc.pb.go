@@ -49,9 +49,13 @@ type SwitchClient interface {
 	//attempt key, because a call that never reached the server and a call whose
 	//response was lost look identical from outside.
 	//
-	//A malformed request (InvalidArgument) may also record the attempt as
-	//failed, so resend a corrected request under a new attempt key. A request
-	//whose key is missing or out of bounds records nothing.
+	//InvalidArgument is the one error that proves nothing was sent under the
+	//key. Do not retry the same request after it. A request whose key is
+	//missing or out of bounds records nothing. Any other malformed request is
+	//rejected after the key was registered, and the attempt is recorded as
+	//failed, so a retry of it is answered Accepted with already_registered set
+	//and TrackOnion returns a local failure. Fix the request and send it under
+	//a new attempt key.
 	SendOnion(ctx context.Context, in *SendOnionRequest, opts ...grpc.CallOption) (*SendOnionResponse, error)
 	//
 	//TrackOnion allows callers to query whether or not a payment dispatched via
@@ -82,7 +86,10 @@ type SwitchClient interface {
 	//3. QUERY FAILURE (gRPC error status): The query itself could not be
 	//completed. NotFound indicates the attempt key is unknown. Unavailable
 	//signals the switch is shutting down. Canceled or DeadlineExceeded
-	//reflects client-side timeouts. These are safe to retry.
+	//reflects client-side timeouts. Internal reports a server side failure to
+	//look up or read the attempt. These are safe to retry. InvalidArgument
+	//means the key or the decryption fields are malformed; the request will
+	//fail the same way until it is corrected.
 	//
 	//DataLoss is different: the attempt key is registered, but the server no
 	//longer holds a record for its attempt, for example because a build that
@@ -109,9 +116,18 @@ type SwitchClient interface {
 	//DELETION_FAILED. The overall RPC succeeds (gRPC OK) as long as the
 	//request could be processed, even if individual attempts were not deleted.
 	//
+	//Results follow the order of the keys in the request, and a key repeated
+	//in the request is reported once, so pair results with requests by their
+	//key, not by position. DELETION_OK is the zero value of the status enum.
+	//
 	//Clients MUST only delete attempts whose outcome (settled or failed) has
 	//been durably recorded and will never need to be retried. Deleting an
-	//attempt removes the server's idempotency protection for that attempt key.
+	//attempt removes the server's idempotency protection for that attempt key:
+	//the server forgets the key, and a SendOnion that names it again
+	//dispatches a new HTLC. A deleted key MUST never be sent again.
+	//
+	//An invalid key anywhere in the request fails the whole call with
+	//InvalidArgument, and nothing is deleted.
 	DeleteAttempts(ctx context.Context, in *DeleteAttemptsRequest, opts ...grpc.CallOption) (*DeleteAttemptsResponse, error)
 }
 
@@ -194,9 +210,13 @@ type SwitchServer interface {
 	//attempt key, because a call that never reached the server and a call whose
 	//response was lost look identical from outside.
 	//
-	//A malformed request (InvalidArgument) may also record the attempt as
-	//failed, so resend a corrected request under a new attempt key. A request
-	//whose key is missing or out of bounds records nothing.
+	//InvalidArgument is the one error that proves nothing was sent under the
+	//key. Do not retry the same request after it. A request whose key is
+	//missing or out of bounds records nothing. Any other malformed request is
+	//rejected after the key was registered, and the attempt is recorded as
+	//failed, so a retry of it is answered Accepted with already_registered set
+	//and TrackOnion returns a local failure. Fix the request and send it under
+	//a new attempt key.
 	SendOnion(context.Context, *SendOnionRequest) (*SendOnionResponse, error)
 	//
 	//TrackOnion allows callers to query whether or not a payment dispatched via
@@ -227,7 +247,10 @@ type SwitchServer interface {
 	//3. QUERY FAILURE (gRPC error status): The query itself could not be
 	//completed. NotFound indicates the attempt key is unknown. Unavailable
 	//signals the switch is shutting down. Canceled or DeadlineExceeded
-	//reflects client-side timeouts. These are safe to retry.
+	//reflects client-side timeouts. Internal reports a server side failure to
+	//look up or read the attempt. These are safe to retry. InvalidArgument
+	//means the key or the decryption fields are malformed; the request will
+	//fail the same way until it is corrected.
 	//
 	//DataLoss is different: the attempt key is registered, but the server no
 	//longer holds a record for its attempt, for example because a build that
@@ -254,9 +277,18 @@ type SwitchServer interface {
 	//DELETION_FAILED. The overall RPC succeeds (gRPC OK) as long as the
 	//request could be processed, even if individual attempts were not deleted.
 	//
+	//Results follow the order of the keys in the request, and a key repeated
+	//in the request is reported once, so pair results with requests by their
+	//key, not by position. DELETION_OK is the zero value of the status enum.
+	//
 	//Clients MUST only delete attempts whose outcome (settled or failed) has
 	//been durably recorded and will never need to be retried. Deleting an
-	//attempt removes the server's idempotency protection for that attempt key.
+	//attempt removes the server's idempotency protection for that attempt key:
+	//the server forgets the key, and a SendOnion that names it again
+	//dispatches a new HTLC. A deleted key MUST never be sent again.
+	//
+	//An invalid key anywhere in the request fails the whole call with
+	//InvalidArgument, and nothing is deleted.
 	DeleteAttempts(context.Context, *DeleteAttemptsRequest) (*DeleteAttemptsResponse, error)
 	mustEmbedUnimplementedSwitchServer()
 }

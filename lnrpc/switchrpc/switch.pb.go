@@ -23,10 +23,14 @@ const (
 )
 
 // AttemptDeletionStatus describes the outcome of a single attempt deletion.
+//
+// DELETION_OK is the zero value, so a result whose status field is absent
+// reads as deleted. Pair each result with its key.
 type AttemptDeletionStatus int32
 
 const (
-	// The attempt result was successfully deleted from the store.
+	// The attempt result was successfully deleted from the store. The key is
+	// forgotten and MUST never be sent again.
 	AttemptDeletionStatus_DELETION_OK AttemptDeletionStatus = 0
 	// The attempt is still in-flight (pending) and cannot be safely deleted.
 	AttemptDeletionStatus_DELETION_PENDING AttemptDeletionStatus = 1
@@ -683,7 +687,8 @@ func (x *TrackOnionRequest) GetHopPubkeys() [][]byte {
 
 // TrackOnionResponse reports how a dispatched attempt ended. A preimage means
 // the HTLC settled. failure_details means the HTLC failed and is no longer in
-// flight, so the caller MAY fail the attempt.
+// flight, so the caller MAY fail the attempt, except when it carries a
+// switch_error, whose outcome is unknown.
 //
 // NOTE: A response with no result set, or a result the caller does not
 // recognise, means the attempt may still be live. The caller MUST keep
@@ -926,8 +931,8 @@ type FailureDetails_UnreadableFailure struct {
 }
 
 type FailureDetails_SwitchError struct {
-	// switch_error indicates an unexpected internal error that does
-	// not fall into any of the above categories.
+	// switch_error means the server could not classify the result, so
+	// the outcome is unknown. See SwitchError before acting on it.
 	SwitchError *SwitchError `protobuf:"bytes,6,opt,name=switch_error,json=switchError,proto3,oneof"`
 }
 
@@ -1054,7 +1059,15 @@ func (x *LocalFailure) GetWireMessage() []byte {
 	return nil
 }
 
-// SwitchError indicates that an error occurred within the switch subsystem.
+// SwitchError means the server could not classify the attempt's result. The
+// error_message of the enclosing FailureDetails says why. In practice this is
+// a stored result of a type the server does not recognise, so it cannot tell
+// whether the HTLC settled or failed.
+//
+// Despite riding in failure_details, this is not a verdict that the HTLC
+// failed. The caller MUST treat the outcome as unknown: it MUST NOT fail the
+// attempt or retry the payment on the strength of it, and should alert an
+// operator. TrackOnion returns the same answer for the attempt every time.
 type SwitchError struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
