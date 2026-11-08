@@ -157,32 +157,45 @@ func fetchExternalIndexEntry(tx kvdb.RTx,
 	return decodeExternalIndexEntry(entryBytes)
 }
 
+// unreadableIndexEntry names an index entry that cannot be decoded, and why.
+type unreadableIndexEntry struct {
+	key []byte
+	err error
+}
+
 // fetchIndexedAttemptIDs returns the internal attempt IDs named in the
-// external attempt index. It returns errUnreadableIndex if any entry cannot be
-// decoded.
-func fetchIndexedAttemptIDs(tx kvdb.RTx) (map[uint64]struct{}, error) {
+// external attempt index, and every entry that cannot be decoded. The attempt
+// an unreadable entry names is unknown, so its ID is not in the returned set.
+func fetchIndexedAttemptIDs(tx kvdb.RTx) (map[uint64]struct{},
+	[]unreadableIndexEntry, error) {
+
 	ids := make(map[uint64]struct{})
 
 	index := tx.ReadBucket(externalAttemptIndexBucketKey)
 	if index == nil {
-		return ids, nil
+		return ids, nil, nil
 	}
 
+	var unreadable []unreadableIndexEntry
 	err := kvdb.ForAll(index, func(k, v []byte) error {
 		entry, err := decodeExternalIndexEntry(v)
 		if err != nil {
-			return fmt.Errorf("%w: key %x: %w", errUnreadableIndex,
-				k, err)
+			unreadable = append(unreadable, unreadableIndexEntry{
+				key: bytes.Clone(k),
+				err: err,
+			})
+
+			return nil
 		}
 		ids[entry.attemptID] = struct{}{}
 
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return ids, nil
+	return ids, unreadable, nil
 }
 
 // resultExists reports whether any record exists for the attempt ID.

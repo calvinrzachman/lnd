@@ -468,10 +468,16 @@ func fetchResult(tx kvdb.RTx, pid uint64) (*networkResult, error) {
 // record and index entry are written in one transaction, and the index is
 // read in the same transaction as the deletes below.
 func (store *networkResultStore) CleanStore(keep map[uint64]struct{}) error {
+	var unreadable []unreadableIndexEntry
 	err := kvdb.Update(store.backend, func(tx kvdb.RwTx) error {
-		indexed, err := fetchIndexedAttemptIDs(tx)
+		indexed, badEntries, err := fetchIndexedAttemptIDs(tx)
 		if err != nil {
 			return err
+		}
+		if len(badEntries) > 0 {
+			unreadable = badEntries
+
+			return errUnreadableIndex
 		}
 
 		networkResults, err := tx.CreateTopLevelBucket(
@@ -551,13 +557,23 @@ func (store *networkResultStore) CleanStore(keep map[uint64]struct{}) error {
 			removed)
 
 		return nil
-	}, func() {})
+	}, func() {
+		unreadable = nil
+	})
 
 	// An unreadable index entry may protect any attempt, so we cannot
-	// tell which results are safe to remove. Removing nothing is safe,
-	// and the store is pruned again on the next start.
+	// tell which results are safe to remove. Removing nothing is safe.
+	// Every start reports each unreadable entry until it is repaired, as
+	// the store is not pruned while one exists.
 	if errors.Is(err, errUnreadableIndex) {
-		log.Errorf("Skipping network result store cleanup: %v", err)
+		for _, entry := range unreadable {
+			log.Errorf("Unreadable external attempt index entry "+
+				"key=%x: %v", entry.key, entry.err)
+		}
+		log.Errorf("Skipping network result store cleanup: %d "+
+			"unreadable external attempt index entries may "+
+			"protect unknown attempts, so no result is removed "+
+			"while they remain", len(unreadable))
 
 		return nil
 	}

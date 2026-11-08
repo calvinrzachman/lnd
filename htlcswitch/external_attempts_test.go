@@ -384,7 +384,7 @@ func TestCleanStoreAfterExternalDelete(t *testing.T) {
 
 	var indexed map[uint64]struct{}
 	err = kvdb.View(store.backend, func(tx kvdb.RTx) error {
-		indexed, err = fetchIndexedAttemptIDs(tx)
+		indexed, _, err = fetchIndexedAttemptIDs(tx)
 
 		return err
 	}, func() {})
@@ -399,13 +399,17 @@ func TestCleanStoreAfterExternalDelete(t *testing.T) {
 }
 
 // TestCleanStoreUnreadableIndex checks that CleanStore removes nothing when
-// an index entry cannot be decoded, since the attempt it protects is unknown.
+// an index entry cannot be decoded, since the attempt it protects is unknown,
+// and that every unreadable entry is reported with its key and reason.
 func TestCleanStoreUnreadableIndex(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestExternalStore(t)
 
-	const routerStale uint64 = 5
+	const (
+		routerStale uint64 = 5
+		goodID      uint64 = 100
+	)
 	settleAttempt(t, store, routerStale)
 
 	err := kvdb.Update(store.backend, func(tx kvdb.RwTx) error {
@@ -416,12 +420,51 @@ func TestCleanStoreUnreadableIndex(t *testing.T) {
 			return err
 		}
 
-		return index.Put([]byte("corrupt"), []byte{0xff})
+		// A readable entry and its pending record.
+		err = putPendingPlaceholder(tx, goodID)
+		if err != nil {
+			return err
+		}
+		good := &externalIndexEntry{attemptID: goodID}
+		err = index.Put([]byte("good"), good.encode())
+		if err != nil {
+			return err
+		}
+
+		err = index.Put([]byte("corrupt-a"), []byte{0xff})
+		if err != nil {
+			return err
+		}
+
+		return index.Put([]byte("corrupt-b"), []byte{0, 1})
 	}, func() {})
 	require.NoError(t, err)
 
-	require.NoError(t, store.CleanStore(map[uint64]struct{}{}))
-	requireRecord(t, store, routerStale, true)
+	// Both unreadable entries are reported, and the readable one still
+	// resolves to its attempt.
+	var (
+		indexed    map[uint64]struct{}
+		unreadable []unreadableIndexEntry
+	)
+	err = kvdb.View(store.backend, func(tx kvdb.RTx) error {
+		indexed, unreadable, err = fetchIndexedAttemptIDs(tx)
+
+		return err
+	}, func() {})
+	require.NoError(t, err)
+	require.Equal(t, map[uint64]struct{}{goodID: {}}, indexed)
+	require.Len(t, unreadable, 2)
+	require.Equal(t, []byte("corrupt-a"), unreadable[0].key)
+	require.ErrorContains(t, unreadable[0].err, "unknown external index")
+	require.Equal(t, []byte("corrupt-b"), unreadable[1].key)
+	require.ErrorContains(t, unreadable[1].err, "length")
+
+	// Cleanup removes nothing, on this start and the next.
+	for range 2 {
+		require.NoError(t, store.CleanStore(map[uint64]struct{}{}))
+		requireRecord(t, store, routerStale, true)
+		requireRecord(t, store, goodID, true)
+	}
 }
 
 // TestExternalIndexEntryEncoding checks that an index entry round trips in the
