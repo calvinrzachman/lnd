@@ -402,7 +402,11 @@ func (store *networkResultStore) DeleteAttempts(
 		return nil, fmt.Errorf("DeleteAttempts failed: %w", err)
 	}
 
+	// Two keys never resolve to one internal ID unless the index is
+	// corrupt, but locking an ID twice would deadlock, so each ID is
+	// locked once.
 	slices.Sort(attemptIDs)
+	attemptIDs = slices.Compact(attemptIDs)
 	for _, id := range attemptIDs {
 		store.attemptIDMtx.Lock(id)
 	}

@@ -5,6 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/kvdb"
@@ -509,4 +510,60 @@ func TestExternalIndexEntryEncoding(t *testing.T) {
 		_, err := decodeExternalIndexEntry(b)
 		require.Error(t, err)
 	}
+}
+
+// TestDeleteAttemptsSharedInternalID checks that deleting two keys whose index
+// entries name the same internal ID, which only a corrupt index can hold,
+// completes instead of deadlocking on the attempt ID lock.
+func TestDeleteAttemptsSharedInternalID(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestExternalStore(t)
+
+	const sharedID uint64 = 7
+	settleAttempt(t, store, sharedID)
+
+	keyA, keyB := []byte("key-a"), []byte("key-b")
+	err := kvdb.Update(store.backend, func(tx kvdb.RwTx) error {
+		index, err := tx.CreateTopLevelBucket(
+			externalAttemptIndexBucketKey,
+		)
+		if err != nil {
+			return err
+		}
+
+		entry := &externalIndexEntry{attemptID: sharedID}
+		if err := index.Put(keyA, entry.encode()); err != nil {
+			return err
+		}
+
+		return index.Put(keyB, entry.encode())
+	}, func() {})
+	require.NoError(t, err)
+
+	type result struct {
+		statuses []DeletionStatus
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		statuses, err := store.DeleteAttempts([][]byte{keyA, keyB})
+		done <- result{statuses, err}
+	}()
+
+	select {
+	case res := <-done:
+		// The first key deletes the record and its entry. The second
+		// entry then points at a missing record, so it is removed and
+		// reported as not found.
+		require.NoError(t, res.err)
+		require.Equal(t, []DeletionStatus{
+			DeletionOK, DeletionNotFound,
+		}, res.statuses)
+
+	case <-time.After(5 * time.Second):
+		t.Fatal("DeleteAttempts deadlocked on a shared internal ID")
+	}
+
+	requireRecord(t, store, sharedID, false)
 }
