@@ -301,7 +301,7 @@ func (s *Server) SendOnion(_ context.Context,
 		return nil, err
 	}
 
-	attemptID, initErr := s.cfg.ExternalAttemptStore.InitExternalAttempt(
+	attemptID, initErr := s.cfg.ExternalAttemptStore.InitAttempt(
 		key, requestFingerprint(req), s.cfg.NextAttemptID,
 	)
 	if initErr != nil {
@@ -763,7 +763,7 @@ func (s *Server) TrackOnion(ctx context.Context,
 	// Resolve the client's key to the internal attempt ID. A key we have
 	// never registered is reported as not found, the same as an attempt
 	// the switch does not know.
-	attemptID, err := s.cfg.ExternalAttemptStore.LookupExternalAttempt(key)
+	attemptID, err := s.cfg.ExternalAttemptStore.LookupAttempt(key)
 	if errors.Is(err, htlcswitch.ErrPaymentIDNotFound) {
 		return nil, status.Errorf(codes.NotFound,
 			"attempt with key %x not found", key)
@@ -1048,7 +1048,7 @@ func (s *Server) DeleteAttempts(_ context.Context,
 		keys = append(keys, key)
 	}
 
-	statuses, err := s.cfg.ExternalAttemptStore.DeleteExternalAttempts(keys)
+	statuses, err := s.cfg.ExternalAttemptStore.DeleteAttempts(keys)
 	if err != nil {
 		log.Errorf("DeleteAttempts failed: %v", err)
 

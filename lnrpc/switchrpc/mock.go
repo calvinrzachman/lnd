@@ -123,22 +123,21 @@ func (m *mockChannelLink) MayAddOutgoingHtlc(lnwire.MilliSatoshi) error {
 // ExternalAttemptStore interfaces.
 type mockAttemptStore struct {
 	htlcswitch.AttemptStore
-	initErr    error
-	initCalls  int
-	failErr    error
-	failCalls  int
-	lookupErr  error
-	deleteErr  error
-	deleteResp map[uint64]htlcswitch.DeletionStatus
+	initErr   error
+	initCalls int
+	failErr   error
+	failCalls int
+	lookupErr error
+	deleteErr error
 
-	// deleteByKey holds the status DeleteExternalAttempts reports for
+	// deleteByKey holds the status DeleteAttempts reports for
 	// each attempt key.
 	deleteByKey map[string]htlcswitch.DeletionStatus
 }
 
-// InitExternalAttempt records the call and returns the mocked initErr with
-// internal ID 1.
-func (m *mockAttemptStore) InitExternalAttempt(key []byte,
+// InitAttempt records the call and returns the mocked initErr with internal
+// ID 1.
+func (m *mockAttemptStore) InitAttempt(key []byte,
 	fingerprint [32]byte, nextID func() (uint64, error)) (uint64, error) {
 
 	m.initCalls++
@@ -146,15 +145,15 @@ func (m *mockAttemptStore) InitExternalAttempt(key []byte,
 	return 1, m.initErr
 }
 
-// LookupExternalAttempt returns the mocked lookupErr with internal ID 1.
-func (m *mockAttemptStore) LookupExternalAttempt(key []byte) (uint64,
+// LookupAttempt returns the mocked lookupErr with internal ID 1.
+func (m *mockAttemptStore) LookupAttempt(key []byte) (uint64,
 	error) {
 
 	return 1, m.lookupErr
 }
 
-// DeleteExternalAttempts reports, for each key, the mocked deleteByKey status.
-func (m *mockAttemptStore) DeleteExternalAttempts(
+// DeleteAttempts reports, for each key, the mocked deleteByKey status.
+func (m *mockAttemptStore) DeleteAttempts(
 	keys [][]byte) ([]htlcswitch.DeletionStatus, error) {
 
 	if m.deleteErr != nil {
@@ -169,11 +168,6 @@ func (m *mockAttemptStore) DeleteExternalAttempts(
 	return statuses, nil
 }
 
-// InitAttempt returns the mocked initErr.
-func (m *mockAttemptStore) InitAttempt(attemptID uint64) error {
-	return m.initErr
-}
-
 // FailPendingAttempt records the call and returns the mocked failErr.
 func (m *mockAttemptStore) FailPendingAttempt(attemptID uint64,
 	reason *htlcswitch.LinkError) error {
@@ -181,17 +175,6 @@ func (m *mockAttemptStore) FailPendingAttempt(attemptID uint64,
 	m.failCalls++
 
 	return m.failErr
-}
-
-// DeleteAttempts returns the mocked deleteResp and deleteErr.
-func (m *mockAttemptStore) DeleteAttempts(
-	attemptIDs []uint64) (map[uint64]htlcswitch.DeletionStatus, error) {
-
-	if m.deleteErr != nil {
-		return nil, m.deleteErr
-	}
-
-	return m.deleteResp, nil
 }
 
 // mockErrorDecrypter is a mock implementation of htlcswitch.ErrorDecrypter.
