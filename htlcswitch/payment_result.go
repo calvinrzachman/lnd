@@ -43,6 +43,18 @@ var (
 	ErrAmbiguousAttemptInit = errors.New(
 		"ambiguous result for payment attempt registration",
 	)
+
+	// ErrUndrainedResultStore is returned when the result store still
+	// holds records written by a switchrpc build that named attempts by
+	// the raw attempt ID its client chose.
+	ErrUndrainedResultStore = errors.New("result store holds attempts " +
+		"of a switchrpc build without attempt keys")
+
+	// legacyLifecycleMarkerBucket is a top-level bucket that switchrpc
+	// builds without attempt keys wrote on every start. Its presence means
+	// the result store may hold records stored under client chosen attempt
+	// IDs, which have no index entry.
+	legacyLifecycleMarkerBucket = []byte("external-lifecycle-marker")
 )
 
 // DeletionStatus represents the outcome of deleting a single attempt from
@@ -159,6 +171,65 @@ func newNetworkResultStore(db kvdb.Backend) *networkResultStore {
 		attemptIDMtx:   multimutex.NewMutex[uint64](),
 		externalKeyMtx: multimutex.NewMutex[string](),
 	}
+}
+
+// checkLegacyLifecycleMarker refuses to open a result store that a switchrpc
+// build without attempt keys left records in. Such a build stored results under
+// the attempt IDs its client chose, with no index entry, so this build cannot
+// address them by key, cannot tell them apart from its own attempts, and would
+// delete them in its startup cleanup. A marked store with no records was
+// drained, so the marker is removed and the store opens normally. A store
+// without the marker is not inspected further.
+func checkLegacyLifecycleMarker(db kvdb.Backend) error {
+	var (
+		marked  bool
+		records int
+	)
+	err := kvdb.Update(db, func(tx kvdb.RwTx) error {
+		if tx.ReadBucket(legacyLifecycleMarkerBucket) == nil {
+			return nil
+		}
+		marked = true
+
+		results := tx.ReadBucket(networkResultStoreBucketKey)
+		if results != nil {
+			err := results.ForEach(func(_, _ []byte) error {
+				records++
+
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+		}
+
+		if records > 0 {
+			return nil
+		}
+
+		return tx.DeleteTopLevelBucket(legacyLifecycleMarkerBucket)
+	}, func() {
+		marked = false
+		records = 0
+	})
+	if err != nil {
+		return fmt.Errorf("unable to check the external lifecycle "+
+			"marker: %w", err)
+	}
+
+	if records > 0 {
+		return fmt.Errorf("%w: %d record(s) remain. Start the "+
+			"previous build, let in-flight attempts resolve, "+
+			"delete them with DeleteAttempts, then upgrade again",
+			ErrUndrainedResultStore, records)
+	}
+
+	if marked {
+		log.Infof("Removed the external lifecycle marker from the " +
+			"drained result store")
+	}
+
+	return nil
 }
 
 // InitAttempt initializes the payment attempt with the given attemptID.

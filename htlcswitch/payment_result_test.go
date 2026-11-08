@@ -1134,3 +1134,139 @@ func TestDeleteAttemptsProperties(t *testing.T) {
 		})
 	})
 }
+
+// TestCheckLegacyLifecycleMarker checks the startup check on the marker that
+// switchrpc builds without attempt keys wrote: an unmarked store opens as is,
+// a marked store with no records loses its marker and opens, and a marked
+// store with records, as such a build left it, is refused untouched.
+func TestCheckLegacyLifecycleMarker(t *testing.T) {
+	t.Parallel()
+
+	markerExists := func(t *testing.T, db kvdb.Backend) bool {
+		t.Helper()
+
+		var exists bool
+		err := kvdb.View(db, func(tx kvdb.RTx) error {
+			exists = tx.ReadBucket(
+				legacyLifecycleMarkerBucket,
+			) != nil
+
+			return nil
+		}, func() {
+			exists = false
+		})
+		require.NoError(t, err)
+
+		return exists
+	}
+
+	writeMarker := func(t *testing.T, db kvdb.Backend) {
+		t.Helper()
+
+		err := kvdb.Update(db, func(tx kvdb.RwTx) error {
+			_, err := tx.CreateTopLevelBucket(
+				legacyLifecycleMarkerBucket,
+			)
+
+			return err
+		}, func() {})
+		require.NoError(t, err)
+	}
+
+	settle := func(t *testing.T, store *networkResultStore, id uint64) {
+		t.Helper()
+
+		require.NoError(t, store.StoreResult(id, &networkResult{
+			msg:         &lnwire.UpdateFulfillHTLC{},
+			unencrypted: true,
+		}))
+	}
+
+	t.Run("no marker", func(t *testing.T) {
+		t.Parallel()
+
+		db := channeldb.OpenForTesting(t, t.TempDir())
+		store := newNetworkResultStore(db)
+		settle(t, store, 1)
+
+		require.NoError(t, checkLegacyLifecycleMarker(db))
+		require.False(t, markerExists(t, db))
+
+		// Records of an unmarked store are not touched.
+		_, err := store.GetResult(1)
+		require.NoError(t, err)
+	})
+
+	t.Run("marker without result bucket", func(t *testing.T) {
+		t.Parallel()
+
+		db := channeldb.OpenForTesting(t, t.TempDir())
+		writeMarker(t, db)
+
+		require.NoError(t, checkLegacyLifecycleMarker(db))
+		require.False(t, markerExists(t, db))
+	})
+
+	t.Run("marker with drained result bucket", func(t *testing.T) {
+		t.Parallel()
+
+		db := channeldb.OpenForTesting(t, t.TempDir())
+		writeMarker(t, db)
+
+		// The old build's DeleteAttempts leaves the bucket in place
+		// but empty.
+		err := kvdb.Update(db, func(tx kvdb.RwTx) error {
+			_, err := tx.CreateTopLevelBucket(
+				networkResultStoreBucketKey,
+			)
+
+			return err
+		}, func() {})
+		require.NoError(t, err)
+
+		require.NoError(t, checkLegacyLifecycleMarker(db))
+		require.False(t, markerExists(t, db))
+
+		// The switch starts on a drained store.
+		_, err = initSwitchWithDB(0, db)
+		require.NoError(t, err)
+	})
+
+	t.Run("marker with records", func(t *testing.T) {
+		t.Parallel()
+
+		// Prepare the database the way a switchrpc build without
+		// attempt keys leaves it: the marker, a pending placeholder
+		// and a settled result under client chosen attempt IDs, and
+		// no attempt index.
+		db := channeldb.OpenForTesting(t, t.TempDir())
+		writeMarker(t, db)
+
+		err := kvdb.Update(db, func(tx kvdb.RwTx) error {
+			return putPendingPlaceholder(tx, 3)
+		}, func() {})
+		require.NoError(t, err)
+
+		store := newNetworkResultStore(db)
+		settle(t, store, 4)
+
+		err = checkLegacyLifecycleMarker(db)
+		require.ErrorIs(t, err, ErrUndrainedResultStore)
+		require.ErrorContains(t, err, "2 record(s) remain")
+
+		// Nothing was changed: the marker and both records remain,
+		// and the check refuses again on the next start.
+		require.True(t, markerExists(t, db))
+		_, err = store.GetResult(3)
+		require.ErrorIs(t, err, ErrAttemptResultPending)
+		_, err = store.GetResult(4)
+		require.NoError(t, err)
+
+		err = checkLegacyLifecycleMarker(db)
+		require.ErrorIs(t, err, ErrUndrainedResultStore)
+
+		// The switch refuses to start on such a store.
+		_, err = initSwitchWithDB(0, db)
+		require.ErrorIs(t, err, ErrUndrainedResultStore)
+	})
+}

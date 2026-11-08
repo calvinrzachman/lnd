@@ -475,6 +475,12 @@ func New(cfg Config, currentHeight uint32) (*Switch, error) {
 		return nil, err
 	}
 
+	// Refuse a result store that a switchrpc build without attempt keys
+	// left records in, before anything can fail or clean those records.
+	if err := checkLegacyLifecycleMarker(cfg.DB); err != nil {
+		return nil, err
+	}
+
 	networkResultStore := newNetworkResultStore(cfg.DB)
 
 	s := &Switch{
