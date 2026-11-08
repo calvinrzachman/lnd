@@ -8,9 +8,13 @@ import (
 
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/kvdb"
+	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/stretchr/testify/require"
 )
+
+// testHash is the payment hash tests register attempts with.
+var testHash = lntypes.Hash{0xaa, 0xbb}
 
 // testIDSource returns a nextID function that counts up from start, and a
 // counter of how many times it was called.
@@ -64,7 +68,7 @@ func TestInitAttempt(t *testing.T) {
 
 	// A new key allocates an internal ID and writes a pending
 	// placeholder for it.
-	id, err := store.InitAttempt(key, fp, nextID)
+	id, err := store.InitAttempt(key, testHash, fp, nextID)
 	require.NoError(t, err)
 	require.EqualValues(t, 100, id)
 	require.EqualValues(t, 1, calls.Load())
@@ -72,31 +76,32 @@ func TestInitAttempt(t *testing.T) {
 	_, err = store.GetResult(id)
 	require.ErrorIs(t, err, ErrAttemptResultPending)
 
-	got, err := store.LookupAttempt(key)
+	got, gotHash, err := store.LookupAttempt(key)
 	require.NoError(t, err)
 	require.Equal(t, id, got)
+	require.Equal(t, testHash, gotHash)
 
 	// The same key with the same fingerprint is a duplicate. It returns
 	// the original internal ID and allocates nothing.
-	dupID, err := store.InitAttempt(key, fp, nextID)
+	dupID, err := store.InitAttempt(key, testHash, fp, nextID)
 	require.ErrorIs(t, err, ErrPaymentIDAlreadyExists)
 	require.Equal(t, id, dupID)
 	require.EqualValues(t, 1, calls.Load())
 
 	// The same key with a different fingerprint is refused.
-	_, err = store.InitAttempt(key, [32]byte{2}, nextID)
+	_, err = store.InitAttempt(key, testHash, [32]byte{2}, nextID)
 	require.ErrorIs(t, err, ErrAttemptFingerprintMismatch)
 	require.EqualValues(t, 1, calls.Load())
 
 	// A different key gets a different internal ID.
 	otherID, err := store.InitAttempt(
-		[]byte("payment-b/attempt-1"), fp, nextID,
+		[]byte("payment-b/attempt-1"), testHash, fp, nextID,
 	)
 	require.NoError(t, err)
 	require.NotEqual(t, id, otherID)
 
 	// An empty key is rejected.
-	_, err = store.InitAttempt(nil, fp, nextID)
+	_, err = store.InitAttempt(nil, testHash, fp, nextID)
 	require.ErrorIs(t, err, ErrEmptyExternalKey)
 }
 
@@ -111,10 +116,10 @@ func TestInitAttemptAllocationError(t *testing.T) {
 	}
 
 	key := []byte("key")
-	_, err := store.InitAttempt(key, [32]byte{}, failing)
+	_, err := store.InitAttempt(key, testHash, [32]byte{}, failing)
 	require.ErrorIs(t, err, ErrAmbiguousAttemptInit)
 
-	_, err = store.LookupAttempt(key)
+	_, _, err = store.LookupAttempt(key)
 	require.ErrorIs(t, err, ErrPaymentIDNotFound)
 }
 
@@ -131,7 +136,7 @@ func TestInitAttemptUsedID(t *testing.T) {
 
 	key := []byte("key")
 	nextID, calls := testIDSource(5)
-	_, err := store.InitAttempt(key, [32]byte{}, nextID)
+	_, err := store.InitAttempt(key, testHash, [32]byte{}, nextID)
 	require.ErrorIs(t, err, ErrAmbiguousAttemptInit)
 	require.ErrorIs(t, err, errInternalIDInUse)
 	require.EqualValues(t, 1, calls.Load())
@@ -140,10 +145,10 @@ func TestInitAttemptUsedID(t *testing.T) {
 	result, err := store.GetResult(5)
 	require.NoError(t, err)
 	require.IsType(t, &lnwire.UpdateFulfillHTLC{}, result.msg)
-	_, err = store.LookupAttempt(key)
+	_, _, err = store.LookupAttempt(key)
 	require.ErrorIs(t, err, ErrPaymentIDNotFound)
 
-	id, err := store.InitAttempt(key, [32]byte{}, nextID)
+	id, err := store.InitAttempt(key, testHash, [32]byte{}, nextID)
 	require.NoError(t, err)
 	require.EqualValues(t, 6, id)
 }
@@ -171,7 +176,7 @@ func TestInitAttemptConcurrent(t *testing.T) {
 			defer wg.Done()
 			<-startSig
 			ids[i], errs[i] = store.InitAttempt(
-				key, fp, nextID,
+				key, testHash, fp, nextID,
 			)
 		}()
 	}
@@ -205,11 +210,11 @@ func TestDeleteAttempts(t *testing.T) {
 	settledKey := []byte("settled")
 	unknownKey := []byte("unknown")
 
-	_, err := store.InitAttempt(pendingKey, [32]byte{}, nextID)
+	_, err := store.InitAttempt(pendingKey, testHash, [32]byte{}, nextID)
 	require.NoError(t, err)
 
 	settledID, err := store.InitAttempt(
-		settledKey, [32]byte{}, nextID,
+		settledKey, testHash, [32]byte{}, nextID,
 	)
 	require.NoError(t, err)
 	settleAttempt(t, store, settledID)
@@ -223,19 +228,21 @@ func TestDeleteAttempts(t *testing.T) {
 	}, statuses)
 
 	// The settled attempt's record and index entry are both gone.
-	_, err = store.LookupAttempt(settledKey)
+	_, _, err = store.LookupAttempt(settledKey)
 	require.ErrorIs(t, err, ErrPaymentIDNotFound)
 	_, err = store.GetResult(settledID)
 	require.ErrorIs(t, err, ErrPaymentIDNotFound)
 
 	// The pending attempt is untouched.
-	pendingID, err := store.LookupAttempt(pendingKey)
+	pendingID, _, err := store.LookupAttempt(pendingKey)
 	require.NoError(t, err)
 	_, err = store.GetResult(pendingID)
 	require.ErrorIs(t, err, ErrAttemptResultPending)
 
 	// Registering a deleted key again allocates a new internal ID.
-	newID, err := store.InitAttempt(settledKey, [32]byte{}, nextID)
+	newID, err := store.InitAttempt(
+		settledKey, testHash, [32]byte{}, nextID,
+	)
 	require.NoError(t, err)
 	require.NotEqual(t, settledID, newID)
 
@@ -259,7 +266,7 @@ func TestExternalAttemptFailedPending(t *testing.T) {
 	nextID, _ := testIDSource(1)
 
 	key := []byte("key")
-	id, err := store.InitAttempt(key, [32]byte{}, nextID)
+	id, err := store.InitAttempt(key, testHash, [32]byte{}, nextID)
 	require.NoError(t, err)
 
 	require.NoError(t, store.FailPendingAttempt(
@@ -270,7 +277,7 @@ func TestExternalAttemptFailedPending(t *testing.T) {
 	// the failed record.
 	reopened := newNetworkResultStore(db)
 
-	got, err := reopened.LookupAttempt(key)
+	got, _, err := reopened.LookupAttempt(key)
 	require.NoError(t, err)
 	require.Equal(t, id, got)
 
@@ -310,12 +317,12 @@ func TestCleanStoreOwnerAware(t *testing.T) {
 
 	// Register two external attempts, one left pending and one settled.
 	pendingID, err := store.InitAttempt(
-		[]byte("ext-pending"), [32]byte{1}, nextID,
+		[]byte("ext-pending"), testHash, [32]byte{1}, nextID,
 	)
 	require.NoError(t, err)
 
 	settledID, err := store.InitAttempt(
-		[]byte("ext-settled"), [32]byte{2}, nextID,
+		[]byte("ext-settled"), testHash, [32]byte{2}, nextID,
 	)
 	require.NoError(t, err)
 	settleAttempt(t, store, settledID)
@@ -349,7 +356,7 @@ func TestCleanStoreOwnerAware(t *testing.T) {
 
 	// The index itself is untouched, so both keys still resolve.
 	for _, key := range []string{"ext-pending", "ext-settled"} {
-		_, err := store.LookupAttempt([]byte(key))
+		_, _, err := store.LookupAttempt([]byte(key))
 		require.NoError(t, err)
 	}
 }
@@ -364,7 +371,7 @@ func TestCleanStoreAfterExternalDelete(t *testing.T) {
 	nextID, _ := testIDSource(100)
 
 	key := []byte("ext-settled")
-	id, err := store.InitAttempt(key, [32]byte{1}, nextID)
+	id, err := store.InitAttempt(key, testHash, [32]byte{1}, nextID)
 	require.NoError(t, err)
 	settleAttempt(t, store, id)
 
@@ -372,7 +379,7 @@ func TestCleanStoreAfterExternalDelete(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []DeletionStatus{DeletionOK}, statuses)
 
-	_, err = store.LookupAttempt(key)
+	_, _, err = store.LookupAttempt(key)
 	require.ErrorIs(t, err, ErrPaymentIDNotFound)
 
 	var indexed map[uint64]struct{}
@@ -415,4 +422,48 @@ func TestCleanStoreUnreadableIndex(t *testing.T) {
 
 	require.NoError(t, store.CleanStore(map[uint64]struct{}{}))
 	requireRecord(t, store, routerStale, true)
+}
+
+// TestExternalIndexEntryEncoding checks that an index entry round trips in the
+// current version, that a version 0 entry still decodes with a zero payment
+// hash, and that unknown versions and wrong lengths are refused.
+func TestExternalIndexEntryEncoding(t *testing.T) {
+	t.Parallel()
+
+	entry := &externalIndexEntry{
+		attemptID:   42,
+		fingerprint: [32]byte{1, 2, 3},
+		paymentHash: testHash,
+	}
+	encoded := entry.encode()
+	require.Len(t, encoded, externalIndexEntryLen)
+	require.Equal(t, externalIndexVersion, encoded[0])
+
+	decoded, err := decodeExternalIndexEntry(encoded)
+	require.NoError(t, err)
+	require.Equal(t, entry, decoded)
+
+	// A version 0 entry is the current entry without the payment hash.
+	v0 := append([]byte{0}, encoded[1:externalIndexEntryLenV0]...)
+	decoded, err = decodeExternalIndexEntry(v0)
+	require.NoError(t, err)
+	require.Equal(t, entry.attemptID, decoded.attemptID)
+	require.Equal(t, entry.fingerprint, decoded.fingerprint)
+	require.Equal(t, lntypes.Hash{}, decoded.paymentHash)
+
+	// An unknown version is refused, whatever its length.
+	unknown := append([]byte{2}, encoded[1:]...)
+	_, err = decodeExternalIndexEntry(unknown)
+	require.ErrorContains(t, err, "unknown external index entry version")
+
+	// A length that does not match the version is refused.
+	for _, b := range [][]byte{
+		nil,
+		encoded[:externalIndexEntryLen-1],
+		append(append([]byte{}, encoded...), 0),
+		append([]byte{0}, encoded[1:]...),
+	} {
+		_, err := decodeExternalIndexEntry(b)
+		require.Error(t, err)
+	}
 }

@@ -857,6 +857,33 @@ func TestTrackOnionKeyLookup(t *testing.T) {
 	}
 }
 
+// TestTrackOnionPaymentHash checks that TrackOnion hands the switch the
+// payment hash recorded for the key at registration, so the switch's log lines
+// name the payment.
+func TestTrackOnionPaymentHash(t *testing.T) {
+	t.Parallel()
+
+	hash := lntypes.Hash{0x0f, 0xee}
+	payer := &mockPayer{
+		getResultResult: &htlcswitch.PaymentResult{
+			Preimage: lntypes.Preimage{1},
+		},
+	}
+	server, _, err := New(&Config{
+		HtlcDispatcher: payer,
+		ExternalAttemptStore: &mockAttemptStore{
+			lookupHash: hash,
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = server.TrackOnion(t.Context(), &TrackOnionRequest{
+		Key: testKey(1),
+	})
+	require.NoError(t, err)
+	require.Equal(t, hash, payer.gotPaymentHash)
+}
+
 // TestBuildOnion is a unit test that verifies the behavior of the BuildOnion
 // RPC handler, ensuring that it correctly validates inputs, handles dependency
 // failures, and constructs a valid response upon success.

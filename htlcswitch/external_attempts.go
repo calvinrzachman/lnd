@@ -8,6 +8,7 @@ import (
 	"slices"
 
 	"github.com/lightningnetwork/lnd/kvdb"
+	"github.com/lightningnetwork/lnd/lntypes"
 )
 
 var (
@@ -40,13 +41,19 @@ var (
 )
 
 const (
-	// externalIndexVersion is the encoding version of an index entry.
-	externalIndexVersion byte = 0
+	// externalIndexVersion is the encoding version this build writes. An
+	// entry starts with its version byte, and a later version appends
+	// fields after those of the version before it.
+	externalIndexVersion byte = 1
 
-	// externalIndexEntryLen is the length of an encoded index entry: a
+	// externalIndexEntryLenV0 is the length of a version 0 entry: a
 	// version byte, the 8-byte internal attempt ID and a 32-byte request
 	// fingerprint.
-	externalIndexEntryLen = 1 + 8 + 32
+	externalIndexEntryLenV0 = 1 + 8 + 32
+
+	// externalIndexEntryLen is the length of a version 1 entry: the
+	// version 0 fields followed by the 32-byte payment hash.
+	externalIndexEntryLen = externalIndexEntryLenV0 + lntypes.HashSize
 )
 
 // ExternalAttemptStore indexes attempts dispatched by an external router.
@@ -58,18 +65,22 @@ const (
 type ExternalAttemptStore interface {
 	// InitAttempt registers the attempt named by key. On first
 	// sight it allocates an internal attempt ID with nextID, and writes the
-	// index entry and the pending placeholder in one transaction. If the
+	// index entry, which records paymentHash for logging, and the pending
+	// placeholder in one transaction. If the
 	// key is already registered with the same fingerprint, the existing
 	// internal ID is returned together with ErrPaymentIDAlreadyExists. If
 	// it is registered with a different fingerprint,
 	// ErrAttemptFingerprintMismatch is returned. Any other error is
 	// wrapped in ErrAmbiguousAttemptInit.
-	InitAttempt(key []byte, fingerprint [32]byte,
+	InitAttempt(key []byte, paymentHash lntypes.Hash,
+		fingerprint [32]byte,
 		nextID func() (uint64, error)) (uint64, error)
 
-	// LookupAttempt returns the internal attempt ID for key, or
-	// ErrPaymentIDNotFound if the key is not registered.
-	LookupAttempt(key []byte) (uint64, error)
+	// LookupAttempt returns the internal attempt ID and the payment hash
+	// recorded for key, or ErrPaymentIDNotFound if the key is not
+	// registered. The payment hash is zero for an entry written before
+	// the hash was recorded.
+	LookupAttempt(key []byte) (uint64, lntypes.Hash, error)
 
 	// DeleteAttempts removes terminal attempts named by keys,
 	// deleting the record and its index entry together. The returned
@@ -81,33 +92,49 @@ type ExternalAttemptStore interface {
 type externalIndexEntry struct {
 	attemptID   uint64
 	fingerprint [32]byte
+	paymentHash lntypes.Hash
 }
 
-// encode serializes the index entry.
+// encode serializes the index entry in the current version.
 func (e *externalIndexEntry) encode() []byte {
 	b := make([]byte, externalIndexEntryLen)
 	b[0] = externalIndexVersion
 	binary.BigEndian.PutUint64(b[1:9], e.attemptID)
-	copy(b[9:], e.fingerprint[:])
+	copy(b[9:41], e.fingerprint[:])
+	copy(b[41:], e.paymentHash[:])
 
 	return b
 }
 
-// decodeExternalIndexEntry deserializes an index entry.
+// decodeExternalIndexEntry deserializes an index entry of any known version.
+// A version 0 entry carries no payment hash, which decodes as zero.
 func decodeExternalIndexEntry(b []byte) (*externalIndexEntry, error) {
-	if len(b) != externalIndexEntryLen {
-		return nil, fmt.Errorf("invalid external index entry length "+
-			"%d", len(b))
+	if len(b) == 0 {
+		return nil, errors.New("empty external index entry")
 	}
-	if b[0] != externalIndexVersion {
+
+	var wantLen int
+	switch b[0] {
+	case 0:
+		wantLen = externalIndexEntryLenV0
+	case 1:
+		wantLen = externalIndexEntryLen
+	default:
 		return nil, fmt.Errorf("unknown external index entry version "+
 			"%d", b[0])
+	}
+	if len(b) != wantLen {
+		return nil, fmt.Errorf("invalid length %d for external index "+
+			"entry version %d", len(b), b[0])
 	}
 
 	e := &externalIndexEntry{
 		attemptID: binary.BigEndian.Uint64(b[1:9]),
 	}
-	copy(e.fingerprint[:], b[9:])
+	copy(e.fingerprint[:], b[9:41])
+	if b[0] >= 1 {
+		copy(e.paymentHash[:], b[41:])
+	}
 
 	return e, nil
 }
@@ -175,7 +202,8 @@ func resultExists(tx kvdb.RTx, attemptID uint64) bool {
 //
 // NOTE: This is part of the ExternalAttemptStore interface.
 func (store *networkResultStore) InitAttempt(key []byte,
-	fingerprint [32]byte, nextID func() (uint64, error)) (uint64, error) {
+	paymentHash lntypes.Hash, fingerprint [32]byte,
+	nextID func() (uint64, error)) (uint64, error) {
 
 	if len(key) == 0 {
 		return 0, ErrEmptyExternalKey
@@ -220,7 +248,11 @@ func (store *networkResultStore) InitAttempt(key []byte,
 
 	// A record under a freshly allocated ID is never overwritten. Nothing
 	// is written in that case, so a retry allocates another ID.
-	err = store.initIndexedAttempt(key, attemptID, fingerprint)
+	err = store.initIndexedAttempt(key, &externalIndexEntry{
+		attemptID:   attemptID,
+		fingerprint: fingerprint,
+		paymentHash: paymentHash,
+	})
 	if errors.Is(err, errInternalIDInUse) {
 		log.Errorf("Allocated attempt ID %d already has a record",
 			attemptID)
@@ -229,16 +261,18 @@ func (store *networkResultStore) InitAttempt(key []byte,
 		return 0, fmt.Errorf("%w: %w", ErrAmbiguousAttemptInit, err)
 	}
 
-	log.Debugf("Initialized external attempt key=%x with attemptID=%d",
-		key, attemptID)
+	log.Debugf("Initialized external attempt key=%x with attemptID=%d "+
+		"for payment_hash=%v", key, attemptID, paymentHash)
 
 	return attemptID, nil
 }
 
-// initIndexedAttempt writes the pending placeholder for attemptID and the
-// index entry for key in one transaction.
+// initIndexedAttempt writes the pending placeholder for the entry's attempt
+// ID and the entry for key in one transaction.
 func (store *networkResultStore) initIndexedAttempt(key []byte,
-	attemptID uint64, fingerprint [32]byte) error {
+	entry *externalIndexEntry) error {
+
+	attemptID := entry.attemptID
 
 	// Take the attempt ID lock as well, to keep the placeholder write
 	// ordered against result subscribers. The ID is freshly allocated, so
@@ -269,20 +303,16 @@ func (store *networkResultStore) initIndexedAttempt(key []byte,
 			return err
 		}
 
-		entry := &externalIndexEntry{
-			attemptID:   attemptID,
-			fingerprint: fingerprint,
-		}
-
 		return index.Put(key, entry.encode())
 	}, func() {})
 }
 
-// LookupAttempt returns the internal attempt ID registered for key.
+// LookupAttempt returns the internal attempt ID and payment hash registered
+// for key.
 //
 // NOTE: This is part of the ExternalAttemptStore interface.
 func (store *networkResultStore) LookupAttempt(key []byte) (uint64,
-	error) {
+	lntypes.Hash, error) {
 
 	var entry *externalIndexEntry
 	err := kvdb.View(store.backend, func(tx kvdb.RTx) error {
@@ -294,10 +324,10 @@ func (store *networkResultStore) LookupAttempt(key []byte) (uint64,
 		entry = nil
 	})
 	if err != nil {
-		return 0, err
+		return 0, lntypes.Hash{}, err
 	}
 
-	return entry.attemptID, nil
+	return entry.attemptID, entry.paymentHash, nil
 }
 
 // DeleteAttempts removes terminal attempts named by their external

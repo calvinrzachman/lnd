@@ -18,6 +18,10 @@ type mockPayer struct {
 	getResultResult *htlcswitch.PaymentResult
 	getResultErr    error
 	resultChan      chan *htlcswitch.PaymentResult
+
+	// gotPaymentHash is the payment hash GetAttemptResult was called
+	// with.
+	gotPaymentHash lntypes.Hash
 }
 
 // SendHTLC is a mock implementation of the SendHTLC method.
@@ -34,6 +38,8 @@ func (m *mockPayer) GetAttemptResult(attemptID uint64,
 	paymentHash lntypes.Hash,
 	errorDecryptor htlcswitch.ErrorDecrypter) (
 	<-chan *htlcswitch.PaymentResult, error) {
+
+	m.gotPaymentHash = paymentHash
 
 	if m.getResultErr != nil {
 		return nil, m.getResultErr
@@ -128,7 +134,10 @@ type mockAttemptStore struct {
 	failErr   error
 	failCalls int
 	lookupErr error
-	deleteErr error
+
+	// lookupHash is the payment hash LookupAttempt reports.
+	lookupHash lntypes.Hash
+	deleteErr  error
 
 	// deleteByKey holds the status DeleteAttempts reports for
 	// each attempt key.
@@ -137,7 +146,7 @@ type mockAttemptStore struct {
 
 // InitAttempt records the call and returns the mocked initErr with internal
 // ID 1.
-func (m *mockAttemptStore) InitAttempt(key []byte,
+func (m *mockAttemptStore) InitAttempt(key []byte, _ lntypes.Hash,
 	fingerprint [32]byte, nextID func() (uint64, error)) (uint64, error) {
 
 	m.initCalls++
@@ -145,11 +154,12 @@ func (m *mockAttemptStore) InitAttempt(key []byte,
 	return 1, m.initErr
 }
 
-// LookupAttempt returns the mocked lookupErr with internal ID 1.
-func (m *mockAttemptStore) LookupAttempt(key []byte) (uint64,
+// LookupAttempt returns the mocked lookupErr with internal ID 1 and the
+// mocked lookupHash.
+func (m *mockAttemptStore) LookupAttempt(key []byte) (uint64, lntypes.Hash,
 	error) {
 
-	return 1, m.lookupErr
+	return 1, m.lookupHash, m.lookupErr
 }
 
 // DeleteAttempts reports, for each key, the mocked deleteByKey status.

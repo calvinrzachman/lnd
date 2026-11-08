@@ -301,8 +301,12 @@ func (s *Server) SendOnion(_ context.Context,
 		return nil, err
 	}
 
+	// The payment hash is recorded only for logging. A malformed hash is
+	// rejected by validation below, so it is recorded as zero here.
+	paymentHash, _ := lntypes.MakeHash(req.PaymentHash)
+
 	attemptID, initErr := s.cfg.ExternalAttemptStore.InitAttempt(
-		key, requestFingerprint(req), s.cfg.NextAttemptID,
+		key, paymentHash, requestFingerprint(req), s.cfg.NextAttemptID,
 	)
 	if initErr != nil {
 		// The key is already registered with the same fingerprint, so
@@ -763,7 +767,9 @@ func (s *Server) TrackOnion(ctx context.Context,
 	// Resolve the client's key to the internal attempt ID. A key we have
 	// never registered is reported as not found, the same as an attempt
 	// the switch does not know.
-	attemptID, err := s.cfg.ExternalAttemptStore.LookupAttempt(key)
+	attemptID, paymentHash, err := s.cfg.ExternalAttemptStore.LookupAttempt(
+		key,
+	)
 	if errors.Is(err, htlcswitch.ErrPaymentIDNotFound) {
 		return nil, status.Errorf(codes.NotFound,
 			"attempt with key %x not found", key)
@@ -774,10 +780,10 @@ func (s *Server) TrackOnion(ctx context.Context,
 	}
 
 	// Query the switch for the result of the payment attempt via onion.
-	// The switch uses the payment hash only in log lines, and the request
-	// does not carry it, so the zero hash is passed.
+	// The switch uses the payment hash only in log lines, so the hash
+	// recorded at registration is passed.
 	resultChan, err := s.cfg.HtlcDispatcher.GetAttemptResult(
-		attemptID, lntypes.ZeroHash, errorDecryptor,
+		attemptID, paymentHash, errorDecryptor,
 	)
 	if err != nil {
 		log.Errorf("GetAttemptResult failed for attempt %d (key=%x): "+
