@@ -35,8 +35,7 @@ func newTestExternalStore(t *testing.T) (*networkResultStore,
 	t.Helper()
 
 	db := channeldb.OpenForTesting(t, t.TempDir())
-	store, err := newNetworkResultStore(db, true)
-	require.NoError(t, err)
+	store := newNetworkResultStore(db)
 
 	return store, db
 }
@@ -258,8 +257,7 @@ func TestExternalAttemptFailedPending(t *testing.T) {
 
 	// A store reopened on the same database still resolves the key to
 	// the failed record.
-	reopened, err := newNetworkResultStore(db, true)
-	require.NoError(t, err)
+	reopened := newNetworkResultStore(db)
 
 	got, err := reopened.LookupExternalAttempt(key)
 	require.NoError(t, err)
@@ -272,28 +270,6 @@ func TestExternalAttemptFailedPending(t *testing.T) {
 	statuses, err := reopened.DeleteExternalAttempts([][]byte{key})
 	require.NoError(t, err)
 	require.Equal(t, []DeletionStatus{DeletionOK}, statuses)
-}
-
-// TestDisableRemoteRouterExternalIndex checks that an index entry prevents
-// the remote router marker from being removed.
-func TestDisableRemoteRouterExternalIndex(t *testing.T) {
-	t.Parallel()
-
-	store, _ := newTestExternalStore(t)
-	nextID, _ := testIDSource(1)
-
-	key := []byte("key")
-	id, err := store.InitExternalAttempt(key, [32]byte{}, nextID)
-	require.NoError(t, err)
-	settleAttempt(t, store, id)
-
-	require.ErrorIs(t, store.DisableRemoteRouter(), ErrAttemptEntriesExist)
-
-	statuses, err := store.DeleteExternalAttempts([][]byte{key})
-	require.NoError(t, err)
-	require.Equal(t, []DeletionStatus{DeletionOK}, statuses)
-
-	require.NoError(t, store.DisableRemoteRouter())
 }
 
 // requireRecord asserts whether a record exists for the internal attempt ID.

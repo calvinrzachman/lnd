@@ -43,20 +43,6 @@ var (
 	ErrAmbiguousAttemptInit = errors.New(
 		"ambiguous result for payment attempt registration",
 	)
-
-	// ErrAttemptEntriesExist is returned when DisableRemoteRouter is
-	// called but there are still attempt entries in the network result
-	// store that have not been cleaned up.
-	ErrAttemptEntriesExist = errors.New(
-		"attempt entries exist in store",
-	)
-
-	// externalLifecycleMarkerBucket is a top-level bucket whose
-	// existence indicates that the payment lifecycle is managed
-	// externally. It prevents a local-mode binary from cleaning the
-	// attempt store on startup, which would destroy state needed by
-	// the external manager.
-	externalLifecycleMarkerBucket = []byte("external-lifecycle-marker")
 )
 
 // DeletionStatus represents the outcome of deleting a single attempt from
@@ -166,62 +152,13 @@ type networkResultStore struct {
 	externalKeyMtx *multimutex.Mutex[string]
 }
 
-func newNetworkResultStore(db kvdb.Backend,
-	externalLifecycle bool) (*networkResultStore, error) {
-
-	// Check for a state mismatch. If the payment lifecycle is managed
-	// locally but the database has been marked for external management,
-	// we must exit to prevent data loss.
-	if !externalLifecycle {
-		var isMarkedExternal bool
-		err := db.View(func(tx kvdb.RTx) error {
-			if tx.ReadBucket(externalLifecycleMarkerBucket) != nil {
-				isMarkedExternal = true
-			}
-
-			return nil
-		}, func() {
-			isMarkedExternal = false
-		})
-		if err != nil {
-			return nil, fmt.Errorf("unable to check for "+
-				"external lifecycle marker: %w", err)
-		}
-
-		if isMarkedExternal {
-			return nil, fmt.Errorf("the htlc attempt database is " +
-				"marked for external lifecycle management " +
-				"by a switchrpc build, but this binary is " +
-				"in local management mode. Halting to " +
-				"prevent data loss. To use this database, " +
-				"restart with an lnd build that includes " +
-				"the `switchrpc` build tag")
-		}
-	}
-
-	// If the payment lifecycle is managed externally, write the marker.
-	// This is placed after the check above to ensure we don't write and
-	// then immediately fail in a misconfigured dev environment.
-	if externalLifecycle {
-		err := db.Update(func(tx kvdb.RwTx) error {
-			_, err := tx.CreateTopLevelBucket(
-				externalLifecycleMarkerBucket,
-			)
-
-			return err
-		}, func() {})
-		if err != nil {
-			return nil, fmt.Errorf("unable to write external "+
-				"lifecycle marker: %w", err)
-		}
-	}
-
+func newNetworkResultStore(db kvdb.Backend) *networkResultStore {
 	return &networkResultStore{
 		backend:        db,
 		results:        make(map[uint64][]chan *networkResult),
 		attemptIDMtx:   multimutex.NewMutex[uint64](),
 		externalKeyMtx: multimutex.NewMutex[string](),
-	}, nil
+	}
 }
 
 // InitAttempt initializes the payment attempt with the given attemptID.
@@ -890,36 +827,4 @@ func newInternalFailureResult(linkErr *LinkError) (*networkResult, error) {
 		// This is a local failure.
 		unencrypted: true,
 	}, nil
-}
-
-// DisableRemoteRouter checks for attempt entries in the network result store
-// and if none are found, deletes the remote router marker from the database.
-func (store *networkResultStore) DisableRemoteRouter() error {
-	return store.backend.Update(func(tx kvdb.RwTx) error {
-		// First, check if there are any attempt entries, either as
-		// records or as external index entries. The two are written
-		// and deleted together, but we check both regardless.
-		for _, key := range [][]byte{
-			networkResultStoreBucketKey,
-			externalAttemptIndexBucketKey,
-		} {
-			bucket := tx.ReadBucket(key)
-			if bucket == nil {
-				continue
-			}
-
-			k, _ := bucket.ReadCursor().First()
-			if k != nil {
-				return ErrAttemptEntriesExist
-			}
-		}
-
-		// If the attempt store is empty, we can delete the marker.
-		err := tx.DeleteTopLevelBucket(externalLifecycleMarkerBucket)
-		if err != nil && !errors.Is(err, kvdb.ErrBucketNotFound) {
-			return err
-		}
-
-		return nil
-	}, func() {})
 }

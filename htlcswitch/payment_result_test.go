@@ -109,8 +109,7 @@ func TestNetworkResultStore(t *testing.T) {
 
 	db := channeldb.OpenForTesting(t, t.TempDir())
 
-	store, err := newNetworkResultStore(db, false)
-	require.NoError(t, err)
+	store := newNetworkResultStore(db)
 
 	var results []*networkResult
 	for i := 0; i < numResults; i++ {
@@ -349,8 +348,7 @@ func TestNetworkResultStoreCleanStore(t *testing.T) {
 				cleanup()
 			})
 
-			store, err := newNetworkResultStore(backend, false)
-			require.NoError(t, err)
+			store := newNetworkResultStore(backend)
 
 			// Store a result for every attempt ID.
 			for i := range test.numResults {
@@ -433,8 +431,7 @@ func BenchmarkPostgresNetworkResultStoreCleanStore(b *testing.B) {
 				cleanup()
 			})
 
-			store, err := newNetworkResultStore(backend, false)
-			require.NoError(b, err)
+			store := newNetworkResultStore(backend)
 			keep := make(map[uint64]struct{}, test.numKeep)
 			for i := range test.numKeep {
 				keep[i] = struct{}{}
@@ -493,8 +490,7 @@ func TestNetworkResultStoreFailAndFetch(t *testing.T) {
 	t.Parallel()
 
 	db := channeldb.OpenForTesting(t, t.TempDir())
-	store, err := newNetworkResultStore(db, false)
-	require.NoError(t, err)
+	store := newNetworkResultStore(db)
 
 	// Test FetchPendingAttempts on an empty store.
 	pending, err := store.FetchPendingAttempts()
@@ -598,8 +594,7 @@ func TestDeleteAttempts(t *testing.T) {
 	t.Parallel()
 
 	db := channeldb.OpenForTesting(t, t.TempDir())
-	store, err := newNetworkResultStore(db, false)
-	require.NoError(t, err)
+	store := newNetworkResultStore(db)
 
 	// Helper to create and store a settled result.
 	storeSettled := func(t *testing.T, id uint64) {
@@ -797,8 +792,7 @@ func TestDeleteAttemptsProperties(t *testing.T) {
 
 		rapid.Check(t, func(rt *rapid.T) {
 			db := channeldb.OpenForTesting(t, t.TempDir())
-			store, err := newNetworkResultStore(db, false)
-			require.NoError(t, err)
+			store := newNetworkResultStore(db)
 
 			// Generate a random number of records.
 			numPending := rapid.IntRange(1, 10).Draw(
@@ -891,8 +885,7 @@ func TestDeleteAttemptsProperties(t *testing.T) {
 
 		rapid.Check(t, func(rt *rapid.T) {
 			db := channeldb.OpenForTesting(t, t.TempDir())
-			store, err := newNetworkResultStore(db, false)
-			require.NoError(t, err)
+			store := newNetworkResultStore(db)
 
 			numIDs := rapid.IntRange(0, 20).Draw(rt, "numIDs")
 			ids := make([]uint64, numIDs)
@@ -952,8 +945,7 @@ func TestDeleteAttemptsProperties(t *testing.T) {
 
 		rapid.Check(t, func(rt *rapid.T) {
 			db := channeldb.OpenForTesting(t, t.TempDir())
-			store, err := newNetworkResultStore(db, false)
-			require.NoError(t, err)
+			store := newNetworkResultStore(db)
 
 			numTerminal := rapid.IntRange(1, 10).Draw(
 				rt, "numTerminal",
@@ -1007,8 +999,7 @@ func TestDeleteAttemptsProperties(t *testing.T) {
 
 		rapid.Check(t, func(rt *rapid.T) {
 			db := channeldb.OpenForTesting(t, t.TempDir())
-			store, err := newNetworkResultStore(db, false)
-			require.NoError(t, err)
+			store := newNetworkResultStore(db)
 
 			numTerminal := rapid.IntRange(1, 15).Draw(
 				rt, "numTerminal",
@@ -1066,8 +1057,7 @@ func TestDeleteAttemptsProperties(t *testing.T) {
 
 		rapid.Check(t, func(rt *rapid.T) {
 			db := channeldb.OpenForTesting(t, t.TempDir())
-			store, err := newNetworkResultStore(db, false)
-			require.NoError(t, err)
+			store := newNetworkResultStore(db)
 
 			numTarget := rapid.IntRange(1, 10).Draw(
 				rt, "numTarget",
@@ -1123,7 +1113,7 @@ func TestDeleteAttemptsProperties(t *testing.T) {
 			}
 
 			// Delete only the target IDs.
-			_, err = store.DeleteAttempts(targetIDs)
+			_, err := store.DeleteAttempts(targetIDs)
 			require.NoError(t, err)
 
 			// PROPERTY: Every bystander record is still in the
@@ -1143,105 +1133,4 @@ func TestDeleteAttemptsProperties(t *testing.T) {
 			}
 		})
 	})
-}
-
-// TestDisableRemoteRouter tests that the DisableRemoteRouter method behaves as
-// expected.
-func TestDisableRemoteRouter(t *testing.T) {
-	t.Parallel()
-
-	checkMarker := func(t *testing.T, db kvdb.Backend) bool {
-		var marked bool
-		err := db.View(func(tx kvdb.RTx) error {
-			if tx.ReadBucket(externalLifecycleMarkerBucket) != nil {
-				marked = true
-			}
-
-			return nil
-		}, func() {
-			marked = false
-		})
-		require.NoError(t, err)
-
-		return marked
-	}
-
-	// Test case 1: In-flight payments exist.
-	t.Run("in-flight payments", func(t *testing.T) {
-		t.Parallel()
-
-		db := channeldb.OpenForTesting(t, t.TempDir())
-		store, err := newNetworkResultStore(db, true)
-		require.NoError(t, err)
-		require.True(t, checkMarker(t, db))
-
-		// Add a payment result to simulate an in-flight payment.
-		err = store.storeResult(0, &networkResult{
-			msg: &lnwire.UpdateAddHTLC{},
-		})
-		require.NoError(t, err)
-
-		// Attempt to disable the remote router.
-		err = store.DisableRemoteRouter()
-		require.ErrorIs(t, err, ErrAttemptEntriesExist)
-
-		// The marker should still exist.
-		require.True(t, checkMarker(t, db))
-	})
-
-	// Test case 2: No in-flight payments.
-	t.Run("no in-flight payments", func(t *testing.T) {
-		t.Parallel()
-
-		db := channeldb.OpenForTesting(t, t.TempDir())
-		store, err := newNetworkResultStore(db, true)
-		require.NoError(t, err)
-		require.True(t, checkMarker(t, db))
-
-		// Attempt to disable the remote router.
-		err = store.DisableRemoteRouter()
-		require.NoError(t, err)
-
-		// The marker should be gone.
-		require.False(t, checkMarker(t, db))
-	})
-
-	// Test case 3: No in-flight payments and no marker.
-	t.Run("no marker", func(t *testing.T) {
-		t.Parallel()
-
-		db := channeldb.OpenForTesting(t, t.TempDir())
-		store, err := newNetworkResultStore(db, false)
-		require.NoError(t, err)
-		require.False(t, checkMarker(t, db))
-
-		// Attempt to disable the remote router.
-		err = store.DisableRemoteRouter()
-		require.NoError(t, err)
-
-		// The marker should still be gone.
-		require.False(t, checkMarker(t, db))
-	})
-}
-
-// TestMarkerCollision verifies that creating a network result store in local
-// mode (externalLifecycle=false) fails when the database is already marked for
-// external lifecycle management. This prevents the local router from
-// accidentally cleaning attempt data that a remote controller depends on.
-func TestMarkerCollision(t *testing.T) {
-	t.Parallel()
-
-	db := channeldb.OpenForTesting(t, t.TempDir())
-
-	// First, create a store in external mode to write the marker.
-	_, err := newNetworkResultStore(db, true)
-	require.NoError(t, err)
-
-	// Now, try to create a store in local mode on the same DB. This
-	// should fail because the DB is marked for external management.
-	_, err = newNetworkResultStore(db, false)
-	require.Error(t, err)
-	require.Contains(t, err.Error(),
-		"marked for external lifecycle management",
-	)
 }
