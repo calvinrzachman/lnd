@@ -3,6 +3,7 @@ package itest
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/lightningnetwork/lnd/lnrpc"
@@ -180,6 +181,137 @@ func testSendOnionLocalCoexistence(ht *lntest.HarnessTest) {
 	payReqs, _, _ = ht.CreatePayReqs(carol, paymentAmt, numPayments)
 	for _, payReq := range payReqs {
 		sendLocal(payReq)
+	}
+}
+
+// testSendOnionConcurrentCoexistence checks that the local router and a
+// SendOnion client can dispatch payments over the same channel at the same
+// time. Both draw internal attempt IDs from the shared sequencer while the
+// other is allocating, so every attempt must be dispatched as new, resolve with
+// its own preimage, and pay its invoice exactly once.
+func testSendOnionConcurrentCoexistence(ht *lntest.HarnessTest) {
+	// Alice -> Bob -> Carol.
+	const chanAmt = btcutil.Amount(1_000_000)
+	chanPoints, nodes := ht.CreateSimpleNetwork(
+		make([][]string, 3), lntest.OpenChannelParams{Amt: chanAmt},
+	)
+	alice, carol := nodes[0], nodes[2]
+	aliceBobChan := ht.AssertChannelInGraph(alice, chanPoints[0])
+
+	const (
+		numEach    = 5
+		paymentAmt = 10_000
+	)
+
+	// Invoices for the local router.
+	localReqs, localHashes, localInvoices := ht.CreatePayReqs(
+		carol, paymentAmt, numEach,
+	)
+
+	// Invoices and prebuilt onions for the SendOnion client, so that
+	// only the dispatch itself runs concurrently.
+	_, onionHashes, onionInvoices := ht.CreatePayReqs(
+		carol, paymentAmt, numEach,
+	)
+	attempts := make([]*onionAttempt, numEach)
+	for i := range numEach {
+		attempts[i] = buildOnionAttempt(
+			ht, alice, carol, aliceBobChan.ChannelId,
+			onionHashes[i], onionInvoices[i].PaymentAddr,
+			paymentAmt, testAttemptKey(uint64(1000+i)),
+		)
+	}
+
+	// Results are collected here and asserted on the test goroutine,
+	// since require must not run on another goroutine.
+	var (
+		wg           sync.WaitGroup
+		start        = make(chan struct{})
+		onionResps   = make([]*switchrpc.SendOnionResponse, numEach)
+		onionErrs    = make([]error, numEach)
+		localPreimgs = make([]string, numEach)
+		localErrs    = make([]error, numEach)
+	)
+
+	// sendLocal pays an invoice through Alice's own router and waits for
+	// the payment to reach a final state.
+	sendLocal := func(payReq string) (string, error) {
+		stream, err := alice.RPC.Router.SendPaymentV2(
+			ht.Context(), &routerrpc.SendPaymentRequest{
+				PaymentRequest: payReq,
+				TimeoutSeconds: 60,
+				FeeLimitMsat:   noFeeLimitMsat,
+			},
+		)
+		if err != nil {
+			return "", err
+		}
+
+		for {
+			payment, err := stream.Recv()
+			if err != nil {
+				return "", err
+			}
+
+			switch payment.Status {
+			case lnrpc.Payment_SUCCEEDED:
+				return payment.PaymentPreimage, nil
+
+			case lnrpc.Payment_FAILED:
+				return "", fmt.Errorf("local payment "+
+					"failed: %v", payment.FailureReason)
+			}
+		}
+	}
+
+	for i := range numEach {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			localPreimgs[i], localErrs[i] = sendLocal(localReqs[i])
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			onionResps[i], onionErrs[i] = alice.RPC.SendOnion(
+				attempts[i].sendReq,
+			)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	// Every SendOnion attempt was dispatched as new and resolves with its
+	// own preimage.
+	for i := range numEach {
+		requireAccepted(ht, onionResps[i], onionErrs[i], false)
+
+		trackResp := alice.RPC.TrackOnion(attempts[i].trackReq())
+		require.Equal(ht, onionInvoices[i].RPreimage,
+			trackResp.GetPreimage(), "attempt %d resolved with "+
+				"another payment's result", i)
+	}
+
+	// Every local payment settled with its own preimage.
+	for i := range numEach {
+		require.NoError(ht, localErrs[i], "local payment %d", i)
+
+		var preimage lntypes.Preimage
+		copy(preimage[:], localInvoices[i].RPreimage)
+		require.Equal(ht, preimage.String(), localPreimgs[i],
+			"local payment %d settled with another preimage", i)
+	}
+
+	// Carol was paid exactly once for every invoice.
+	for _, invoice := range append(localInvoices, onionInvoices...) {
+		ht.AssertInvoiceSettled(carol, invoice.PaymentAddr)
+	}
+	for _, hash := range append(localHashes, onionHashes...) {
+		settled := carol.RPC.LookupInvoice(hash)
+		require.Equal(ht, lnrpc.Invoice_SETTLED, settled.State)
+		require.EqualValues(ht, paymentAmt, settled.AmtPaidSat)
+		require.Len(ht, settled.Htlcs, 1)
 	}
 }
 

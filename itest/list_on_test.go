@@ -868,6 +868,10 @@ var allTestCases = []*lntest.TestCase{
 		TestFunc: testSendOnionLocalCoexistence,
 	},
 	{
+		Name:     "send onion concurrent coexistence",
+		TestFunc: testSendOnionConcurrentCoexistence,
+	},
+	{
 		Name:     "send onion key mismatch",
 		TestFunc: testSendOnionKeyMismatch,
 	},
