@@ -416,14 +416,8 @@ func (*SendOnionResponse_Mismatch) isSendOnionResponse_Outcome() {}
 // the attempt, not how it ended.
 type Accepted struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Set when the switch already held this attempt from an earlier call,
-	// either because the attempt was already registered or because a circuit
-	// for it already existed. Required behaviour is identical either way; this
-	// is diagnostic.
-	//
-	// A circuit without a registration should not occur in correct operation.
-	// The server allocates the internal attempt from the same sequence as
-	// lnd's own router, so it means the server's records are out of step.
+	// Set when the attempt key was already registered by an earlier call.
+	// Required behaviour is identical either way; this is diagnostic.
 	AlreadyRegistered bool `protobuf:"varint,1,opt,name=already_registered,json=alreadyRegistered,proto3" json:"already_registered,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache

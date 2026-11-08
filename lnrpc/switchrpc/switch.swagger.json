@@ -350,7 +350,7 @@
       "properties": {
         "already_registered": {
           "type": "boolean",
-          "description": "Set when the switch already held this attempt from an earlier call,\neither because the attempt was already registered or because a circuit\nfor it already existed. Required behaviour is identical either way; this\nis diagnostic.\n\nA circuit without a registration should not occur in correct operation.\nThe server allocates the internal attempt from the same sequence as\nlnd's own router, so it means the server's records are out of step."
+          "description": "Set when the attempt key was already registered by an earlier call.\nRequired behaviour is identical either way; this is diagnostic."
         }
       },
       "description": "Accepted means the switch has taken ownership of this attempt. Await the\nresult with TrackOnion.\n\nDo NOT conclude success or failure from this message. It reports who owns\nthe attempt, not how it ended."

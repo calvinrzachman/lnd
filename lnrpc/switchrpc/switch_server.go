@@ -370,19 +370,20 @@ func (s *Server) SendOnion(_ context.Context,
 	dispatchErr := s.cfg.HtlcDispatcher.SendHTLC(chanID, attemptID, htlcAdd)
 	if dispatchErr != nil {
 		// If the dispatcher returns ErrDuplicateAdd, the switch already
-		// holds a circuit for this attempt. That is an acknowledgement
-		// of a prior dispatch, not a failure.
-		//
-		// The registration check above catches every repeat of an
-		// attempt key, and the internal ID comes from the sequencer
-		// lnd's own router uses, so this is only reached when the
-		// store and the circuit map are out of step. Log it loudly,
-		// since it should not happen in correct operation.
+		// holds a circuit under this internal ID. The ID was allocated
+		// for this call and the registration check above catches every
+		// repeat of an attempt key, so the circuit belongs to another
+		// HTLC and this call queued nothing. That is not an
+		// acknowledgement, and the attempt cannot be failed either,
+		// since the other HTLC's result is stored under the same ID.
+		// Report it as ambiguous and log it loudly, since it should
+		// not happen in correct operation.
 		if errors.Is(dispatchErr, htlcswitch.ErrDuplicateAdd) {
-			log.Errorf("Circuit already exists for attempt id=%v "+
-				"that had no registration", attemptID)
+			log.Errorf("Circuit already exists for freshly "+
+				"allocated attempt id=%v (key=%x)", attemptID,
+				key)
 
-			return acknowledged(), nil
+			return ambiguous(dispatchErr), nil
 		}
 
 		// Any other error from SendHTLC means this call queued

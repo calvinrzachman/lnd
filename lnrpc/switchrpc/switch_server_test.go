@@ -211,13 +211,12 @@ func TestSendOnion(t *testing.T) {
 			},
 		},
 		{
-			// ErrDuplicateAdd from the switch/dispatcher is a
-			// last line of defense against duplicate htlc attempts.
-			// Under normal operation, InitAttempt catches
-			// duplicates first and we never reach SendHTLC. This
-			// path could be reached if the InitAttempt record were
-			// removed (e.g., via a future DeleteAttempts RPC) while
-			// the circuit is still registered.
+			// The internal ID is freshly allocated for the call,
+			// so ErrDuplicateAdd means a circuit of another HTLC
+			// holds it and nothing was queued for this attempt.
+			// That is ambiguous, not an acknowledgement, and the
+			// attempt is not failed, since the other HTLC's result
+			// lands under the same ID.
 			name: "dispatcher duplicate htlc error",
 			setup: func(t *testing.T, s *Server,
 				req *SendOnionRequest) {
@@ -226,8 +225,7 @@ func TestSendOnion(t *testing.T) {
 				require.True(t, ok)
 				payer.sendErr = htlcswitch.ErrDuplicateAdd
 			},
-			expectedOutcome:       outcomeAccepted,
-			wantAlreadyRegistered: true,
+			expectedOutcome: outcomeAmbiguous,
 		},
 		{
 			// Recording the failure is best effort. If the store
