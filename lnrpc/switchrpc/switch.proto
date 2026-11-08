@@ -40,9 +40,13 @@ service Switch {
     attempt key, because a call that never reached the server and a call whose
     response was lost look identical from outside.
 
-    A malformed request (InvalidArgument) may also record the attempt as
-    failed, so resend a corrected request under a new attempt key. A request
-    whose key is missing or out of bounds records nothing.
+    InvalidArgument is the one error that proves nothing was sent under the
+    key. Do not retry the same request after it. A request whose key is
+    missing or out of bounds records nothing. Any other malformed request is
+    rejected after the key was registered, and the attempt is recorded as
+    failed, so a retry of it is answered Accepted with already_registered set
+    and TrackOnion returns a local failure. Fix the request and send it under
+    a new attempt key.
     */
     rpc SendOnion (SendOnionRequest) returns (SendOnionResponse);
 
@@ -75,7 +79,18 @@ service Switch {
     3. QUERY FAILURE (gRPC error status): The query itself could not be
     completed. NotFound indicates the attempt key is unknown. Unavailable
     signals the switch is shutting down. Canceled or DeadlineExceeded
-    reflects client-side timeouts. These are safe to retry.
+    reflects client-side timeouts. Internal reports a server side failure to
+    look up or read the attempt. These are safe to retry. InvalidArgument
+    means the key or the decryption fields are malformed; the request will
+    fail the same way until it is corrected.
+
+    NotFound is also returned when the attempt key is registered but the
+    server no longer holds a record for its attempt, for example because a
+    build that does not know attempt keys cleaned the store. Retrying then
+    returns the same answer. A client that receives NotFound for an attempt
+    the server acknowledged MUST NOT treat the attempt as failed, since it
+    may have settled, and should resolve the payment by other means and
+    alert an operator.
     */
     rpc TrackOnion (TrackOnionRequest) returns (TrackOnionResponse);
 
@@ -97,9 +112,18 @@ service Switch {
     DELETION_FAILED. The overall RPC succeeds (gRPC OK) as long as the
     request could be processed, even if individual attempts were not deleted.
 
+    Results follow the order of the keys in the request, and a key repeated
+    in the request is reported once, so pair results with requests by their
+    key, not by position. DELETION_OK is the zero value of the status enum.
+
     Clients MUST only delete attempts whose outcome (settled or failed) has
     been durably recorded and will never need to be retried. Deleting an
-    attempt removes the server's idempotency protection for that attempt key.
+    attempt removes the server's idempotency protection for that attempt key:
+    the server forgets the key, and a SendOnion that names it again
+    dispatches a new HTLC. A deleted key MUST never be sent again.
+
+    An invalid key anywhere in the request fails the whole call with
+    InvalidArgument, and nothing is deleted.
     */
     rpc DeleteAttempts (DeleteAttemptsRequest) returns (DeleteAttemptsResponse);
 }
@@ -267,7 +291,8 @@ message TrackOnionRequest {
 
 // TrackOnionResponse reports how a dispatched attempt ended. A preimage means
 // the HTLC settled. failure_details means the HTLC failed and is no longer in
-// flight, so the caller MAY fail the attempt.
+// flight, so the caller MAY fail the attempt, except when it carries a
+// switch_error, whose outcome is unknown.
 //
 // NOTE: A response with no result set, or a result the caller does not
 // recognise, means the attempt may still be live. The caller MUST keep
@@ -321,8 +346,8 @@ message FailureDetails {
         // cannot be recovered.
         UnreadableFailure unreadable_failure = 5;
 
-        // switch_error indicates an unexpected internal error that does
-        // not fall into any of the above categories.
+        // switch_error means the server could not classify the result, so
+        // the outcome is unknown. See SwitchError before acting on it.
         SwitchError switch_error = 6;
     }
 }
@@ -354,7 +379,15 @@ message LocalFailure {
     bytes wire_message = 1;
 }
 
-// SwitchError indicates that an error occurred within the switch subsystem.
+// SwitchError means the server could not classify the attempt's result. The
+// error_message of the enclosing FailureDetails says why. In practice this is
+// a stored result of a type the server does not recognise, so it cannot tell
+// whether the HTLC settled or failed.
+//
+// Despite riding in failure_details, this is not a verdict that the HTLC
+// failed. The caller MUST treat the outcome as unknown: it MUST NOT fail the
+// attempt or retry the payment on the strength of it, and should alert an
+// operator. TrackOnion returns the same answer for the attempt every time.
 message SwitchError {
 }
 
@@ -415,8 +448,12 @@ message AttemptDeletionResult {
 }
 
 // AttemptDeletionStatus describes the outcome of a single attempt deletion.
+//
+// DELETION_OK is the zero value, so a result whose status field is absent
+// reads as deleted. Pair each result with its key.
 enum AttemptDeletionStatus {
-    // The attempt result was successfully deleted from the store.
+    // The attempt result was successfully deleted from the store. The key is
+    // forgotten and MUST never be sent again.
     DELETION_OK = 0;
 
     // The attempt is still in-flight (pending) and cannot be safely deleted.
