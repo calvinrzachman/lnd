@@ -1,7 +1,9 @@
 package htlcswitch
 
 import (
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -404,4 +406,119 @@ func TestCleanStoreUnreadableIndex(t *testing.T) {
 
 	require.NoError(t, store.CleanStore(map[uint64]struct{}{}))
 	requireRecord(t, store, routerStale, true)
+}
+
+// TestInitAttemptConcurrentCleanStore checks that keyed registrations racing
+// with CleanStore are never removed. Every registered key keeps its record,
+// the internal IDs stay distinct, and unindexed results written meanwhile are
+// still cleaned.
+func TestInitAttemptConcurrentCleanStore(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestExternalStore(t)
+	nextID, _ := testIDSource(1)
+
+	const (
+		workers   = 8
+		perWorker = 20
+
+		// unindexedBase is far above every ID the sequencer hands
+		// out in this test, so unindexed results never collide with
+		// registrations.
+		unindexedBase uint64 = 1_000_000
+	)
+
+	// The cleaner writes an unindexed result and cleans with an empty
+	// keep set in a loop until the registrations are done.
+	var (
+		stop     = make(chan struct{})
+		cleanErr = make(chan error, 1)
+	)
+	go func() {
+		for i := uint64(0); ; i++ {
+			select {
+			case <-stop:
+				cleanErr <- nil
+				return
+			default:
+			}
+
+			id := unindexedBase + i
+			err := store.StoreResult(id, &networkResult{
+				msg:         &lnwire.UpdateFulfillHTLC{},
+				unencrypted: true,
+			})
+			if err == nil {
+				err = store.CleanStore(map[uint64]struct{}{})
+			}
+			if err != nil {
+				cleanErr <- err
+				return
+			}
+		}
+	}()
+
+	keyFor := func(w, i int) []byte {
+		return []byte(fmt.Sprintf("worker-%d-key-%d", w, i))
+	}
+
+	var (
+		wg   sync.WaitGroup
+		ids  [workers][perWorker]uint64
+		errs [workers][perWorker]error
+	)
+	for w := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range perWorker {
+				ids[w][i], errs[w][i] = store.InitAttempt(
+					keyFor(w, i), [32]byte{}, nextID,
+				)
+			}
+		}()
+	}
+	wg.Wait()
+	close(stop)
+	require.NoError(t, <-cleanErr)
+
+	// A final cleanup removes the last unindexed result, while every
+	// registered attempt survives with its own internal ID.
+	require.NoError(t, store.CleanStore(map[uint64]struct{}{}))
+
+	seen := make(map[uint64]struct{}, workers*perWorker)
+	for w := range workers {
+		for i := range perWorker {
+			require.NoError(t, errs[w][i])
+
+			id := ids[w][i]
+			_, dup := seen[id]
+			require.False(t, dup, "internal ID %d registered twice",
+				id)
+			seen[id] = struct{}{}
+
+			requireRecord(t, store, id, true)
+
+			got, err := store.LookupAttempt(keyFor(w, i))
+			require.NoError(t, err)
+			require.Equal(t, id, got)
+		}
+	}
+
+	var unindexed int
+	err := kvdb.View(store.backend, func(tx kvdb.RTx) error {
+		results := tx.ReadBucket(networkResultStoreBucketKey)
+
+		return results.ForEach(func(k, _ []byte) error {
+			if binary.BigEndian.Uint64(k) >= unindexedBase {
+				unindexed++
+			}
+
+			return nil
+		})
+	}, func() {
+		unindexed = 0
+	})
+	require.NoError(t, err)
+	require.Zero(t, unindexed, "unindexed results survived cleanup")
 }
