@@ -282,6 +282,23 @@ func TestNetworkResultStoreCleanStore(t *testing.T) {
 			numResults: 0,
 			keep:       map[uint64]struct{}{0: {}},
 		},
+		{
+			// More kept than removed, so the removed records are
+			// deleted one by one.
+			name:       "keep most",
+			numResults: 10,
+			keep: map[uint64]struct{}{
+				0: {}, 1: {}, 2: {}, 3: {}, 5: {}, 6: {},
+				7: {}, 9: {},
+			},
+		},
+		{
+			// More removed than kept, so the bucket is dropped and
+			// the kept records are rewritten.
+			name:       "keep few",
+			numResults: 10,
+			keep:       map[uint64]struct{}{4: {}},
+		},
 	}
 
 	for _, test := range tests {
@@ -335,6 +352,18 @@ func TestNetworkResultStoreCleanStore(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPruneIndividually checks that CleanStore deletes removed records one by
+// one only when that takes no more writes than rewriting the kept records.
+func TestPruneIndividually(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, pruneIndividually(1, 100))
+	require.True(t, pruneIndividually(2, 8))
+	require.True(t, pruneIndividually(5, 5))
+	require.False(t, pruneIndividually(9, 1))
+	require.False(t, pruneIndividually(100, 0))
 }
 
 // BenchmarkPostgresNetworkResultStoreCleanStore benchmarks pruning the network

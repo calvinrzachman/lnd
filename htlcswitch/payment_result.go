@@ -488,27 +488,25 @@ func (store *networkResultStore) CleanStore(keep map[uint64]struct{}) error {
 		}
 
 		// Snapshot the entries we want to keep (the results of still
-		// in-flight attempts) and count the rest. The store is only
-		// pruned here at startup, so it can hold one entry per resolved
-		// HTLC attempt and grow very large. Deleting those one key at a
-		// time is O(N) round-trips on a SQL backend; since the keep set
-		// is small, we instead read the keepers with a single streaming
-		// query, drop the whole bucket in one cascading delete, and
-		// re-insert the keepers.
+		// in-flight attempts and indexed attempts) and the keys of the
+		// rest, with a single streaming query. Deleting a key costs one
+		// round trip on a SQL backend, while rewriting the bucket costs
+		// one cascading delete plus one insert per kept entry, so the
+		// cheaper of the two is chosen below.
 		type keptResult struct {
 			key   []byte
 			value []byte
 		}
 		var (
 			kept    []keptResult
-			removed int
+			removed [][]byte
 		)
 		if err := kvdb.ForAll(networkResults, func(k, v []byte) error {
 			pid := binary.BigEndian.Uint64(k)
 			_, keepListed := keep[pid]
 			_, owned := indexed[pid]
 			if !keepListed && !owned {
-				removed++
+				removed = append(removed, bytes.Clone(k))
 				return nil
 			}
 
@@ -526,7 +524,20 @@ func (store *networkResultStore) CleanStore(keep map[uint64]struct{}) error {
 
 		// If there is nothing to remove, avoid dropping and recreating
 		// the bucket.
-		if removed == 0 {
+		if len(removed) == 0 {
+			return nil
+		}
+
+		if pruneIndividually(len(removed), len(kept)) {
+			for _, k := range removed {
+				if err := networkResults.Delete(k); err != nil {
+					return err
+				}
+			}
+
+			log.Infof("Removed %d stale entries from network "+
+				"result store", len(removed))
+
 			return nil
 		}
 
@@ -554,7 +565,7 @@ func (store *networkResultStore) CleanStore(keep map[uint64]struct{}) error {
 		}
 
 		log.Infof("Removed %d stale entries from network result store",
-			removed)
+			len(removed))
 
 		return nil
 	}, func() {
@@ -579,6 +590,14 @@ func (store *networkResultStore) CleanStore(keep map[uint64]struct{}) error {
 	}
 
 	return err
+}
+
+// pruneIndividually reports whether CleanStore should delete the removed
+// records one by one rather than drop the bucket and rewrite the kept ones.
+// Deleting costs one write per removed record, and rewriting costs one drop
+// plus one write per kept record.
+func pruneIndividually(removed, kept int) bool {
+	return removed <= kept
 }
 
 // FetchPendingAttempts returns a list of all attempt IDs that are currently in
