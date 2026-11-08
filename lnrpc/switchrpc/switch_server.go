@@ -789,10 +789,17 @@ func (s *Server) TrackOnion(ctx context.Context,
 		log.Errorf("GetAttemptResult failed for attempt %d (key=%x): "+
 			"%v", attemptID, key, err)
 
-		// If the payment ID is not found, we return a NotFound error.
+		// The key is registered, but the switch holds neither a
+		// circuit nor a record for its attempt, so the record was
+		// removed while the index entry stayed, for example by a
+		// build that does not know the index. Its outcome is lost.
+		// This is not NotFound, which callers may retry or read as
+		// never sent, so report it as data loss.
 		if errors.Is(err, htlcswitch.ErrPaymentIDNotFound) {
-			return nil, status.Errorf(codes.NotFound,
-				"attempt with key %x not found", key)
+			return nil, status.Errorf(codes.DataLoss,
+				"attempt with key %x is registered but its "+
+					"record is gone, so its outcome is "+
+					"lost", key)
 		}
 
 		// For other errors, we return an internal error.

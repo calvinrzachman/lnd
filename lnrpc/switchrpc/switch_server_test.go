@@ -671,14 +671,17 @@ func TestTrackOnion(t *testing.T) {
 			},
 		},
 		{
-			name: "payment not found",
+			// The key resolves, but the switch has no record for
+			// its attempt: the outcome is lost, which is distinct
+			// from an unknown key.
+			name: "registered key with no record",
 			setup: func(t *testing.T, m *mockPayer,
 				req *TrackOnionRequest) {
 
 				m.getResultErr = htlcswitch.ErrPaymentIDNotFound
 			},
 			getCtx:          t.Context,
-			expectedErrCode: codes.NotFound,
+			expectedErrCode: codes.DataLoss,
 		},
 		{
 			name: "invalid attempt key",

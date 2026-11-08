@@ -83,6 +83,13 @@ type SwitchClient interface {
 	//completed. NotFound indicates the attempt key is unknown. Unavailable
 	//signals the switch is shutting down. Canceled or DeadlineExceeded
 	//reflects client-side timeouts. These are safe to retry.
+	//
+	//DataLoss is different: the attempt key is registered, but the server no
+	//longer holds a record for its attempt, for example because a build that
+	//does not know attempt keys cleaned the store. The outcome of the HTLC is
+	//lost and retrying returns the same answer. The client MUST NOT treat the
+	//attempt as failed, since it may have settled, and should resolve the
+	//payment by other means and alert an operator.
 	TrackOnion(ctx context.Context, in *TrackOnionRequest, opts ...grpc.CallOption) (*TrackOnionResponse, error)
 	//
 	//BuildOnion attempts to build an onion packet for the specified route.
@@ -96,7 +103,9 @@ type SwitchClient interface {
 	//The server processes each attempt independently and reports per-attempt
 	//results. Pending (in-flight) attempts are never deleted; they are reported
 	//with a DELETION_PENDING status. Unknown attempt keys are reported with
-	//DELETION_NOT_FOUND. Unprocessable records are reported with
+	//DELETION_NOT_FOUND, as are registered keys whose record is gone (the case
+	//TrackOnion reports as DataLoss); their stale registration is removed, so
+	//the key is unknown afterwards. Unprocessable records are reported with
 	//DELETION_FAILED. The overall RPC succeeds (gRPC OK) as long as the
 	//request could be processed, even if individual attempts were not deleted.
 	//
@@ -219,6 +228,13 @@ type SwitchServer interface {
 	//completed. NotFound indicates the attempt key is unknown. Unavailable
 	//signals the switch is shutting down. Canceled or DeadlineExceeded
 	//reflects client-side timeouts. These are safe to retry.
+	//
+	//DataLoss is different: the attempt key is registered, but the server no
+	//longer holds a record for its attempt, for example because a build that
+	//does not know attempt keys cleaned the store. The outcome of the HTLC is
+	//lost and retrying returns the same answer. The client MUST NOT treat the
+	//attempt as failed, since it may have settled, and should resolve the
+	//payment by other means and alert an operator.
 	TrackOnion(context.Context, *TrackOnionRequest) (*TrackOnionResponse, error)
 	//
 	//BuildOnion attempts to build an onion packet for the specified route.
@@ -232,7 +248,9 @@ type SwitchServer interface {
 	//The server processes each attempt independently and reports per-attempt
 	//results. Pending (in-flight) attempts are never deleted; they are reported
 	//with a DELETION_PENDING status. Unknown attempt keys are reported with
-	//DELETION_NOT_FOUND. Unprocessable records are reported with
+	//DELETION_NOT_FOUND, as are registered keys whose record is gone (the case
+	//TrackOnion reports as DataLoss); their stale registration is removed, so
+	//the key is unknown afterwards. Unprocessable records are reported with
 	//DELETION_FAILED. The overall RPC succeeds (gRPC OK) as long as the
 	//request could be processed, even if individual attempts were not deleted.
 	//
