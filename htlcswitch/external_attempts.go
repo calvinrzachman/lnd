@@ -27,10 +27,11 @@ var (
 	// empty.
 	ErrEmptyExternalKey = errors.New("external attempt key is empty")
 
-	// errInternalIDInUse is returned internally when a freshly allocated
-	// internal attempt ID already has a record in the result store. This
-	// can only happen for records written under IDs that were not
-	// allocated by the switch's own sequencer.
+	// errInternalIDInUse is returned when a freshly allocated internal
+	// attempt ID already has a record in the result store. Every record is
+	// written under an ID from the switch's own sequencer, and the switch
+	// refuses to start on a store left with records by an older switchrpc
+	// build, so this is an invariant violation.
 	errInternalIDInUse = errors.New("internal attempt ID already in use")
 
 	// errUnreadableIndex is returned when an index entry cannot be
@@ -46,11 +47,6 @@ const (
 	// version byte, the 8-byte internal attempt ID and a 32-byte request
 	// fingerprint.
 	externalIndexEntryLen = 1 + 8 + 32
-
-	// maxInternalIDAllocations bounds the number of internal IDs tried
-	// for one external attempt when allocated IDs collide with existing
-	// records.
-	maxInternalIDAllocations = 1000
 )
 
 // ExternalAttemptStore indexes attempts dispatched by an external router.
@@ -216,33 +212,27 @@ func (store *networkResultStore) InitExternalAttempt(key []byte,
 	// The key is new. Allocate an internal ID outside of any database
 	// transaction: the sequencer writes to the same database, so calling
 	// it inside the transaction below would deadlock.
-	for range maxInternalIDAllocations {
-		attemptID, err := nextID()
-		if err != nil {
-			return 0, fmt.Errorf("%w: unable to allocate attempt "+
-				"ID: %w", ErrAmbiguousAttemptInit, err)
-		}
-
-		err = store.initIndexedAttempt(key, attemptID, fingerprint)
-		if errors.Is(err, errInternalIDInUse) {
-			log.Warnf("Allocated attempt ID %d already has a "+
-				"record, allocating another", attemptID)
-
-			continue
-		}
-		if err != nil {
-			return 0, fmt.Errorf("%w: %w", ErrAmbiguousAttemptInit,
-				err)
-		}
-
-		log.Debugf("Initialized external attempt key=%x with "+
-			"attemptID=%d", key, attemptID)
-
-		return attemptID, nil
+	attemptID, err := nextID()
+	if err != nil {
+		return 0, fmt.Errorf("%w: unable to allocate attempt ID: %w",
+			ErrAmbiguousAttemptInit, err)
 	}
 
-	return 0, fmt.Errorf("%w: no free attempt ID after %d allocations",
-		ErrAmbiguousAttemptInit, maxInternalIDAllocations)
+	// A record under a freshly allocated ID is never overwritten. Nothing
+	// is written in that case, so a retry allocates another ID.
+	err = store.initIndexedAttempt(key, attemptID, fingerprint)
+	if errors.Is(err, errInternalIDInUse) {
+		log.Errorf("Allocated attempt ID %d already has a record",
+			attemptID)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("%w: %w", ErrAmbiguousAttemptInit, err)
+	}
+
+	log.Debugf("Initialized external attempt key=%x with attemptID=%d",
+		key, attemptID)
+
+	return attemptID, nil
 }
 
 // initIndexedAttempt writes the pending placeholder for attemptID and the

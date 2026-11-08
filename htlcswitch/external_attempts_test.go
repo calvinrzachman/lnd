@@ -118,23 +118,34 @@ func TestInitExternalAttemptAllocationError(t *testing.T) {
 	require.ErrorIs(t, err, ErrPaymentIDNotFound)
 }
 
-// TestInitExternalAttemptSkipsUsedIDs checks that an allocated internal ID
-// which already has a record, for example one written under an attempt ID the
-// switch's sequencer did not allocate, is skipped rather than reused.
-func TestInitExternalAttemptSkipsUsedIDs(t *testing.T) {
+// TestInitExternalAttemptUsedID checks that an allocated internal ID which
+// already has a record is never overwritten: the registration is reported as
+// ambiguous, nothing is written, and a retry allocates the next ID.
+func TestInitExternalAttemptUsedID(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestExternalStore(t)
 
-	// Records left under IDs 5 and 6 by an earlier dispatcher.
-	require.NoError(t, store.InitAttempt(5))
-	require.NoError(t, store.InitAttempt(6))
+	// A record under ID 5, which the sequencer hands out next.
+	settleAttempt(t, store, 5)
 
+	key := []byte("key")
 	nextID, calls := testIDSource(5)
-	id, err := store.InitExternalAttempt([]byte("key"), [32]byte{}, nextID)
+	_, err := store.InitExternalAttempt(key, [32]byte{}, nextID)
+	require.ErrorIs(t, err, ErrAmbiguousAttemptInit)
+	require.ErrorIs(t, err, errInternalIDInUse)
+	require.EqualValues(t, 1, calls.Load())
+
+	// The existing record is untouched and the key is not registered.
+	result, err := store.GetResult(5)
 	require.NoError(t, err)
-	require.EqualValues(t, 7, id)
-	require.EqualValues(t, 3, calls.Load())
+	require.IsType(t, &lnwire.UpdateFulfillHTLC{}, result.msg)
+	_, err = store.LookupExternalAttempt(key)
+	require.ErrorIs(t, err, ErrPaymentIDNotFound)
+
+	id, err := store.InitExternalAttempt(key, [32]byte{}, nextID)
+	require.NoError(t, err)
+	require.EqualValues(t, 6, id)
 }
 
 // TestInitExternalAttemptConcurrent checks that concurrent registrations of
