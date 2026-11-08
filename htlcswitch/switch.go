@@ -345,12 +345,7 @@ type Switch struct {
 	// user of the result when they are complete. Each payment attempt
 	// should be given a unique integer ID when it is created, otherwise
 	// results might be overwritten.
-	attemptStore AttemptStore
-
-	// externalAttemptStore indexes attempts dispatched by an external
-	// router, mapping each external key to an internal attempt ID. It is
-	// backed by the same store as attemptStore.
-	externalAttemptStore ExternalAttemptStore
+	attemptStore *networkResultStore
 
 	// circuits is storage for payment circuits which are used to
 	// forward the settle/fail htlc updates back to the add htlc initiator.
@@ -499,9 +494,6 @@ func New(cfg Config, currentHeight uint32) (*Switch, error) {
 		resMsgStore:       resStore,
 		quit:              make(chan struct{}),
 	}
-
-	// The external attempt index lives in the same store as the results.
-	s.externalAttemptStore = networkResultStore
 
 	s.aliasToReal = make(map[lnwire.ShortChannelID]lnwire.ShortChannelID)
 	s.baseIndex = make(map[lnwire.ShortChannelID]lnwire.ShortChannelID)
@@ -684,7 +676,7 @@ func (s *Switch) AttemptStore() AttemptStore {
 // ExternalAttemptStore provides access to the index of attempts dispatched by
 // an external router.
 func (s *Switch) ExternalAttemptStore() ExternalAttemptStore {
-	return s.externalAttemptStore
+	return s.attemptStore
 }
 
 // SendHTLC is used by other subsystems which aren't belong to htlc switch

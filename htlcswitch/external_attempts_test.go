@@ -50,10 +50,10 @@ func settleAttempt(t *testing.T, store *networkResultStore, id uint64) {
 	}))
 }
 
-// TestInitExternalAttempt checks registration of an external key: a new key
+// TestInitAttempt checks registration of an external key: a new key
 // allocates an internal ID, a repeat with the same fingerprint returns that ID
 // as a duplicate, and a repeat with a different fingerprint is refused.
-func TestInitExternalAttempt(t *testing.T) {
+func TestInitAttempt(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestExternalStore(t)
@@ -64,7 +64,7 @@ func TestInitExternalAttempt(t *testing.T) {
 
 	// A new key allocates an internal ID and writes a pending
 	// placeholder for it.
-	id, err := store.InitExternalAttempt(key, fp, nextID)
+	id, err := store.InitAttempt(key, fp, nextID)
 	require.NoError(t, err)
 	require.EqualValues(t, 100, id)
 	require.EqualValues(t, 1, calls.Load())
@@ -72,37 +72,37 @@ func TestInitExternalAttempt(t *testing.T) {
 	_, err = store.GetResult(id)
 	require.ErrorIs(t, err, ErrAttemptResultPending)
 
-	got, err := store.LookupExternalAttempt(key)
+	got, err := store.LookupAttempt(key)
 	require.NoError(t, err)
 	require.Equal(t, id, got)
 
 	// The same key with the same fingerprint is a duplicate. It returns
 	// the original internal ID and allocates nothing.
-	dupID, err := store.InitExternalAttempt(key, fp, nextID)
+	dupID, err := store.InitAttempt(key, fp, nextID)
 	require.ErrorIs(t, err, ErrPaymentIDAlreadyExists)
 	require.Equal(t, id, dupID)
 	require.EqualValues(t, 1, calls.Load())
 
 	// The same key with a different fingerprint is refused.
-	_, err = store.InitExternalAttempt(key, [32]byte{2}, nextID)
+	_, err = store.InitAttempt(key, [32]byte{2}, nextID)
 	require.ErrorIs(t, err, ErrAttemptFingerprintMismatch)
 	require.EqualValues(t, 1, calls.Load())
 
 	// A different key gets a different internal ID.
-	otherID, err := store.InitExternalAttempt(
+	otherID, err := store.InitAttempt(
 		[]byte("payment-b/attempt-1"), fp, nextID,
 	)
 	require.NoError(t, err)
 	require.NotEqual(t, id, otherID)
 
 	// An empty key is rejected.
-	_, err = store.InitExternalAttempt(nil, fp, nextID)
+	_, err = store.InitAttempt(nil, fp, nextID)
 	require.ErrorIs(t, err, ErrEmptyExternalKey)
 }
 
-// TestInitExternalAttemptAllocationError checks that a failure to allocate an
+// TestInitAttemptAllocationError checks that a failure to allocate an
 // internal ID is reported as ambiguous and leaves no index entry behind.
-func TestInitExternalAttemptAllocationError(t *testing.T) {
+func TestInitAttemptAllocationError(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestExternalStore(t)
@@ -111,35 +111,35 @@ func TestInitExternalAttemptAllocationError(t *testing.T) {
 	}
 
 	key := []byte("key")
-	_, err := store.InitExternalAttempt(key, [32]byte{}, failing)
+	_, err := store.InitAttempt(key, [32]byte{}, failing)
 	require.ErrorIs(t, err, ErrAmbiguousAttemptInit)
 
-	_, err = store.LookupExternalAttempt(key)
+	_, err = store.LookupAttempt(key)
 	require.ErrorIs(t, err, ErrPaymentIDNotFound)
 }
 
-// TestInitExternalAttemptSkipsUsedIDs checks that an allocated internal ID
-// which already has a record, for example one written under an attempt ID the
+// TestInitAttemptSkipsUsedIDs checks that an allocated internal ID which
+// already has a record, for example one written under an attempt ID the
 // switch's sequencer did not allocate, is skipped rather than reused.
-func TestInitExternalAttemptSkipsUsedIDs(t *testing.T) {
+func TestInitAttemptSkipsUsedIDs(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestExternalStore(t)
 
 	// Records left under IDs 5 and 6 by an earlier dispatcher.
-	require.NoError(t, store.InitAttempt(5))
-	require.NoError(t, store.InitAttempt(6))
+	settleAttempt(t, store, 5)
+	settleAttempt(t, store, 6)
 
 	nextID, calls := testIDSource(5)
-	id, err := store.InitExternalAttempt([]byte("key"), [32]byte{}, nextID)
+	id, err := store.InitAttempt([]byte("key"), [32]byte{}, nextID)
 	require.NoError(t, err)
 	require.EqualValues(t, 7, id)
 	require.EqualValues(t, 3, calls.Load())
 }
 
-// TestInitExternalAttemptConcurrent checks that concurrent registrations of
+// TestInitAttemptConcurrent checks that concurrent registrations of
 // the same key yield exactly one internal ID.
-func TestInitExternalAttemptConcurrent(t *testing.T) {
+func TestInitAttemptConcurrent(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestExternalStore(t)
@@ -159,7 +159,7 @@ func TestInitExternalAttemptConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-startSig
-			ids[i], errs[i] = store.InitExternalAttempt(
+			ids[i], errs[i] = store.InitAttempt(
 				key, fp, nextID,
 			)
 		}()
@@ -181,10 +181,10 @@ func TestInitExternalAttemptConcurrent(t *testing.T) {
 	require.EqualValues(t, 1, calls.Load())
 }
 
-// TestDeleteExternalAttempts checks that terminal attempts are deleted
+// TestDeleteAttempts checks that terminal attempts are deleted
 // together with their index entries, pending attempts are kept, and statuses
 // follow the order of the requested keys.
-func TestDeleteExternalAttempts(t *testing.T) {
+func TestDeleteAttempts(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestExternalStore(t)
@@ -194,16 +194,16 @@ func TestDeleteExternalAttempts(t *testing.T) {
 	settledKey := []byte("settled")
 	unknownKey := []byte("unknown")
 
-	_, err := store.InitExternalAttempt(pendingKey, [32]byte{}, nextID)
+	_, err := store.InitAttempt(pendingKey, [32]byte{}, nextID)
 	require.NoError(t, err)
 
-	settledID, err := store.InitExternalAttempt(
+	settledID, err := store.InitAttempt(
 		settledKey, [32]byte{}, nextID,
 	)
 	require.NoError(t, err)
 	settleAttempt(t, store, settledID)
 
-	statuses, err := store.DeleteExternalAttempts(
+	statuses, err := store.DeleteAttempts(
 		[][]byte{settledKey, unknownKey, pendingKey},
 	)
 	require.NoError(t, err)
@@ -212,28 +212,28 @@ func TestDeleteExternalAttempts(t *testing.T) {
 	}, statuses)
 
 	// The settled attempt's record and index entry are both gone.
-	_, err = store.LookupExternalAttempt(settledKey)
+	_, err = store.LookupAttempt(settledKey)
 	require.ErrorIs(t, err, ErrPaymentIDNotFound)
 	_, err = store.GetResult(settledID)
 	require.ErrorIs(t, err, ErrPaymentIDNotFound)
 
 	// The pending attempt is untouched.
-	pendingID, err := store.LookupExternalAttempt(pendingKey)
+	pendingID, err := store.LookupAttempt(pendingKey)
 	require.NoError(t, err)
 	_, err = store.GetResult(pendingID)
 	require.ErrorIs(t, err, ErrAttemptResultPending)
 
 	// Registering a deleted key again allocates a new internal ID.
-	newID, err := store.InitExternalAttempt(settledKey, [32]byte{}, nextID)
+	newID, err := store.InitAttempt(settledKey, [32]byte{}, nextID)
 	require.NoError(t, err)
 	require.NotEqual(t, settledID, newID)
 
 	// Duplicate keys in one request are rejected.
-	_, err = store.DeleteExternalAttempts([][]byte{pendingKey, pendingKey})
+	_, err = store.DeleteAttempts([][]byte{pendingKey, pendingKey})
 	require.Error(t, err)
 
 	// An empty request is a no-op.
-	statuses, err = store.DeleteExternalAttempts(nil)
+	statuses, err = store.DeleteAttempts(nil)
 	require.NoError(t, err)
 	require.Empty(t, statuses)
 }
@@ -248,7 +248,7 @@ func TestExternalAttemptFailedPending(t *testing.T) {
 	nextID, _ := testIDSource(1)
 
 	key := []byte("key")
-	id, err := store.InitExternalAttempt(key, [32]byte{}, nextID)
+	id, err := store.InitAttempt(key, [32]byte{}, nextID)
 	require.NoError(t, err)
 
 	require.NoError(t, store.FailPendingAttempt(
@@ -259,7 +259,7 @@ func TestExternalAttemptFailedPending(t *testing.T) {
 	// the failed record.
 	reopened := newNetworkResultStore(db)
 
-	got, err := reopened.LookupExternalAttempt(key)
+	got, err := reopened.LookupAttempt(key)
 	require.NoError(t, err)
 	require.Equal(t, id, got)
 
@@ -267,7 +267,7 @@ func TestExternalAttemptFailedPending(t *testing.T) {
 	require.NoError(t, err)
 	require.IsType(t, &lnwire.UpdateFailHTLC{}, result.msg)
 
-	statuses, err := reopened.DeleteExternalAttempts([][]byte{key})
+	statuses, err := reopened.DeleteAttempts([][]byte{key})
 	require.NoError(t, err)
 	require.Equal(t, []DeletionStatus{DeletionOK}, statuses)
 }
@@ -298,12 +298,12 @@ func TestCleanStoreOwnerAware(t *testing.T) {
 	nextID, _ := testIDSource(100)
 
 	// Register two external attempts, one left pending and one settled.
-	pendingID, err := store.InitExternalAttempt(
+	pendingID, err := store.InitAttempt(
 		[]byte("ext-pending"), [32]byte{1}, nextID,
 	)
 	require.NoError(t, err)
 
-	settledID, err := store.InitExternalAttempt(
+	settledID, err := store.InitAttempt(
 		[]byte("ext-settled"), [32]byte{2}, nextID,
 	)
 	require.NoError(t, err)
@@ -338,7 +338,7 @@ func TestCleanStoreOwnerAware(t *testing.T) {
 
 	// The index itself is untouched, so both keys still resolve.
 	for _, key := range []string{"ext-pending", "ext-settled"} {
-		_, err := store.LookupExternalAttempt([]byte(key))
+		_, err := store.LookupAttempt([]byte(key))
 		require.NoError(t, err)
 	}
 }
@@ -353,15 +353,15 @@ func TestCleanStoreAfterExternalDelete(t *testing.T) {
 	nextID, _ := testIDSource(100)
 
 	key := []byte("ext-settled")
-	id, err := store.InitExternalAttempt(key, [32]byte{1}, nextID)
+	id, err := store.InitAttempt(key, [32]byte{1}, nextID)
 	require.NoError(t, err)
 	settleAttempt(t, store, id)
 
-	statuses, err := store.DeleteExternalAttempts([][]byte{key})
+	statuses, err := store.DeleteAttempts([][]byte{key})
 	require.NoError(t, err)
 	require.Equal(t, []DeletionStatus{DeletionOK}, statuses)
 
-	_, err = store.LookupExternalAttempt(key)
+	_, err = store.LookupAttempt(key)
 	require.ErrorIs(t, err, ErrPaymentIDNotFound)
 
 	var indexed map[uint64]struct{}
