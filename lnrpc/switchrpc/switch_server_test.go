@@ -1697,3 +1697,54 @@ func TestMarshallDispatchOutcome(t *testing.T) {
 		})
 	}
 }
+
+// testConfigRegistry is a config dispatcher that hands out one switchrpc
+// config.
+type testConfigRegistry struct {
+	cfg *Config
+}
+
+// FetchConfig returns the held config for the switchrpc sub-server.
+func (r *testConfigRegistry) FetchConfig(name string) (interface{}, bool) {
+	if name != subServerName {
+		return nil, false
+	}
+
+	return r.cfg, true
+}
+
+// TestCreateSubServerRequiredDeps checks that the sub-server refuses to start
+// without the external attempt store or the attempt ID allocator, instead of
+// panicking on the first SendOnion.
+func TestCreateSubServerRequiredDeps(t *testing.T) {
+	t.Parallel()
+
+	fullConfig := func() *Config {
+		store := &mockAttemptStore{}
+
+		return &Config{
+			HtlcDispatcher:       &mockPayer{},
+			ChannelInfoAccessor:  &mockChannelInfoAccessor{},
+			RouteProcessor:       &mockRouteProcessor{},
+			AttemptStore:         store,
+			ExternalAttemptStore: store,
+			NextAttemptID: func() (uint64, error) {
+				return 1, nil
+			},
+			NetworkDir: t.TempDir(),
+		}
+	}
+
+	_, _, err := createNewSubServer(&testConfigRegistry{fullConfig()})
+	require.NoError(t, err)
+
+	cfg := fullConfig()
+	cfg.ExternalAttemptStore = nil
+	_, _, err = createNewSubServer(&testConfigRegistry{cfg})
+	require.ErrorContains(t, err, "external attempt store")
+
+	cfg = fullConfig()
+	cfg.NextAttemptID = nil
+	_, _, err = createNewSubServer(&testConfigRegistry{cfg})
+	require.ErrorContains(t, err, "attempt ID allocator")
+}
