@@ -51,7 +51,7 @@ func newTestExternalStore(t *testing.T) (*networkResultStore,
 func settleAttempt(t *testing.T, store *networkResultStore, id uint64) {
 	t.Helper()
 
-	require.NoError(t, store.StoreResult(id, &networkResult{
+	require.NoError(t, store.storeResult(id, &networkResult{
 		msg:         &lnwire.UpdateFulfillHTLC{},
 		unencrypted: true,
 	}))
@@ -76,7 +76,7 @@ func TestInitAttempt(t *testing.T) {
 	require.EqualValues(t, 100, id)
 	require.EqualValues(t, 1, calls.Load())
 
-	_, err = store.GetResult(id)
+	_, err = store.getResult(id)
 	require.ErrorIs(t, err, ErrAttemptResultPending)
 
 	got, gotHash, err := store.LookupAttempt(key)
@@ -145,7 +145,7 @@ func TestInitAttemptUsedID(t *testing.T) {
 	require.EqualValues(t, 1, calls.Load())
 
 	// The existing record is untouched and the key is not registered.
-	result, err := store.GetResult(5)
+	result, err := store.getResult(5)
 	require.NoError(t, err)
 	require.IsType(t, &lnwire.UpdateFulfillHTLC{}, result.msg)
 	_, _, err = store.LookupAttempt(key)
@@ -233,13 +233,13 @@ func TestDeleteAttempts(t *testing.T) {
 	// The settled attempt's record and index entry are both gone.
 	_, _, err = store.LookupAttempt(settledKey)
 	require.ErrorIs(t, err, ErrPaymentIDNotFound)
-	_, err = store.GetResult(settledID)
+	_, err = store.getResult(settledID)
 	require.ErrorIs(t, err, ErrPaymentIDNotFound)
 
 	// The pending attempt is untouched.
 	pendingID, _, err := store.LookupAttempt(pendingKey)
 	require.NoError(t, err)
-	_, err = store.GetResult(pendingID)
+	_, err = store.getResult(pendingID)
 	require.ErrorIs(t, err, ErrAttemptResultPending)
 
 	// Registering a deleted key again allocates a new internal ID.
@@ -284,7 +284,7 @@ func TestExternalAttemptFailedPending(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, id, got)
 
-	result, err := reopened.GetResult(id)
+	result, err := reopened.getResult(id)
 	require.NoError(t, err)
 	require.IsType(t, &lnwire.UpdateFailHTLC{}, result.msg)
 
@@ -339,7 +339,7 @@ func TestCleanStoreOwnerAware(t *testing.T) {
 	settleAttempt(t, store, routerKept)
 
 	// With an empty keep set, only the indexed attempts survive.
-	require.NoError(t, store.CleanStore(map[uint64]struct{}{}))
+	require.NoError(t, store.cleanStore(map[uint64]struct{}{}))
 	requireRecord(t, store, pendingID, true)
 	requireRecord(t, store, settledID, true)
 	requireRecord(t, store, routerStale, false)
@@ -349,7 +349,7 @@ func TestCleanStoreOwnerAware(t *testing.T) {
 	// an unlisted one is removed.
 	settleAttempt(t, store, routerStale)
 	settleAttempt(t, store, routerKept)
-	require.NoError(t, store.CleanStore(map[uint64]struct{}{
+	require.NoError(t, store.cleanStore(map[uint64]struct{}{
 		routerKept: {},
 	}))
 	requireRecord(t, store, pendingID, true)
@@ -397,7 +397,7 @@ func TestCleanStoreAfterExternalDelete(t *testing.T) {
 	// A result written under the freed ID, with no index entry, is no
 	// longer protected and is removed.
 	settleAttempt(t, store, id)
-	require.NoError(t, store.CleanStore(map[uint64]struct{}{}))
+	require.NoError(t, store.cleanStore(map[uint64]struct{}{}))
 	requireRecord(t, store, id, false)
 }
 
@@ -464,7 +464,7 @@ func TestCleanStoreUnreadableIndex(t *testing.T) {
 
 	// Cleanup removes nothing, on this start and the next.
 	for range 2 {
-		require.NoError(t, store.CleanStore(map[uint64]struct{}{}))
+		require.NoError(t, store.cleanStore(map[uint64]struct{}{}))
 		requireRecord(t, store, routerStale, true)
 		requireRecord(t, store, goodID, true)
 	}
@@ -606,12 +606,12 @@ func TestInitAttemptConcurrentCleanStore(t *testing.T) {
 			}
 
 			id := unindexedBase + i
-			err := store.StoreResult(id, &networkResult{
+			err := store.storeResult(id, &networkResult{
 				msg:         &lnwire.UpdateFulfillHTLC{},
 				unencrypted: true,
 			})
 			if err == nil {
-				err = store.CleanStore(map[uint64]struct{}{})
+				err = store.cleanStore(map[uint64]struct{}{})
 			}
 			if err != nil {
 				cleanErr <- err
@@ -647,7 +647,7 @@ func TestInitAttemptConcurrentCleanStore(t *testing.T) {
 
 	// A final cleanup removes the last unindexed result, while every
 	// registered attempt survives with its own internal ID.
-	require.NoError(t, store.CleanStore(map[uint64]struct{}{}))
+	require.NoError(t, store.cleanStore(map[uint64]struct{}{}))
 
 	seen := make(map[uint64]struct{}, workers*perWorker)
 	for w := range workers {

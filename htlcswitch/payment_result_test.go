@@ -120,7 +120,7 @@ func TestNetworkResultStore(t *testing.T) {
 	// Subscribe to 2 of them.
 	var subs []<-chan *networkResult
 	for i := uint64(0); i < 2; i++ {
-		sub, err := store.SubscribeResult(i)
+		sub, err := store.subscribeResult(i)
 		if err != nil {
 			t.Fatalf("unable to subscribe: %v", err)
 		}
@@ -129,7 +129,7 @@ func TestNetworkResultStore(t *testing.T) {
 
 	// Store three of them.
 	for i := uint64(0); i < 3; i++ {
-		err := store.StoreResult(i, results[i])
+		err := store.storeResult(i, results[i])
 		if err != nil {
 			t.Fatalf("unable to store result: %v", err)
 		}
@@ -146,7 +146,7 @@ func TestNetworkResultStore(t *testing.T) {
 
 	// Let the third one subscribe now. THe result should be received
 	// immediately.
-	sub, err := store.SubscribeResult(2)
+	sub, err := store.subscribeResult(2)
 	require.NoError(t, err, "unable to subscribe")
 	select {
 	case <-sub:
@@ -156,22 +156,22 @@ func TestNetworkResultStore(t *testing.T) {
 
 	// Try fetching the result directly for the non-stored one. This should
 	// fail.
-	_, err = store.GetResult(3)
+	_, err = store.getResult(3)
 	if err != ErrPaymentIDNotFound {
 		t.Fatalf("expected ErrPaymentIDNotFound, got %v", err)
 	}
 
 	// Add the result and try again.
-	err = store.StoreResult(3, results[3])
+	err = store.storeResult(3, results[3])
 	require.NoError(t, err, "unable to store result")
 
-	_, err = store.GetResult(3)
+	_, err = store.getResult(3)
 	require.NoError(t, err, "unable to get result")
 
 	// Since we don't delete results from the store (yet), make sure we
 	// will get subscriptions for all of them.
 	for i := uint64(0); i < numResults; i++ {
-		sub, err := store.SubscribeResult(i)
+		sub, err := store.subscribeResult(i)
 		if err != nil {
 			t.Fatalf("unable to subscribe: %v", err)
 		}
@@ -187,19 +187,19 @@ func TestNetworkResultStore(t *testing.T) {
 		var id uint64 = 100
 
 		// An attempt that was never registered is not found.
-		_, err = store.GetResult(id)
+		_, err = store.getResult(id)
 		require.ErrorIs(t, err, ErrPaymentIDNotFound,
 			"expected not found error for uninitialized attempt")
 
 		initPendingAttempt(t, store, id)
 
 		// A registered attempt without a final result is pending.
-		_, err = store.GetResult(id)
+		_, err = store.getResult(id)
 		require.ErrorIs(t, err, ErrAttemptResultPending,
 			"expected result unavailable error for pending attempt")
 
 		// Subscribers are not notified of the pending placeholder.
-		sub, err := store.SubscribeResult(id)
+		sub, err := store.subscribeResult(id)
 		require.NoError(t, err, "unable to subscribe")
 		select {
 		case <-sub:
@@ -215,7 +215,7 @@ func TestNetworkResultStore(t *testing.T) {
 			unencrypted:  true,
 			isResolution: true,
 		}
-		err = store.StoreResult(id, netResult)
+		err = store.storeResult(id, netResult)
 		require.NoError(t, err, "unable to store result after init")
 
 		// The subscriber is notified of the final attempt result.
@@ -326,16 +326,16 @@ func TestNetworkResultStoreCleanStore(t *testing.T) {
 					unencrypted:  true,
 					isResolution: true,
 				}
-				require.NoError(t, store.StoreResult(i, n))
+				require.NoError(t, store.storeResult(i, n))
 			}
 
 			// Prune, keeping only the IDs in the keep set.
-			require.NoError(t, store.CleanStore(test.keep))
+			require.NoError(t, store.cleanStore(test.keep))
 
 			// Every kept ID must still be present; every other ID
 			// must have been removed.
 			for i := range test.numResults {
-				result, err := store.GetResult(i)
+				result, err := store.getResult(i)
 				if _, ok := test.keep[i]; ok {
 					require.NoErrorf(t, err,
 						"kept id %d missing", i)
@@ -458,7 +458,7 @@ func BenchmarkPostgresNetworkResultStoreCleanStore(b *testing.B) {
 				require.NoError(b, populate())
 				b.StartTimer()
 
-				require.NoError(b, store.CleanStore(keep))
+				require.NoError(b, store.cleanStore(keep))
 			}
 		})
 	}
@@ -473,7 +473,7 @@ func TestNetworkResultStoreFailAndFetch(t *testing.T) {
 	store := newNetworkResultStore(db)
 
 	// Test FetchPendingAttempts on an empty store.
-	pending, err := store.FetchPendingAttempts()
+	pending, err := store.fetchPendingAttempts()
 	require.NoError(t, err, "fetch on empty store failed")
 	require.Empty(t, pending, "expected no pending attempts on empty store")
 
@@ -483,7 +483,7 @@ func TestNetworkResultStoreFailAndFetch(t *testing.T) {
 	initPendingAttempt(t, store, 3)
 
 	// Test FetchPendingAttempts with active pending attempts.
-	pending, err = store.FetchPendingAttempts()
+	pending, err = store.fetchPendingAttempts()
 	require.NoError(t, err, "fetch with pending failed")
 	require.ElementsMatch(t, []uint64{1, 2, 3}, pending,
 		"unexpected pending attempts")
@@ -494,13 +494,13 @@ func TestNetworkResultStoreFailAndFetch(t *testing.T) {
 	require.NoError(t, err, "FailPendingAttempt failed")
 
 	// Verify that the failed attempt is no longer pending.
-	pending, err = store.FetchPendingAttempts()
+	pending, err = store.fetchPendingAttempts()
 	require.NoError(t, err, "fetch after fail failed")
 	require.ElementsMatch(t, []uint64{1, 3}, pending,
 		"failed attempt should not be pending")
 
 	// Verify that GetResult now returns the correct failure.
-	result, err := store.GetResult(2)
+	result, err := store.getResult(2)
 	require.NoError(t, err, "GetResult for failed attempt failed")
 	require.NotNil(t, result, "result should not be nil")
 
@@ -535,7 +535,7 @@ func TestNetworkResultStoreFailAndFetch(t *testing.T) {
 			msg:         &lnwire.UpdateFulfillHTLC{},
 			unencrypted: true,
 		}
-		require.NoError(t, store.StoreResult(id, settleResult),
+		require.NoError(t, store.storeResult(id, settleResult),
 			"store settle result failed")
 
 		err = store.FailPendingAttempt(id, NewLinkError(
@@ -554,7 +554,7 @@ func TestNetworkResultStoreFailAndFetch(t *testing.T) {
 			msg:         &lnwire.UpdateFailHTLC{},
 			unencrypted: true,
 		}
-		require.NoError(t, store.StoreResult(id2, failResult),
+		require.NoError(t, store.storeResult(id2, failResult),
 			"store fail result failed")
 
 		err = store.FailPendingAttempt(
@@ -607,7 +607,7 @@ func TestCheckLegacyLifecycleMarker(t *testing.T) {
 	settle := func(t *testing.T, store *networkResultStore, id uint64) {
 		t.Helper()
 
-		require.NoError(t, store.StoreResult(id, &networkResult{
+		require.NoError(t, store.storeResult(id, &networkResult{
 			msg:         &lnwire.UpdateFulfillHTLC{},
 			unencrypted: true,
 		}))
@@ -624,7 +624,7 @@ func TestCheckLegacyLifecycleMarker(t *testing.T) {
 		require.False(t, markerExists(t, db))
 
 		// Records of an unmarked store are not touched.
-		_, err := store.GetResult(1)
+		_, err := store.getResult(1)
 		require.NoError(t, err)
 	})
 
@@ -688,9 +688,9 @@ func TestCheckLegacyLifecycleMarker(t *testing.T) {
 		// Nothing was changed: the marker and both records remain,
 		// and the check refuses again on the next start.
 		require.True(t, markerExists(t, db))
-		_, err = store.GetResult(3)
+		_, err = store.getResult(3)
 		require.ErrorIs(t, err, ErrAttemptResultPending)
-		_, err = store.GetResult(4)
+		_, err = store.getResult(4)
 		require.NoError(t, err)
 
 		err = checkLegacyLifecycleMarker(db)

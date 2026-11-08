@@ -125,10 +125,9 @@ func (m *mockChannelLink) MayAddOutgoingHtlc(lnwire.MilliSatoshi) error {
 	return nil
 }
 
-// mockAttemptStore is a mock implementation of the AttemptStore and
-// ExternalAttemptStore interfaces.
+// mockAttemptStore is a mock implementation of the ExternalAttemptStore
+// interface.
 type mockAttemptStore struct {
-	htlcswitch.AttemptStore
 	initErr   error
 	initCalls int
 	failErr   error

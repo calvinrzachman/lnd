@@ -86,6 +86,12 @@ type ExternalAttemptStore interface {
 	// deleting the record and its index entry together. The returned
 	// statuses are in the same order as keys.
 	DeleteAttempts(keys [][]byte) ([]DeletionStatus, error)
+
+	// FailPendingAttempt moves a registered attempt with the given
+	// internal ID from pending to failed, recording reason. It is used
+	// for attempts that fail before the switch takes ownership of them,
+	// and returns an error if the attempt is not pending.
+	FailPendingAttempt(attemptID uint64, reason *LinkError) error
 }
 
 // externalIndexEntry is the decoded value of an index entry.

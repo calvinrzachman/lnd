@@ -3238,7 +3238,7 @@ func TestSwitchGetAttemptResult(t *testing.T) {
 		isResolution: true,
 	}
 
-	err = s.attemptStore.StoreResult(paymentID, n)
+	err = s.networkResults.storeResult(paymentID, n)
 	require.NoError(t, err, "unable to store result")
 
 	// The result should be available.
@@ -6153,7 +6153,7 @@ func TestSwitchFailOrphanedAttempt(t *testing.T) {
 	// Manually initialize an attempt in the store. This simulates the "bad"
 	// state where an attempt is pending but has no corresponding circuit.
 	attemptID := uint64(1)
-	initPendingAttempt(t, s.attemptStore, attemptID)
+	initPendingAttempt(t, s.networkResults, attemptID)
 
 	// Now, call GetAttemptResult. This function returns a channel that will
 	// deliver the result.
@@ -6172,7 +6172,7 @@ func TestSwitchFailOrphanedAttempt(t *testing.T) {
 	}
 
 	// Now, simulate the fix by manually calling FailPendingAttempt.
-	err = s.attemptStore.FailPendingAttempt(attemptID, NewLinkError(
+	err = s.networkResults.FailPendingAttempt(attemptID, NewLinkError(
 		&lnwire.FailTemporaryNodeFailure{}),
 	)
 	require.NoError(t, err, "unable to fail attempt")
@@ -6209,7 +6209,9 @@ func TestSwitchOrphanCleanup(t *testing.T) {
 				// Manually initialize an attempt to simulate
 				// the state of the database if the node crashed
 				// after InitAttempt but before CommitCircuits.
-				initPendingAttempt(t, s.attemptStore, attemptID)
+				initPendingAttempt(
+					t, s.networkResults, attemptID,
+				)
 			},
 		},
 		{
@@ -6221,7 +6223,9 @@ func TestSwitchOrphanCleanup(t *testing.T) {
 				// circuit to simulate the state of the database
 				// if the node crashed after CommitCircuits but
 				// before the packet was handed off to the link.
-				initPendingAttempt(t, s.attemptStore, attemptID)
+				initPendingAttempt(
+					t, s.networkResults, attemptID,
+				)
 
 				htlc := &lnwire.UpdateAddHTLC{
 					PaymentHash: lntypes.Hash{0x01},
@@ -6291,7 +6295,7 @@ func TestSwitchOrphanCleanup(t *testing.T) {
 			// After startup, we query the store for our orphaned
 			// attempt ID. We expect to find a final FAILED
 			// result, as the janitor should have cleaned it up.
-			result, err := s2.attemptStore.GetResult(attemptID)
+			result, err := s2.networkResults.getResult(attemptID)
 			require.NoError(t, err, "expected final result")
 			require.NotNil(t, result, "result should not be nil")
 
@@ -6563,7 +6567,7 @@ func TestOnChainResolutionFailure(t *testing.T) {
 				},
 				isResolution: tt.isResolution,
 			}
-			err := s.attemptStore.StoreResult(
+			err := s.networkResults.storeResult(
 				attemptID, storedResult,
 			)
 			require.NoError(t, err, "unable to store result")

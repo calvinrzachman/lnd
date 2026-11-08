@@ -513,7 +513,7 @@ func (s *Server) failPendingAttempt(attemptID uint64, context string) {
 	// The original, more specific error is returned to the client.
 	failReason := &lnwire.FailTemporaryNodeFailure{}
 
-	err := s.cfg.AttemptStore.FailPendingAttempt(
+	err := s.cfg.ExternalAttemptStore.FailPendingAttempt(
 		attemptID, htlcswitch.NewLinkError(failReason),
 	)
 	if err != nil {

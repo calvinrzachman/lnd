@@ -36,12 +36,9 @@ type Config struct {
 	// be dispatched.
 	HtlcDispatcher routing.PaymentAttemptDispatcher
 
-	// AttemptStore provides the means by which the RPC server can manage
-	// the state of an HTLC attempt, including initializing and failing it.
-	AttemptStore htlcswitch.AttemptStore
-
 	// ExternalAttemptStore maps the idempotency key a client attaches to
-	// an attempt to the internal attempt ID the switch allocated for it.
+	// an attempt to the internal attempt ID the switch allocated for it,
+	// and manages the state of the attempt, including failing it.
 	ExternalAttemptStore htlcswitch.ExternalAttemptStore
 
 	// NextAttemptID allocates internal attempt IDs. It MUST be the same

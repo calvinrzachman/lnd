@@ -180,7 +180,7 @@ func TestSendOnion(t *testing.T) {
 
 				// Mock a duplicate error from the attempt
 				// store.
-				store, ok := s.cfg.AttemptStore.(*mockAttemptStore)
+				store, ok := s.cfg.ExternalAttemptStore.(*mockAttemptStore)
 				require.True(t, ok)
 				store.initErr = htlcswitch.ErrPaymentIDAlreadyExists
 			},
@@ -196,7 +196,7 @@ func TestSendOnion(t *testing.T) {
 			setup: func(t *testing.T, s *Server,
 				req *SendOnionRequest) {
 
-				store, ok := s.cfg.AttemptStore.(*mockAttemptStore)
+				store, ok := s.cfg.ExternalAttemptStore.(*mockAttemptStore)
 				require.True(t, ok)
 				store.initErr = htlcswitch.ErrAttemptFingerprintMismatch
 			},
@@ -211,7 +211,7 @@ func TestSendOnion(t *testing.T) {
 
 				// The registered attempt may be in flight, so
 				// it must not be failed either.
-				store, ok := s.cfg.AttemptStore.(*mockAttemptStore)
+				store, ok := s.cfg.ExternalAttemptStore.(*mockAttemptStore)
 				require.True(t, ok)
 				require.Zero(t, store.failCalls,
 					"mismatch must not fail the attempt")
@@ -249,7 +249,7 @@ func TestSendOnion(t *testing.T) {
 				require.True(t, ok)
 				payer.sendErr = linkErr
 
-				store, ok := s.cfg.AttemptStore.(*mockAttemptStore)
+				store, ok := s.cfg.ExternalAttemptStore.(*mockAttemptStore)
 				require.True(t, ok)
 				store.failErr = errors.New("store unavailable")
 			},
@@ -265,7 +265,7 @@ func TestSendOnion(t *testing.T) {
 				require.True(t, ok)
 				payer.sendErr = errors.New("internal error")
 
-				store, ok := s.cfg.AttemptStore.(*mockAttemptStore)
+				store, ok := s.cfg.ExternalAttemptStore.(*mockAttemptStore)
 				require.True(t, ok)
 				store.failErr = errors.New("store unavailable")
 			},
@@ -350,7 +350,7 @@ func TestSendOnion(t *testing.T) {
 			setup: func(t *testing.T, s *Server,
 				req *SendOnionRequest) {
 
-				store, ok := s.cfg.AttemptStore.(*mockAttemptStore)
+				store, ok := s.cfg.ExternalAttemptStore.(*mockAttemptStore)
 				require.True(t, ok)
 				store.initErr = htlcswitch.ErrAmbiguousAttemptInit
 			},
@@ -364,7 +364,7 @@ func TestSendOnion(t *testing.T) {
 				// Mock a generic, unexpected error from
 				// InitAttempt to test the defensive fallback
 				// error path.
-				store, ok := s.cfg.AttemptStore.(*mockAttemptStore)
+				store, ok := s.cfg.ExternalAttemptStore.(*mockAttemptStore)
 				require.True(t, ok)
 				store.initErr = errors.New("unexpected DB error")
 			},
@@ -399,7 +399,6 @@ func TestSendOnion(t *testing.T) {
 			store := &mockAttemptStore{}
 			server, _, err := New(&Config{
 				HtlcDispatcher:       &mockPayer{},
-				AttemptStore:         store,
 				ExternalAttemptStore: store,
 			})
 			require.NoError(t, err)
@@ -469,7 +468,6 @@ func TestSendOnionInvalidKey(t *testing.T) {
 			payer := &mockPayer{}
 			server, _, err := New(&Config{
 				HtlcDispatcher:       payer,
-				AttemptStore:         store,
 				ExternalAttemptStore: store,
 			})
 			require.NoError(t, err)
@@ -1240,7 +1238,6 @@ func TestDeleteAttempts(t *testing.T) {
 
 			server, _, err := New(&Config{
 				HtlcDispatcher:       &mockPayer{},
-				AttemptStore:         mockStore,
 				ExternalAttemptStore: mockStore,
 			})
 			require.NoError(t, err)
@@ -1736,7 +1733,6 @@ func TestCreateSubServerRequiredDeps(t *testing.T) {
 			HtlcDispatcher:       &mockPayer{},
 			ChannelInfoAccessor:  &mockChannelInfoAccessor{},
 			RouteProcessor:       &mockRouteProcessor{},
-			AttemptStore:         store,
 			ExternalAttemptStore: store,
 			NextAttemptID: func() (uint64, error) {
 				return 1, nil

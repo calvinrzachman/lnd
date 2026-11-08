@@ -341,10 +341,6 @@ func (s *subRPCServerConfigs) PopulateDependencies(cfg *Config,
 				reflect.ValueOf(routerBackend),
 			)
 
-			subCfgValue.FieldByName("AttemptStore").Set(
-				reflect.ValueOf(htlcSwitch.AttemptStore()),
-			)
-
 			externalStore := htlcSwitch.ExternalAttemptStore()
 			subCfgValue.FieldByName("ExternalAttemptStore").Set(
 				reflect.ValueOf(externalStore),

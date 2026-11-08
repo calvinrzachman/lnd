@@ -270,9 +270,9 @@ func putPendingPlaceholder(tx kvdb.RwTx, attemptID uint64) error {
 	return bucket.Put(attemptIDBytes[:], b.Bytes())
 }
 
-// StoreResult stores the networkResult for the given attemptID, and notifies
+// storeResult stores the networkResult for the given attemptID, and notifies
 // any subscribers.
-func (store *networkResultStore) StoreResult(attemptID uint64,
+func (store *networkResultStore) storeResult(attemptID uint64,
 	result *networkResult) error {
 
 	// We get a mutex for this attempt ID. This is needed to ensure
@@ -283,7 +283,7 @@ func (store *networkResultStore) StoreResult(attemptID uint64,
 
 	log.Debugf("Storing result for attemptID=%v", attemptID)
 
-	if err := store.storeResult(attemptID, result); err != nil {
+	if err := store.persistResult(attemptID, result); err != nil {
 		return err
 	}
 
@@ -292,8 +292,8 @@ func (store *networkResultStore) StoreResult(attemptID uint64,
 	return nil
 }
 
-// storeResult persists the given result to the database.
-func (store *networkResultStore) storeResult(attemptID uint64,
+// persistResult persists the given result to the database.
+func (store *networkResultStore) persistResult(attemptID uint64,
 	result *networkResult) error {
 
 	var b bytes.Buffer
@@ -330,9 +330,9 @@ func (store *networkResultStore) notifySubscribers(attemptID uint64,
 	store.resultsMtx.Unlock()
 }
 
-// SubscribeResult is used to get the HTLC attempt result for the given attempt
+// subscribeResult is used to get the HTLC attempt result for the given attempt
 // ID.  It returns a channel on which the result will be delivered when ready.
-func (store *networkResultStore) SubscribeResult(attemptID uint64) (
+func (store *networkResultStore) subscribeResult(attemptID uint64) (
 	<-chan *networkResult, error) {
 
 	// We get a mutex for this payment ID. This is needed to ensure
@@ -400,14 +400,14 @@ func (store *networkResultStore) SubscribeResult(attemptID uint64) (
 	return resultChan, nil
 }
 
-// GetResult attempts to immediately fetch the *final* network result for the
+// getResult attempts to immediately fetch the *final* network result for the
 // given attempt ID from the store.
 //
 // NOTE: This method will return ErrAttemptResultPending for attempts
 // that have been initialized via InitAttempt but for which a final result
 // (settle/fail) has not yet been stored. ErrPaymentIDNotFound is returned
 // for attempts that are unknown.
-func (store *networkResultStore) GetResult(pid uint64) (
+func (store *networkResultStore) getResult(pid uint64) (
 	*networkResult, error) {
 
 	var result *networkResult
@@ -457,7 +457,7 @@ func fetchResult(tx kvdb.RTx, pid uint64) (*networkResult, error) {
 	return deserializeNetworkResult(r)
 }
 
-// CleanStore removes all entries from the store, except the payment IDs given
+// cleanStore removes all entries from the store, except the payment IDs given
 // and the attempts named in the external attempt index. Indexed attempts
 // belong to an external dispatcher, which deletes them by key itself.
 //
@@ -467,7 +467,7 @@ func fetchResult(tx kvdb.RTx, pid uint64) (*networkResult, error) {
 // end up being deleted. Externally keyed attempts need no such care: their
 // record and index entry are written in one transaction, and the index is
 // read in the same transaction as the deletes below.
-func (store *networkResultStore) CleanStore(keep map[uint64]struct{}) error {
+func (store *networkResultStore) cleanStore(keep map[uint64]struct{}) error {
 	var unreadable []unreadableIndexEntry
 	err := kvdb.Update(store.backend, func(tx kvdb.RwTx) error {
 		indexed, badEntries, err := fetchIndexedAttemptIDs(tx)
@@ -592,7 +592,7 @@ func (store *networkResultStore) CleanStore(keep map[uint64]struct{}) error {
 	return err
 }
 
-// pruneIndividually reports whether CleanStore should delete the removed
+// pruneIndividually reports whether cleanStore should delete the removed
 // records one by one rather than drop the bucket and rewrite the kept ones.
 // Deleting costs one write per removed record, and rewriting costs one drop
 // plus one write per kept record.
@@ -600,11 +600,11 @@ func pruneIndividually(removed, kept int) bool {
 	return removed <= kept
 }
 
-// FetchPendingAttempts returns a list of all attempt IDs that are currently in
+// fetchPendingAttempts returns a list of all attempt IDs that are currently in
 // the pending state.
 //
 // NOTE: This function is NOT safe for concurrent access.
-func (store *networkResultStore) FetchPendingAttempts() ([]uint64, error) {
+func (store *networkResultStore) fetchPendingAttempts() ([]uint64, error) {
 	var pending []uint64
 	err := kvdb.View(store.backend, func(tx kvdb.RTx) error {
 		bucket := tx.ReadBucket(networkResultStoreBucketKey)
@@ -628,7 +628,7 @@ func (store *networkResultStore) FetchPendingAttempts() ([]uint64, error) {
 			if err != nil {
 				// If we can't deserialize, we'll log it and
 				// continue. The result will be removed by a
-				// call to CleanStore.
+				// call to cleanStore.
 				log.Warnf("Unable to deserialize result for "+
 					"key %x: %v", k, err)
 

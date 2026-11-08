@@ -340,12 +340,12 @@ type Switch struct {
 	// service was initialized with.
 	cfg *Config
 
-	// attemptStore stores the results of payments initiated by the user.
+	// networkResults stores the results of payments initiated by the user.
 	// The store is used to later look up the payments and notify the
 	// user of the result when they are complete. Each payment attempt
 	// should be given a unique integer ID when it is created, otherwise
 	// results might be overwritten.
-	attemptStore *networkResultStore
+	networkResults *networkResultStore
 
 	// circuits is storage for payment circuits which are used to
 	// forward the settle/fail htlc updates back to the add htlc initiator.
@@ -476,8 +476,6 @@ func New(cfg Config, currentHeight uint32) (*Switch, error) {
 		return nil, err
 	}
 
-	networkResultStore := newNetworkResultStore(cfg.DB)
-
 	s := &Switch{
 		bestHeight:        currentHeight,
 		cfg:               &cfg,
@@ -487,7 +485,7 @@ func New(cfg Config, currentHeight uint32) (*Switch, error) {
 		interfaceIndex:    make(map[[33]byte]map[lnwire.ChannelID]ChannelLink),
 		pendingLinkIndex:  make(map[lnwire.ChannelID]ChannelLink),
 		linkStopIndex:     make(map[lnwire.ChannelID]chan struct{}),
-		attemptStore:      networkResultStore,
+		networkResults:    newNetworkResultStore(cfg.DB),
 		htlcPlex:          make(chan *plexPacket),
 		chanCloseRequests: make(chan *ChanClose),
 		resolutionMsgs:    make(chan *resolutionMsg),
@@ -545,7 +543,7 @@ func (s *Switch) ProcessContractResolution(msg contractcourt.ResolutionMsg) erro
 // HasAttemptResult reads the network result store to fetch the specified
 // attempt. Returns true if the attempt result exists.
 func (s *Switch) HasAttemptResult(attemptID uint64) (bool, error) {
-	_, err := s.attemptStore.GetResult(attemptID)
+	_, err := s.networkResults.getResult(attemptID)
 	if err == nil {
 		return true, nil
 	}
@@ -587,7 +585,7 @@ func (s *Switch) GetAttemptResult(attemptID uint64, paymentHash lntypes.Hash,
 	// is already available.
 	// Assumption: no one will add this attempt ID other than the caller.
 	if s.circuits.LookupCircuit(inKey) == nil {
-		res, err := s.attemptStore.GetResult(attemptID)
+		res, err := s.networkResults.getResult(attemptID)
 		switch {
 		// We have a final result, we can send it immediately.
 		case err == nil:
@@ -608,12 +606,12 @@ func (s *Switch) GetAttemptResult(attemptID uint64, paymentHash lntypes.Hash,
 	}
 
 	// If nChan is still nil, it means we need to subscribe. This happens
-	// if the circuit was found, or if GetResult told us the result is not
+	// if the circuit was found, or if getResult told us the result is not
 	// yet available.
 	if nChan == nil {
 		// The HTLC was committed to the circuits, subscribe for a
 		// result.
-		nChan, err = s.attemptStore.SubscribeResult(attemptID)
+		nChan, err = s.networkResults.subscribeResult(attemptID)
 		if err != nil {
 			return nil, err
 		}
@@ -665,18 +663,13 @@ func (s *Switch) GetAttemptResult(attemptID uint64, paymentHash lntypes.Hash,
 // preiodically to let the switch clean up payment results that we have
 // handled.
 func (s *Switch) CleanStore(keepPids map[uint64]struct{}) error {
-	return s.attemptStore.CleanStore(keepPids)
-}
-
-// AttemptStore provides access to the Switch's underlying attempt store.
-func (s *Switch) AttemptStore() AttemptStore {
-	return s.attemptStore
+	return s.networkResults.cleanStore(keepPids)
 }
 
 // ExternalAttemptStore provides access to the index of attempts dispatched by
 // an external router.
 func (s *Switch) ExternalAttemptStore() ExternalAttemptStore {
-	return s.attemptStore
+	return s.networkResults
 }
 
 // SendHTLC is used by other subsystems which aren't belong to htlc switch
@@ -1103,7 +1096,7 @@ func (s *Switch) handleLocalResponse(pkt *htlcPacket) {
 
 	// Store the result to the db. This will also notify subscribers about
 	// the result.
-	if err := s.attemptStore.StoreResult(attemptID, n); err != nil {
+	if err := s.networkResults.storeResult(attemptID, n); err != nil {
 		log.Errorf("Unable to store attempt result for pid=%v: %v",
 			attemptID, err)
 		return
@@ -2050,7 +2043,7 @@ func (s *Switch) reforwardFwdResponses() error {
 // exists in the circuit map. This can happen if the node crashes after
 // initializing an attempt but before committing the circuit.
 func (s *Switch) cleanupOrphanedAttempts() error {
-	pending, err := s.attemptStore.FetchPendingAttempts()
+	pending, err := s.networkResults.fetchPendingAttempts()
 	if err != nil {
 		return fmt.Errorf("failed to fetch pending attempts: %w", err)
 	}
@@ -2078,7 +2071,7 @@ func (s *Switch) cleanupOrphanedAttempts() error {
 			log.Warnf("Found orphaned HTLC attempt with id %d "+
 				"(no circuit), failing", attemptID)
 
-			err := s.attemptStore.FailPendingAttempt(
+			err := s.networkResults.FailPendingAttempt(
 				attemptID,
 				NewLinkError(
 					&lnwire.FailTemporaryNodeFailure{},
@@ -2105,7 +2098,7 @@ func (s *Switch) cleanupOrphanedAttempts() error {
 			log.Warnf("Found orphaned HTLC attempt with id %d "+
 				"(half-open circuit), failing", attemptID)
 
-			err := s.attemptStore.FailPendingAttempt(
+			err := s.networkResults.FailPendingAttempt(
 				attemptID,
 				NewLinkError(
 					&lnwire.FailTemporaryNodeFailure{},
