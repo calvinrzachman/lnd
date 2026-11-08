@@ -9,7 +9,6 @@ import (
 	"hash"
 	"slices"
 
-	"github.com/lightningnetwork/lnd/lntypes"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -20,31 +19,44 @@ import (
 // registered before it look like mismatches, which fails closed.
 const fingerprintVersion byte = 0
 
+const (
+	// minAttemptKeyLen is the shortest attempt key the server accepts.
+	minAttemptKeyLen = 16
+
+	// maxAttemptKeyLen is the longest attempt key the server accepts.
+	maxAttemptKeyLen = 64
+)
+
 // keyedAttempt is a message that names an attempt by the client's attempt
 // key.
 type keyedAttempt interface {
-	GetPaymentHash() []byte
-	GetAttemptId() uint64
+	GetKey() *AttemptKey
 }
 
-// attemptKey returns the idempotency key that m names: the 32-byte payment
-// hash followed by the big-endian attempt ID.
-//
-// NOTE: The key's wire shape is defined only here and in switch.proto, so a
-// change of shape is confined to the two.
+// attemptKey returns the idempotency key that m names. The key is the
+// client's opaque bytes, which must be between minAttemptKeyLen and
+// maxAttemptKeyLen bytes long.
 func attemptKey(m keyedAttempt) ([]byte, error) {
-	paymentHash := m.GetPaymentHash()
-	if len(paymentHash) != lntypes.HashSize {
-		return nil, status.Errorf(codes.InvalidArgument,
-			"invalid payment_hash length %d, expected %d",
-			len(paymentHash), lntypes.HashSize)
+	return validateAttemptKey(m.GetKey())
+}
+
+// validateAttemptKey returns the bytes of k if k is set and within the length
+// bounds, and an InvalidArgument error otherwise.
+func validateAttemptKey(k *AttemptKey) ([]byte, error) {
+	if k == nil {
+		return nil, status.Error(codes.InvalidArgument,
+			"attempt key is required")
 	}
 
-	key := make([]byte, lntypes.HashSize+8)
-	copy(key, paymentHash)
-	binary.BigEndian.PutUint64(key[lntypes.HashSize:], m.GetAttemptId())
+	id := k.GetId()
+	if len(id) < minAttemptKeyLen || len(id) > maxAttemptKeyLen {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"invalid attempt key length %d, expected %d to %d "+
+				"bytes", len(id), minAttemptKeyLen,
+			maxAttemptKeyLen)
+	}
 
-	return key, nil
+	return id, nil
 }
 
 // requestFingerprint returns a digest of the fields of a SendOnion request

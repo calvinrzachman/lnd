@@ -24,11 +24,19 @@ type SwitchClient interface {
 	//retry it after a timeout or disconnection, reusing the same attempt key so
 	//the server recognises the retry rather than sending a second HTLC.
 	//
-	//An attempt is named by its key, the pair (payment_hash, attempt_id), which
-	//the client chooses. The server maps the key to an internal attempt of its
-	//own, so the key only needs to be unique per payment hash and never collides
-	//with attempts made by lnd's own router. A retry MUST resend the exact same
-	//request, including the same onion bytes.
+	//An attempt is named by its AttemptKey, which the client chooses. The
+	//server maps the key to an internal attempt of its own, so the key never
+	//collides with attempts made by lnd's own router. The client MUST follow
+	//four rules:
+	//
+	//1. The key is unique among all callers of this node and is never reused.
+	//2. The key is persisted, with the request, before the first SendOnion.
+	//3. A retry repeats the same key and the exact same request, including the
+	//same onion bytes.
+	//4. The key is 16 to 64 bytes long.
+	//
+	//The server enforces only the length. A retry under the same key whose
+	//request differs in a field that defines the HTLC is answered Mismatch.
 	//
 	//The outcome is carried in the response, never in a gRPC error. Exactly one
 	//of Accepted, Rejected, Ambiguous or Mismatch is set, and each documents the
@@ -42,7 +50,8 @@ type SwitchClient interface {
 	//response was lost look identical from outside.
 	//
 	//A malformed request (InvalidArgument) may also record the attempt as
-	//failed, so resend a corrected request under a new attempt key.
+	//failed, so resend a corrected request under a new attempt key. A request
+	//whose key is missing or out of bounds records nothing.
 	SendOnion(ctx context.Context, in *SendOnionRequest, opts ...grpc.CallOption) (*SendOnionResponse, error)
 	//
 	//TrackOnion allows callers to query whether or not a payment dispatched via
@@ -71,7 +80,7 @@ type SwitchClient interface {
 	//decryption.
 	//
 	//3. QUERY FAILURE (gRPC error status): The query itself could not be
-	//completed. NotFound indicates the payment ID is unknown. Unavailable
+	//completed. NotFound indicates the attempt key is unknown. Unavailable
 	//signals the switch is shutting down. Canceled or DeadlineExceeded
 	//reflects client-side timeouts. These are safe to retry.
 	TrackOnion(ctx context.Context, in *TrackOnionRequest, opts ...grpc.CallOption) (*TrackOnionResponse, error)
@@ -81,8 +90,8 @@ type SwitchClient interface {
 	//
 	//DeleteAttempts removes terminal (settled or failed) payment attempt records
 	//from the server's attempt store. The client explicitly names the attempts
-	//to delete by their (payment_hash, attempt_id) key, enabling online garbage
-	//collection of completed attempt data.
+	//to delete by their attempt keys, enabling online garbage collection of
+	//completed attempt data.
 	//
 	//The server processes each attempt independently and reports per-attempt
 	//results. Pending (in-flight) attempts are never deleted; they are reported
@@ -166,11 +175,19 @@ type SwitchServer interface {
 	//retry it after a timeout or disconnection, reusing the same attempt key so
 	//the server recognises the retry rather than sending a second HTLC.
 	//
-	//An attempt is named by its key, the pair (payment_hash, attempt_id), which
-	//the client chooses. The server maps the key to an internal attempt of its
-	//own, so the key only needs to be unique per payment hash and never collides
-	//with attempts made by lnd's own router. A retry MUST resend the exact same
-	//request, including the same onion bytes.
+	//An attempt is named by its AttemptKey, which the client chooses. The
+	//server maps the key to an internal attempt of its own, so the key never
+	//collides with attempts made by lnd's own router. The client MUST follow
+	//four rules:
+	//
+	//1. The key is unique among all callers of this node and is never reused.
+	//2. The key is persisted, with the request, before the first SendOnion.
+	//3. A retry repeats the same key and the exact same request, including the
+	//same onion bytes.
+	//4. The key is 16 to 64 bytes long.
+	//
+	//The server enforces only the length. A retry under the same key whose
+	//request differs in a field that defines the HTLC is answered Mismatch.
 	//
 	//The outcome is carried in the response, never in a gRPC error. Exactly one
 	//of Accepted, Rejected, Ambiguous or Mismatch is set, and each documents the
@@ -184,7 +201,8 @@ type SwitchServer interface {
 	//response was lost look identical from outside.
 	//
 	//A malformed request (InvalidArgument) may also record the attempt as
-	//failed, so resend a corrected request under a new attempt key.
+	//failed, so resend a corrected request under a new attempt key. A request
+	//whose key is missing or out of bounds records nothing.
 	SendOnion(context.Context, *SendOnionRequest) (*SendOnionResponse, error)
 	//
 	//TrackOnion allows callers to query whether or not a payment dispatched via
@@ -213,7 +231,7 @@ type SwitchServer interface {
 	//decryption.
 	//
 	//3. QUERY FAILURE (gRPC error status): The query itself could not be
-	//completed. NotFound indicates the payment ID is unknown. Unavailable
+	//completed. NotFound indicates the attempt key is unknown. Unavailable
 	//signals the switch is shutting down. Canceled or DeadlineExceeded
 	//reflects client-side timeouts. These are safe to retry.
 	TrackOnion(context.Context, *TrackOnionRequest) (*TrackOnionResponse, error)
@@ -223,8 +241,8 @@ type SwitchServer interface {
 	//
 	//DeleteAttempts removes terminal (settled or failed) payment attempt records
 	//from the server's attempt store. The client explicitly names the attempts
-	//to delete by their (payment_hash, attempt_id) key, enabling online garbage
-	//collection of completed attempt data.
+	//to delete by their attempt keys, enabling online garbage collection of
+	//completed attempt data.
 	//
 	//The server processes each attempt independently and reports per-attempt
 	//results. Pending (in-flight) attempts are never deleted; they are reported

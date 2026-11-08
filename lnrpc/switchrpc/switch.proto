@@ -15,11 +15,19 @@ service Switch {
     retry it after a timeout or disconnection, reusing the same attempt key so
     the server recognises the retry rather than sending a second HTLC.
 
-    An attempt is named by its key, the pair (payment_hash, attempt_id), which
-    the client chooses. The server maps the key to an internal attempt of its
-    own, so the key only needs to be unique per payment hash and never collides
-    with attempts made by lnd's own router. A retry MUST resend the exact same
-    request, including the same onion bytes.
+    An attempt is named by its AttemptKey, which the client chooses. The
+    server maps the key to an internal attempt of its own, so the key never
+    collides with attempts made by lnd's own router. The client MUST follow
+    four rules:
+
+    1. The key is unique among all callers of this node and is never reused.
+    2. The key is persisted, with the request, before the first SendOnion.
+    3. A retry repeats the same key and the exact same request, including the
+    same onion bytes.
+    4. The key is 16 to 64 bytes long.
+
+    The server enforces only the length. A retry under the same key whose
+    request differs in a field that defines the HTLC is answered Mismatch.
 
     The outcome is carried in the response, never in a gRPC error. Exactly one
     of Accepted, Rejected, Ambiguous or Mismatch is set, and each documents the
@@ -33,7 +41,8 @@ service Switch {
     response was lost look identical from outside.
 
     A malformed request (InvalidArgument) may also record the attempt as
-    failed, so resend a corrected request under a new attempt key.
+    failed, so resend a corrected request under a new attempt key. A request
+    whose key is missing or out of bounds records nothing.
     */
     rpc SendOnion (SendOnionRequest) returns (SendOnionResponse);
 
@@ -64,7 +73,7 @@ service Switch {
     decryption.
 
     3. QUERY FAILURE (gRPC error status): The query itself could not be
-    completed. NotFound indicates the payment ID is unknown. Unavailable
+    completed. NotFound indicates the attempt key is unknown. Unavailable
     signals the switch is shutting down. Canceled or DeadlineExceeded
     reflects client-side timeouts. These are safe to retry.
     */
@@ -78,8 +87,8 @@ service Switch {
     /*
     DeleteAttempts removes terminal (settled or failed) payment attempt records
     from the server's attempt store. The client explicitly names the attempts
-    to delete by their (payment_hash, attempt_id) key, enabling online garbage
-    collection of completed attempt data.
+    to delete by their attempt keys, enabling online garbage collection of
+    completed attempt data.
 
     The server processes each attempt independently and reports per-attempt
     results. Pending (in-flight) attempts are never deleted; they are reported
@@ -104,14 +113,28 @@ service Switch {
         returns (DisableRemoteRouterResponse);
 }
 
+// AttemptKey is the identity of one attempt. The client mints it once,
+// persists it with the request before the first SendOnion, resends it
+// unchanged on every retry of that request, and never reuses it. The same key
+// names the attempt in SendOnion, TrackOnion and DeleteAttempts.
+//
+// All switchrpc callers share one attempt namespace, so a key must be unique
+// among all callers of this node. The server does not isolate callers from
+// one another: any caller can send, track or delete any attempt whose key it
+// knows.
+message AttemptKey {
+    // The opaque key bytes, 16 to 64 bytes long. The server compares them for
+    // equality only. A random or time-ordered 16-byte value, such as a UUID,
+    // is a good choice.
+    bytes id = 1;
+}
+
 message SendOnionRequest {
     // The raw onion packet to be sent across the network.
     bytes onion_blob = 1;
 
-    // The attempt ID chosen by the caller. Together with payment_hash it forms
-    // the attempt key, which names this attempt in SendOnion, TrackOnion and
-    // DeleteAttempts.
-    uint64 attempt_id = 2;
+    // The key that names this attempt. It is required.
+    AttemptKey key = 11;
 
     // The first hop's public key where the onion will be sent.
     // The first hop must be specified either by channel ID or public key.
@@ -132,8 +155,8 @@ message SendOnionRequest {
     // described by the onion.
     uint32 timelock = 6;
 
-    // The payment hash associated with the HTLC. This is needed for tracking
-    // and debugging purposes.
+    // The payment hash of the HTLC. It is part of the request a retry must
+    // repeat unchanged.
     bytes payment_hash = 7;
 
     // The optional blinding point to use when constructing the HTLC.
@@ -228,8 +251,8 @@ message Ambiguous {
 
 // Mismatch means the attempt key is already registered for a request that
 // differs from this one in a field that defines the HTLC, such as the onion,
-// amount or first hop. Nothing was dispatched for this request, and the
-// registered attempt is untouched and may be in flight.
+// payment hash, amount or first hop. Nothing was dispatched for this request,
+// and the registered attempt is untouched and may be in flight.
 //
 // This indicates a client bug, such as a reused key or a rebuilt onion. The
 // caller MUST stop sending under this key, MUST NOT fail or reroute the
@@ -239,14 +262,8 @@ message Mismatch {
 }
 
 message TrackOnionRequest {
-    // The payment hash associated with the HTLC. This is needed for tracking
-    // and debugging purposes.
-    bytes payment_hash = 1;
-
-    // The attempt ID chosen by the caller. Together with payment_hash it forms
-    // the attempt key, which names this attempt in SendOnion, TrackOnion and
-    // DeleteAttempts.
-    uint64 attempt_id = 2;
+    // The key the attempt was sent with. It is required.
+    AttemptKey key = 5;
 
     // Optional: The session key that was used to construct the onion packet.
     // This is required by the server to decrypt any failure message.
@@ -383,43 +400,27 @@ message BuildOnionResponse {
     repeated bytes hop_pubkeys = 3;
 }
 
-// AttemptRef names an attempt by the idempotency key it was dispatched with.
-message AttemptRef {
-    // The payment hash the attempt was dispatched with.
-    bytes payment_hash = 1;
-
-    // The attempt ID the attempt was dispatched with.
-    uint64 attempt_id = 2;
-}
-
 message DeleteAttemptsRequest {
-    // Attempts used to be named by attempt ID alone. An attempt ID is only
-    // unique together with its payment hash, so the field was replaced.
-    reserved 1;
-    reserved "attempt_ids";
-
-    // The attempts to delete from the server's attempt store. Only terminal
-    // (settled or failed) attempts will be deleted. Pending (in-flight)
-    // attempts are skipped and reported with a DELETION_PENDING status.
-    repeated AttemptRef attempts = 2;
+    // The keys of the attempts to delete from the server's attempt store.
+    // Only terminal (settled or failed) attempts will be deleted. Pending
+    // (in-flight) attempts are skipped and reported with a DELETION_PENDING
+    // status.
+    repeated AttemptKey keys = 3;
 }
 
 message DeleteAttemptsResponse {
-    // Per-attempt deletion outcomes. The order corresponds to the order of
-    // attempts in the request.
+    // Per-attempt deletion outcomes, in the order of the keys in the request.
+    // A key repeated in the request is reported once.
     repeated AttemptDeletionResult results = 1;
 }
 
 // AttemptDeletionResult reports the outcome of deleting a single attempt.
 message AttemptDeletionResult {
-    // The attempt ID this result corresponds to.
-    uint64 attempt_id = 1;
+    // The key of the attempt this result corresponds to.
+    AttemptKey key = 4;
 
     // The outcome of the deletion for this attempt.
     AttemptDeletionStatus status = 2;
-
-    // The payment hash this result corresponds to.
-    bytes payment_hash = 3;
 }
 
 // AttemptDeletionStatus describes the outcome of a single attempt deletion.
@@ -430,8 +431,8 @@ enum AttemptDeletionStatus {
     // The attempt is still in-flight (pending) and cannot be safely deleted.
     DELETION_PENDING = 1;
 
-    // The attempt ID was not found in the store. This may indicate a client
-    // bug (wrong ID, wrong backend) since the server has no record of this
+    // The attempt key was not found in the store. This may indicate a client
+    // bug (wrong key, wrong backend) since the server has no record of this
     // attempt ever existing.
     DELETION_NOT_FOUND = 2;
 

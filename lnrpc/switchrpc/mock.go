@@ -124,6 +124,7 @@ func (m *mockChannelLink) MayAddOutgoingHtlc(lnwire.MilliSatoshi) error {
 type mockAttemptStore struct {
 	htlcswitch.AttemptStore
 	initErr    error
+	initCalls  int
 	failErr    error
 	failCalls  int
 	lookupErr  error
@@ -135,9 +136,12 @@ type mockAttemptStore struct {
 	deleteByKey map[string]htlcswitch.DeletionStatus
 }
 
-// InitExternalAttempt returns the mocked initErr with internal ID 1.
+// InitExternalAttempt records the call and returns the mocked initErr with
+// internal ID 1.
 func (m *mockAttemptStore) InitExternalAttempt(key []byte,
 	fingerprint [32]byte, nextID func() (uint64, error)) (uint64, error) {
+
+	m.initCalls++
 
 	return 1, m.initErr
 }

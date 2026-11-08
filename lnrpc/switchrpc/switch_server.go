@@ -247,8 +247,8 @@ func (r *ServerShell) CreateSubServer(
 //
 // To safely handle network failures, a client can and should retry this RPC
 // after a timeout or disconnection. Retries MUST use the exact same request,
-// named by the same (payment_hash, attempt_id) key, to allow the server to
-// correctly detect duplicate requests.
+// named by the same attempt key, to allow the server to correctly detect
+// duplicate requests.
 //
 // The server guarantees safety against duplicate attempts by following a
 // "write-ahead" style approach. Upon receiving a request, it first writes a
@@ -283,7 +283,7 @@ func (s *Server) SendOnion(_ context.Context,
 	req *SendOnionRequest) (*SendOnionResponse, error) {
 
 	// First, we initialize the attempt in our persistent store. This serves
-	// as a durable record of our intent to send and gates the attempt id
+	// as a durable record of our intent to send and gates the attempt key
 	// for concurrent callers, allowing them to safely retry.
 	//
 	// NOTE: This durable write MUST happen before any dynamic validation
@@ -296,6 +296,10 @@ func (s *Server) SendOnion(_ context.Context,
 	// The client names the attempt with its own idempotency key. We map
 	// that key to an internal attempt ID from our own sequencer, and use
 	// the internal ID for everything inside the switch.
+	//
+	// The key is validated before the idempotency lookup, since a request
+	// without a valid key has nothing to record a failure under. It is
+	// rejected without touching the store.
 	key, err := attemptKey(req)
 	if err != nil {
 		return nil, err
@@ -310,8 +314,8 @@ func (s *Server) SendOnion(_ context.Context,
 		// acknowledgement rather than a failure: the caller should stop
 		// retrying and track the attempt.
 		if errors.Is(initErr, htlcswitch.ErrPaymentIDAlreadyExists) {
-			log.Debugf("Attempt id=%v already exists as internal "+
-				"attempt %d", req.AttemptId, attemptID)
+			log.Debugf("Attempt key=%x already exists as internal "+
+				"attempt %d", key, attemptID)
 
 			return acknowledged(), nil
 		}
@@ -321,17 +325,17 @@ func (s *Server) SendOnion(_ context.Context,
 		// verdict on it nor dispatch anything.
 		mismatch := htlcswitch.ErrAttemptFingerprintMismatch
 		if errors.Is(initErr, mismatch) {
-			log.Errorf("Attempt id=%v for payment=%x is "+
+			log.Errorf("Attempt key=%x for payment=%x is "+
 				"registered for a different request",
-				req.AttemptId, req.PaymentHash)
+				key, req.PaymentHash)
 
 			return keyMismatch(), nil
 		}
 
 		// We cannot tell whether the record was written, so the caller
 		// must retry to resolve it.
-		log.Errorf("Unable to initialize attempt id=%d: %v",
-			req.AttemptId, initErr)
+		log.Errorf("Unable to initialize attempt key=%x: %v",
+			key, initErr)
 
 		return ambiguous(initErr), nil
 	}
@@ -347,7 +351,7 @@ func (s *Server) SendOnion(_ context.Context,
 	)
 	if validationErr != nil {
 		log.Warnf("Validation failed for attempt %d: %v. Failing "+
-			"pending attempt.", req.AttemptId, validationErr)
+			"pending attempt.", attemptID, validationErr)
 
 		s.failPendingAttempt(attemptID, "validation failure")
 
@@ -355,15 +359,15 @@ func (s *Server) SendOnion(_ context.Context,
 	}
 	if rejection != nil {
 		log.Warnf("Cannot serve attempt %d: %v. Failing pending "+
-			"attempt.", req.AttemptId, rejection)
+			"attempt.", attemptID, rejection)
 
-		s.failPendingAttempt(req.AttemptId, "pre-dispatch rejection")
+		s.failPendingAttempt(attemptID, "pre-dispatch rejection")
 
 		return rejected(rejection), nil
 	}
 
-	log.Debugf("Dispatching HTLC attempt(id=%v, amt=%v) for payment=%x "+
-		"via channel=%s", req.AttemptId, req.Amount,
+	log.Debugf("Dispatching HTLC attempt(id=%v, key=%x, amt=%v) for "+
+		"payment=%x via channel=%s", attemptID, key, req.Amount,
 		htlcAdd.PaymentHash, chanID)
 
 	// With the attempt initialized, we now dispatch the HTLC.
@@ -390,7 +394,7 @@ func (s *Server) SendOnion(_ context.Context,
 		// retry is then acknowledged and TrackOnion returns the
 		// failure rather than waiting.
 		log.Warnf("Dispatch failed for attempt %d: %v. Failing "+
-			"pending attempt.", req.AttemptId, dispatchErr)
+			"pending attempt.", attemptID, dispatchErr)
 
 		s.failPendingAttempt(attemptID, "dispatch failure")
 
@@ -718,33 +722,31 @@ func (s *Server) findEligibleChannelID(pubKey *btcec.PublicKey,
 // dispatched via SendOnion succeeded or failed.
 //
 // This is a unary, long-polling RPC which blocks until a definitive result
-// (success with preimage or a terminal failure) for the specified attempt ID
+// (success with preimage or a terminal failure) for the specified attempt key
 // is available.
 //
 // Clients must be aware of this blocking nature and should typically use a
 // `context` with a timeout. If the RPC call is interrupted (e.g., due to a
 // timeout or network error) before a result is returned, the client is left
 // in an ambiguous state regarding the HTLC's status. In such cases, the
-// client must safely retry the *same* request with the original `paymentHash`
-// and `attemptID`. The server will either return the final result if it has
-// become available or resume waiting.
+// client must safely retry the *same* request with the original attempt key.
+// The server will either return the final result if it has become available
+// or resume waiting.
 //
 // NOTE: It is crucial that clients **do not** interpret an ambiguous error as a
 // definitive failure. Doing so may cause the client to incorrectly mark the
 // attempt as failed and proceed to retry the payment with a new, distinct
-// `attempt_id`, which risks a duplicate payment if the original attempt
+// attempt key, which risks a duplicate payment if the original attempt
 // eventually succeeds.
 func (s *Server) TrackOnion(ctx context.Context,
 	req *TrackOnionRequest) (*TrackOnionResponse, error) {
 
-	hash, err := lntypes.MakeHash(req.PaymentHash)
+	key, err := attemptKey(req)
 	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument,
-			"invalid payment_hash=%x: %v", req.PaymentHash, err)
+		return nil, err
 	}
 
-	log.Debugf("Looking up status of onion attempt_id=%d for payment=%v",
-		req.AttemptId, hash)
+	log.Debugf("Looking up status of onion attempt key=%x", key)
 
 	// Attempt to build the error decryptor with the provided session key
 	// and hop public keys.
@@ -764,15 +766,10 @@ func (s *Server) TrackOnion(ctx context.Context,
 	// Resolve the client's key to the internal attempt ID. A key we have
 	// never registered is reported as not found, the same as an attempt
 	// the switch does not know.
-	key, err := attemptKey(req)
-	if err != nil {
-		return nil, err
-	}
-
 	attemptID, err := s.cfg.ExternalAttemptStore.LookupExternalAttempt(key)
 	if errors.Is(err, htlcswitch.ErrPaymentIDNotFound) {
 		return nil, status.Errorf(codes.NotFound,
-			"payment with attempt ID %d not found", req.AttemptId)
+			"attempt with key %x not found", key)
 	}
 	if err != nil {
 		return nil, status.Errorf(codes.Internal,
@@ -780,18 +777,19 @@ func (s *Server) TrackOnion(ctx context.Context,
 	}
 
 	// Query the switch for the result of the payment attempt via onion.
+	// The switch uses the payment hash only in log lines, and the request
+	// does not carry it, so the zero hash is passed.
 	resultChan, err := s.cfg.HtlcDispatcher.GetAttemptResult(
-		attemptID, hash, errorDecryptor,
+		attemptID, lntypes.ZeroHash, errorDecryptor,
 	)
 	if err != nil {
-		log.Errorf("GetAttemptResult failed for attempt_id=%d of "+
-			" payment=%x: %v", req.AttemptId, hash, err)
+		log.Errorf("GetAttemptResult failed for attempt %d (key=%x): "+
+			"%v", attemptID, key, err)
 
 		// If the payment ID is not found, we return a NotFound error.
 		if errors.Is(err, htlcswitch.ErrPaymentIDNotFound) {
 			return nil, status.Errorf(codes.NotFound,
-				"payment with attempt ID %d not found",
-				req.AttemptId)
+				"attempt with key %x not found", key)
 		}
 
 		// For other errors, we return an internal error.
@@ -824,8 +822,8 @@ func (s *Server) TrackOnion(ctx context.Context,
 	// The attempt result arrived so the HTLC is no longer in-flight. If
 	// the payment failed, we build a structured response for the client.
 	if result.Error != nil {
-		log.Debugf("HTLC attempt %d failed for payment=%v: %v",
-			req.AttemptId, hash, result.Error)
+		log.Debugf("HTLC attempt %d (key=%x) failed: %v",
+			attemptID, key, result.Error)
 
 		details := marshallFailureDetails(result.Error)
 
@@ -839,8 +837,8 @@ func (s *Server) TrackOnion(ctx context.Context,
 	// If no decryption keys were provided, the raw onion-encrypted error
 	// is returned as-is, deferring decryption to the client.
 	if len(result.EncryptedError) > 0 {
-		log.Debugf("HTLC attempt %d failed for payment=%v with "+
-			"encrypted error", req.AttemptId, hash)
+		log.Debugf("HTLC attempt %d (key=%x) failed with encrypted "+
+			"error", attemptID, key)
 
 		details := &FailureDetails{
 			ErrorMessage: "payment attempt failed with encrypted " +
@@ -860,15 +858,15 @@ func (s *Server) TrackOnion(ctx context.Context,
 	// If we have reached this point, we expect a valid preimage for a
 	// successful payment.
 	if result.Preimage == (lntypes.Preimage{}) {
-		log.Errorf("Payment %v completed without a valid preimage "+
-			"or error", hash)
+		log.Errorf("Attempt %d (key=%x) completed without a valid "+
+			"preimage or error", attemptID, key)
 
 		return nil, status.Error(codes.Internal,
 			ErrAmbiguousPaymentState.Error())
 	}
 
-	log.Debugf("Received preimage via onion attempt_id=%d for payment=%v",
-		req.AttemptId, hash)
+	log.Debugf("Received preimage via onion attempt %d (key=%x)",
+		attemptID, key)
 
 	return &TrackOnionResponse{
 		Result: &TrackOnionResponse_Preimage{
@@ -1027,23 +1025,21 @@ func (s *Server) BuildOnion(_ context.Context,
 // from the server's attempt store. This enables remote clients to perform
 // online garbage collection of completed attempt data.
 //
-// The server processes each attempt ID independently and reports per-ID
+// The server processes each attempt key independently and reports per-key
 // results. Pending (in-flight) attempts are never deleted. The overall RPC
 // succeeds (gRPC OK) as long as the request could be processed.
 func (s *Server) DeleteAttempts(_ context.Context,
 	req *DeleteAttemptsRequest) (*DeleteAttemptsResponse, error) {
 
-	log.Debugf("DeleteAttempts called for %d attempt(s)",
-		len(req.Attempts))
+	log.Debugf("DeleteAttempts called for %d attempt(s)", len(req.Keys))
 
 	// Deduplicate attempts by key, preserving request order.
 	var (
-		seen   = make(map[string]struct{}, len(req.Attempts))
-		unique = make([]*AttemptRef, 0, len(req.Attempts))
-		keys   = make([][]byte, 0, len(req.Attempts))
+		seen = make(map[string]struct{}, len(req.Keys))
+		keys = make([][]byte, 0, len(req.Keys))
 	)
-	for _, ref := range req.Attempts {
-		key, err := attemptKey(ref)
+	for _, k := range req.Keys {
+		key, err := validateAttemptKey(k)
 		if err != nil {
 			return nil, err
 		}
@@ -1052,7 +1048,6 @@ func (s *Server) DeleteAttempts(_ context.Context,
 			continue
 		}
 		seen[string(key)] = struct{}{}
-		unique = append(unique, ref)
 		keys = append(keys, key)
 	}
 
@@ -1066,12 +1061,11 @@ func (s *Server) DeleteAttempts(_ context.Context,
 
 	// Convert the store-level results into proto results, preserving the
 	// request order.
-	results := make([]*AttemptDeletionResult, 0, len(unique))
-	for i, ref := range unique {
+	results := make([]*AttemptDeletionResult, 0, len(keys))
+	for i, key := range keys {
 		results = append(results, &AttemptDeletionResult{
-			PaymentHash: ref.PaymentHash,
-			AttemptId:   ref.AttemptId,
-			Status:      deletionStatusToProto(statuses[i]),
+			Key:    &AttemptKey{Id: key},
+			Status: deletionStatusToProto(statuses[i]),
 		})
 	}
 

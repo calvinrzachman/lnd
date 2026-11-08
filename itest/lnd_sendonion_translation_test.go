@@ -30,19 +30,18 @@ type onionAttempt struct {
 // trackReq returns a TrackOnion request for the attempt.
 func (a *onionAttempt) trackReq() *switchrpc.TrackOnionRequest {
 	return &switchrpc.TrackOnionRequest{
-		AttemptId:   a.sendReq.AttemptId,
-		PaymentHash: a.sendReq.PaymentHash,
-		SessionKey:  a.onion.SessionKey,
-		HopPubkeys:  a.onion.HopPubkeys,
+		Key:        a.sendReq.Key,
+		SessionKey: a.onion.SessionKey,
+		HopPubkeys: a.onion.HopPubkeys,
 	}
 }
 
 // buildOnionAttempt routes a payment of amt from sender to dest, builds an
 // onion for it, and returns a SendOnion request that dispatches it over the
-// given first-hop channel under the given attempt ID.
+// given first-hop channel under the given attempt key.
 func buildOnionAttempt(ht *lntest.HarnessTest, sender, dest *node.HarnessNode,
 	firstHopChanID uint64, payHash, payAddr []byte, amt int64,
-	attemptID uint64) *onionAttempt {
+	key *switchrpc.AttemptKey) *onionAttempt {
 
 	routes := sender.RPC.QueryRoutes(&lnrpc.QueryRoutesRequest{
 		PubKey: dest.PubKeyStr,
@@ -68,7 +67,7 @@ func buildOnionAttempt(ht *lntest.HarnessTest, sender, dest *node.HarnessNode,
 			Timelock:       route.TotalTimeLock,
 			PaymentHash:    payHash,
 			OnionBlob:      onion.OnionBlob,
-			AttemptId:      attemptID,
+			Key:            key,
 		},
 		onion: onion,
 	}
@@ -102,10 +101,11 @@ func requireMismatch(ht *lntest.HarnessTest, resp *switchrpc.SendOnionResponse,
 // testSendOnionLocalCoexistence checks that the local router and a SendOnion
 // client can use the same attempt ID numbers without interfering. The local
 // router first pays several invoices, then a SendOnion client dispatches new
-// payments under exactly the attempt IDs the local router used. Each SendOnion
-// attempt must be dispatched as new and resolve with its own preimage, and the
-// local router must keep paying afterwards. Without the external attempt
-// index, the reused IDs would collide with the local router's records.
+// payments under keys that encode exactly the attempt IDs the local router
+// used. Each SendOnion attempt must be dispatched as new and resolve with its
+// own preimage, and the local router must keep paying afterwards. The client's
+// numbering never reaches the switch, which uses internal IDs from the shared
+// sequencer.
 func testSendOnionLocalCoexistence(ht *lntest.HarnessTest) {
 	// Alice -> Bob -> Carol.
 	const chanAmt = btcutil.Amount(1_000_000)
@@ -157,7 +157,7 @@ func testSendOnionLocalCoexistence(ht *lntest.HarnessTest) {
 	for i, id := range localIDs {
 		attempt := buildOnionAttempt(
 			ht, alice, carol, aliceBobChan.ChannelId, rHashes[i],
-			invoices[i].PaymentAddr, paymentAmt, id,
+			invoices[i].PaymentAddr, paymentAmt, testAttemptKey(id),
 		)
 
 		resp, err := alice.RPC.SendOnion(attempt.sendReq)
@@ -211,7 +211,7 @@ func testSendOnionKeyMismatch(ht *lntest.HarnessTest) {
 
 	attempt := buildOnionAttempt(
 		ht, alice, carol, aliceBobChan.ChannelId, payHash[:],
-		invoice.PaymentAddr, paymentAmt, 1,
+		invoice.PaymentAddr, paymentAmt, testAttemptKey(1),
 	)
 	resp, err := alice.RPC.SendOnion(attempt.sendReq)
 	requireAccepted(ht, resp, err, false)
@@ -223,7 +223,7 @@ func testSendOnionKeyMismatch(ht *lntest.HarnessTest) {
 	// bytes differ. Sent under the same key it must be answered Mismatch.
 	rebuilt := buildOnionAttempt(
 		ht, alice, carol, aliceBobChan.ChannelId, payHash[:],
-		invoice.PaymentAddr, paymentAmt, 1,
+		invoice.PaymentAddr, paymentAmt, testAttemptKey(1),
 	)
 	require.NotEqual(ht, attempt.sendReq.OnionBlob,
 		rebuilt.sendReq.OnionBlob)
@@ -238,6 +238,16 @@ func testSendOnionKeyMismatch(ht *lntest.HarnessTest) {
 	require.True(ht, ok)
 	changedAmt.Amount++
 	resp, err = alice.RPC.SendOnion(changedAmt)
+	requireMismatch(ht, resp, err)
+
+	// A changed payment hash under the same key is a mismatch as well,
+	// rather than a new attempt.
+	changedHash, ok := proto.Clone(
+		attempt.sendReq,
+	).(*switchrpc.SendOnionRequest)
+	require.True(ht, ok)
+	changedHash.PaymentHash = ht.Random32Bytes()
+	resp, err = alice.RPC.SendOnion(changedHash)
 	requireMismatch(ht, resp, err)
 
 	// An exact replay is still acknowledged as already registered.
@@ -282,7 +292,7 @@ func testSendOnionRestart(ht *lntest.HarnessTest) {
 
 	attempt := buildOnionAttempt(
 		ht, alice, carol, aliceBobChan.ChannelId, payHash[:],
-		invoice.PaymentAddr, paymentAmt, 7,
+		invoice.PaymentAddr, paymentAmt, testAttemptKey(7),
 	)
 	resp, err := alice.RPC.SendOnion(attempt.sendReq)
 	requireAccepted(ht, resp, err, false)
@@ -309,16 +319,14 @@ func testSendOnionRestart(ht *lntest.HarnessTest) {
 	// Delete the attempt by its key. The record and the key go together,
 	// so tracking afterwards reports the key as not found.
 	deleteReq := &switchrpc.DeleteAttemptsRequest{
-		Attempts: []*switchrpc.AttemptRef{{
-			PaymentHash: payHash[:],
-			AttemptId:   attempt.sendReq.AttemptId,
-		}},
+		Keys: []*switchrpc.AttemptKey{attempt.sendReq.Key},
 	}
 	deleteResp := alice.RPC.DeleteAttempts(deleteReq)
 	require.Len(ht, deleteResp.Results, 1)
 	require.Equal(ht, switchrpc.AttemptDeletionStatus_DELETION_OK,
 		deleteResp.Results[0].Status)
-	require.Equal(ht, payHash[:], deleteResp.Results[0].PaymentHash)
+	require.Equal(ht, attempt.sendReq.Key.Id,
+		deleteResp.Results[0].Key.GetId())
 
 	err = wait.NoError(func() error {
 		ctx, cancel := context.WithTimeout(
