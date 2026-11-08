@@ -208,6 +208,13 @@ func TestSendOnion(t *testing.T) {
 				require.True(t, ok)
 				require.Nil(t, payer.sentFirstHop,
 					"mismatch must not dispatch")
+
+				// The registered attempt may be in flight, so
+				// it must not be failed either.
+				store, ok := s.cfg.AttemptStore.(*mockAttemptStore)
+				require.True(t, ok)
+				require.Zero(t, store.failCalls,
+					"mismatch must not fail the attempt")
 			},
 		},
 		{
