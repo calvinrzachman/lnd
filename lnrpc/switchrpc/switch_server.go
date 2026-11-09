@@ -450,12 +450,10 @@ func rejected(failure lnwire.FailureMessage) *SendOnionResponse {
 // is still recorded as failed by the caller of this function, so a retry is
 // acknowledged and tracking resolves it to that recorded failure.
 //
-// NOTE: lnd's router splits a SendHTLC error on the same test, in
-// handleSwitchErr (routing/payment_lifecycle.go), but acts differently on any
-// other error. The router fails the payment, while this server reports the
-// attempt as ambiguous so a remote caller can retry the same attempt_id. Both
-// rely on the switch returning a ClearTextError only before it commits a
-// circuit, so a change to that guarantee affects both.
+// NOTE: lnd's router reads a SendHTLC error with the same predicate, in
+// handleSwitchErr (routing/payment_lifecycle.go). Both rely on the switch
+// returning a ClearTextError only before it commits a circuit, so a change to
+// that guarantee affects both.
 func marshallDispatchOutcome(err error) *SendOnionResponse {
 	var clearTextErr htlcswitch.ClearTextError
 	if errors.As(err, &clearTextErr) {
