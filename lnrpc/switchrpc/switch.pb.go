@@ -342,7 +342,9 @@ func (*SendOnionResponse_Ambiguous) isSendOnionResponse_Outcome() {}
 // result with TrackOnion.
 //
 // Do NOT conclude success or failure from this message. It reports who owns
-// the attempt, not how it ended.
+// the attempt, not how it ended. A retry of an attempt that has already
+// failed, for example after a Rejected response was lost, is also answered
+// Accepted, and TrackOnion returns the recorded failure.
 type Accepted struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Set when the switch already held this attempt from an earlier call,

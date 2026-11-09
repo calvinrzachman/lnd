@@ -177,7 +177,9 @@ message SendOnionResponse {
 // result with TrackOnion.
 //
 // Do NOT conclude success or failure from this message. It reports who owns
-// the attempt, not how it ended.
+// the attempt, not how it ended. A retry of an attempt that has already
+// failed, for example after a Rejected response was lost, is also answered
+// Accepted, and TrackOnion returns the recorded failure.
 message Accepted {
     // Set when the switch already held this attempt from an earlier call,
     // either because the attempt was already registered or because a circuit
