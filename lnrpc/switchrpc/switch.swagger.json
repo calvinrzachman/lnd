@@ -687,7 +687,7 @@
           "description": "The application-level failure for the payment attempt. If this field\nis set, the payment attempt failed."
         }
       },
-      "description": "TrackOnionResponse reports how a dispatched attempt ended. A preimage means\nthe HTLC settled. failure_details means the HTLC failed and is no longer in\nflight, so the caller MAY fail the attempt.\n\nNOTE: A response with no result set, or a result the caller does not\nrecognise, means the attempt may still be live. The caller MUST keep\ntracking it and MUST NOT treat it as failed. A gRPC error means the call\nfailed, not the attempt."
+      "description": "TrackOnionResponse reports how a dispatched attempt ended. A preimage means\nthe HTLC settled. failure_details means the HTLC failed and is no longer in\nflight, so the caller MAY fail the attempt.\n\nNOTE: A response with no result set, or a result the caller does not\nrecognise, means the attempt may still be live. The caller MUST keep\ntracking it and MUST NOT treat it as failed. A gRPC error means the call\nfailed, not the attempt, with one exception. NotFound means the server holds\nno record for this attempt_id, and retrying will not change that."
     },
     "switchrpcUnreadableFailure": {
       "type": "object",
