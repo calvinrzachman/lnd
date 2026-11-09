@@ -618,13 +618,9 @@ func (s *Server) validateAndPrepareOnion(req *SendOnionRequest) (
 // findEligibleChannelID picks a channel to the peer with the given public key
 // for an HTLC of the given amount. It prefers a channel that can carry the
 // amount. If the peer has channels but none can, it still returns one, so that
-// the switch reports the failure for that channel rather than this server
-// inventing one. A channel without the bandwidth for the amount is rejected by
-// the switch before dispatch. A channel that has the bandwidth but no room
-// under its HTLC slot or in-flight limits passes the switch's checks and fails
-// in the link, so the caller sees Accepted and learns the failure from
-// TrackOnion. It returns an error only when there is no channel to the peer at
-// all.
+// the switch reports the precise failure for that channel, such as a temporary
+// channel failure, rather than this server inventing one. It returns an error
+// only when there is no channel to the peer at all.
 func (s *Server) findEligibleChannelID(pubKey *btcec.PublicKey,
 	amount lnwire.MilliSatoshi) (lnwire.ShortChannelID, error) {
 

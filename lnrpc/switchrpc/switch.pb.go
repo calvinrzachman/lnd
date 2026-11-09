@@ -223,10 +223,11 @@ func (x *SendOnionRequest) GetExtraData() []byte {
 //
 // A gRPC error from SendOnion means the call itself failed, for example a
 // malformed request, an auth failure, a transport problem, or a server not
-// running this sub-server. It never describes what happened to an HTLC. A
-// caller that receives an error and cannot distinguish those cases MUST retry
-// the same attempt_id, because a call that failed before reaching the server
-// and a call whose response was lost are indistinguishable from outside.
+// running this sub-server. It never describes what happened to an HTLC, which
+// an earlier call with the same attempt_id may already have dispatched. After
+// any gRPC error the caller MUST NOT conclude that the HTLC was not
+// dispatched, and MUST NOT send a replacement under a new attempt_id until
+// this one is answered Rejected or TrackOnion reports it failed.
 //
 // A caller that receives an outcome it does not recognise, or a response with
 // no outcome set at all, MUST treat it as Ambiguous and retry the same
@@ -338,9 +339,7 @@ func (*SendOnionResponse_Ambiguous) isSendOnionResponse_Outcome() {}
 // result with TrackOnion.
 //
 // Do NOT conclude success or failure from this message. It reports who owns
-// the attempt, not how it ended. A retry of an attempt that has already
-// failed, for example after a Rejected response was lost, is also answered
-// Accepted, and TrackOnion returns the recorded failure.
+// the attempt, not how it ended.
 type Accepted struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Set when the switch already held this attempt from an earlier call,

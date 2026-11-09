@@ -31,9 +31,12 @@ type SwitchClient interface {
 	//
 	//A gRPC error means the call failed rather than the HTLC. The cause may be
 	//a malformed request, an auth failure, a transport problem, or a server not
-	//running this sub-server. A client that cannot tell those apart MUST retry
-	//the same attempt_id, because a call that never reached the server and a
-	//call whose response was lost look identical from outside.
+	//running this sub-server. The error describes only that call, and an
+	//earlier call with the same attempt_id may already have dispatched the
+	//HTLC. After any gRPC error the client MUST NOT conclude that the HTLC was
+	//not dispatched. It may retry the same attempt_id, or stop and alert, but
+	//MUST NOT send a replacement under a new attempt_id until this one is
+	//answered Rejected or TrackOnion reports it failed.
 	//
 	//A malformed request is answered with InvalidArgument and the attempt is
 	//recorded as failed. Retrying the same attempt_id is still safe, because the
@@ -170,9 +173,12 @@ type SwitchServer interface {
 	//
 	//A gRPC error means the call failed rather than the HTLC. The cause may be
 	//a malformed request, an auth failure, a transport problem, or a server not
-	//running this sub-server. A client that cannot tell those apart MUST retry
-	//the same attempt_id, because a call that never reached the server and a
-	//call whose response was lost look identical from outside.
+	//running this sub-server. The error describes only that call, and an
+	//earlier call with the same attempt_id may already have dispatched the
+	//HTLC. After any gRPC error the client MUST NOT conclude that the HTLC was
+	//not dispatched. It may retry the same attempt_id, or stop and alert, but
+	//MUST NOT send a replacement under a new attempt_id until this one is
+	//answered Rejected or TrackOnion reports it failed.
 	//
 	//A malformed request is answered with InvalidArgument and the attempt is
 	//recorded as failed. Retrying the same attempt_id is still safe, because the
