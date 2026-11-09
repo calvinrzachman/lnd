@@ -580,40 +580,44 @@ func TestTrackOnion(t *testing.T) {
 	}
 }
 
-// TestTrackOnionReleasesSubscription asserts that TrackOnion hands its RPC
-// context to the dispatcher, so that a client which cancels or times out
-// leaves no pending result subscription behind.
-func TestTrackOnionReleasesSubscription(t *testing.T) {
+// TestTrackOnionPassesRPCContext asserts that TrackOnion waits on the switch
+// with its own RPC context, so that the switch can release its subscription
+// when the client cancels or times out, and that such a call reports the
+// context error rather than a switch shutdown.
+func TestTrackOnionPassesRPCContext(t *testing.T) {
 	t.Parallel()
-
-	payer := &mockPayer{}
-	server, _, err := New(&Config{HtlcDispatcher: payer})
-	require.NoError(t, err)
 
 	req := &TrackOnionRequest{
 		PaymentHash: make([]byte, 32),
 		AttemptId:   1,
 	}
 
-	const numCalls = 5
-	for range numCalls {
-		ctx, cancel := context.WithTimeout(
-			t.Context(), 10*time.Millisecond,
-		)
-		_, err := server.TrackOnion(ctx, req)
-		cancel()
+	// A client deadline on a pending attempt must reach the switch.
+	payer := &mockPayer{}
+	server, _, err := New(&Config{HtlcDispatcher: payer})
+	require.NoError(t, err)
 
-		require.Equal(t, codes.DeadlineExceeded, status.Code(err))
-	}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+	defer cancel()
 
-	ctx, cancel := context.WithCancel(t.Context())
+	_, err = server.TrackOnion(ctx, req)
+	require.Equal(t, codes.DeadlineExceeded, status.Code(err))
+	require.Error(t, payer.gotCtx.Err(), "the switch must see the "+
+		"RPC context end")
+
+	// The switch closes the result channel when the context is
+	// cancelled. That must read as a cancellation, not a shutdown.
+	closed := make(chan *htlcswitch.PaymentResult)
+	close(closed)
+	payer = &mockPayer{resultChan: closed}
+	server, _, err = New(&Config{HtlcDispatcher: payer})
+	require.NoError(t, err)
+
+	ctx, cancel = context.WithCancel(t.Context())
 	cancel()
+
 	_, err = server.TrackOnion(ctx, req)
 	require.Equal(t, codes.Canceled, status.Code(err))
-
-	require.Eventually(t, func() bool {
-		return payer.subscribers.Load() == 0
-	}, 5*time.Second, 10*time.Millisecond)
 }
 
 // TestBuildOnion is a unit test that verifies the behavior of the BuildOnion
