@@ -20,7 +20,7 @@ const _ = grpc.SupportPackageIsVersion7
 type SwitchClient interface {
 	//
 	//SendOnion dispatches a pre-formed onion packet. It is the primary entry
-	//point for a remote router, and it is idempotent: a client can and should
+	//point for a remote router and is idempotent. A client can and should
 	//retry it after a timeout or disconnection, reusing the same attempt_id so
 	//the server recognises the retry rather than sending a second HTLC.
 	//
@@ -29,17 +29,17 @@ type SwitchClient interface {
 	//obliges the caller to take. An outcome the client does not recognise, or a
 	//response with none set, MUST be treated as Ambiguous.
 	//
-	//A gRPC error means the call failed rather than the HTLC: a malformed
-	//request, an auth failure, a transport problem, or a server not running this
-	//sub-server. A client that cannot tell those apart MUST retry the same
-	//attempt_id, because a call that never reached the server and a call whose
-	//response was lost look identical from outside.
+	//A gRPC error means the call failed rather than the HTLC. The cause may be
+	//a malformed request, an auth failure, a transport problem, or a server not
+	//running this sub-server. A client that cannot tell those apart MUST retry
+	//the same attempt_id, because a call that never reached the server and a
+	//call whose response was lost look identical from outside.
 	//
 	//A malformed request is answered with InvalidArgument and the attempt is
-	//recorded as failed. Retrying the same attempt_id is still safe: the server
-	//answers Accepted and TrackOnion returns the recorded failure. Only once the
-	//attempt is known to have failed may the client send a corrected request
-	//under a new attempt_id.
+	//recorded as failed. Retrying the same attempt_id is still safe, because the
+	//server answers Accepted and TrackOnion returns the recorded failure. Only
+	//once the attempt is known to have failed may the client send a corrected
+	//request under a new attempt_id.
 	SendOnion(ctx context.Context, in *SendOnionRequest, opts ...grpc.CallOption) (*SendOnionResponse, error)
 	//
 	//TrackOnion allows callers to query whether or not a payment dispatched via
@@ -159,7 +159,7 @@ func (c *switchClient) DisableRemoteRouter(ctx context.Context, in *DisableRemot
 type SwitchServer interface {
 	//
 	//SendOnion dispatches a pre-formed onion packet. It is the primary entry
-	//point for a remote router, and it is idempotent: a client can and should
+	//point for a remote router and is idempotent. A client can and should
 	//retry it after a timeout or disconnection, reusing the same attempt_id so
 	//the server recognises the retry rather than sending a second HTLC.
 	//
@@ -168,17 +168,17 @@ type SwitchServer interface {
 	//obliges the caller to take. An outcome the client does not recognise, or a
 	//response with none set, MUST be treated as Ambiguous.
 	//
-	//A gRPC error means the call failed rather than the HTLC: a malformed
-	//request, an auth failure, a transport problem, or a server not running this
-	//sub-server. A client that cannot tell those apart MUST retry the same
-	//attempt_id, because a call that never reached the server and a call whose
-	//response was lost look identical from outside.
+	//A gRPC error means the call failed rather than the HTLC. The cause may be
+	//a malformed request, an auth failure, a transport problem, or a server not
+	//running this sub-server. A client that cannot tell those apart MUST retry
+	//the same attempt_id, because a call that never reached the server and a
+	//call whose response was lost look identical from outside.
 	//
 	//A malformed request is answered with InvalidArgument and the attempt is
-	//recorded as failed. Retrying the same attempt_id is still safe: the server
-	//answers Accepted and TrackOnion returns the recorded failure. Only once the
-	//attempt is known to have failed may the client send a corrected request
-	//under a new attempt_id.
+	//recorded as failed. Retrying the same attempt_id is still safe, because the
+	//server answers Accepted and TrackOnion returns the recorded failure. Only
+	//once the attempt is known to have failed may the client send a corrected
+	//request under a new attempt_id.
 	SendOnion(context.Context, *SendOnionRequest) (*SendOnionResponse, error)
 	//
 	//TrackOnion allows callers to query whether or not a payment dispatched via

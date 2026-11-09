@@ -221,25 +221,21 @@ func (x *SendOnionRequest) GetExtraData() []byte {
 // SendOnionResponse reports what the switch did with the attempt. Exactly one
 // outcome is always set.
 //
-// A gRPC error from SendOnion means the call itself failed: a malformed
-// request, an auth failure, a transport problem, or a server not running this
-// sub-server. It never describes what happened to an HTLC. A caller that
-// receives an error and cannot distinguish those cases MUST retry the same
-// attempt_id, because a call that failed before reaching the server and a call
-// whose response was lost are indistinguishable from outside.
-//
-// FORWARD COMPATIBILITY, and this rule is load-bearing:
+// A gRPC error from SendOnion means the call itself failed, for example a
+// malformed request, an auth failure, a transport problem, or a server not
+// running this sub-server. It never describes what happened to an HTLC. A
+// caller that receives an error and cannot distinguish those cases MUST retry
+// the same attempt_id, because a call that failed before reaching the server
+// and a call whose response was lost are indistinguishable from outside.
 //
 // A caller that receives an outcome it does not recognise, or a response with
 // no outcome set at all, MUST treat it as Ambiguous and retry the same
 // attempt_id. It MUST NOT treat it as success, failure, or an empty response.
-//
-// This matters because carrying the outcome in the response body trades one
-// safety property away and this rule buys it back. An unhandled gRPC error is
-// loud, while an unhandled response field is silent, so a caller built against
-// an older version of this service could otherwise misread a newer server's
-// answer as "nothing happened". Defaulting the unknown case to Ambiguous keeps
-// the failure mode a wasted retry rather than a lost or duplicated payment.
+// An unhandled gRPC error is loud, while an unhandled response field is
+// silent, so a caller built against an older version of this service could
+// otherwise misread a newer server's answer as "nothing happened". Treating
+// the unknown case as Ambiguous limits the cost of a misread to a wasted retry
+// rather than a lost or duplicated payment.
 type SendOnionResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Outcome:
@@ -400,16 +396,16 @@ func (x *Accepted) GetAlreadyRegistered() bool {
 
 // Rejected means the switch declined the HTLC before taking ownership of it.
 // The HTLC provably never left this node, so no funds are at risk and the
-// caller MAY fail this attempt and route elsewhere.
+// caller MAY fail this attempt and try another route.
 type Rejected struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The BOLT #4 wire failure explaining the rejection, including any
 	// channel update, as encoded by lnwire.EncodeFailure.
 	//
 	// This is always present and always decodable. A rejection the switch
-	// cannot describe is reported as Ambiguous instead, because a definite
-	// verdict the caller cannot act on is worse than admitting uncertainty:
-	// the caller has nothing to give its router and nothing to penalise with.
+	// cannot describe is reported as Ambiguous, because a definite verdict
+	// the caller cannot act on is worse than admitting uncertainty. The caller
+	// would have nothing to give its router and nothing to penalise with.
 	WireFailure   []byte `protobuf:"bytes,1,opt,name=wire_failure,json=wireFailure,proto3" json:"wire_failure,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -452,16 +448,16 @@ func (x *Rejected) GetWireFailure() []byte {
 	return nil
 }
 
-// Ambiguous means the switch cannot determine whether it took ownership of the
-// attempt.
+// Ambiguous means the state of the dispatch is unknown. The switch may or may
+// not hold the attempt.
 //
 // The caller MUST retry the same attempt_id until it receives Accepted or
 // Rejected, and MUST NOT record a terminal outcome for the attempt in the
-// meantime. Retrying is safe: the switch recognises an attempt it already
-// holds and answers Accepted rather than dispatching a second HTLC.
+// meantime. Retrying is safe because the switch recognises an attempt it
+// already holds and answers Accepted rather than dispatching a second HTLC.
 type Ambiguous struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// A human-readable reason, for logs and metrics.
+	// A human-readable reason that can be used for logging and metrics.
 	//
 	// Behaviour MUST NOT branch on this value. Every ambiguous outcome
 	// requires the same action, and a caller that treats one reason
@@ -908,12 +904,9 @@ func (x *ForwardingFailure) GetWireMessage() []byte {
 	return nil
 }
 
-// LocalFailure represents a failure that originates at the local node, as
-// reported by TrackOnion. SendOnion reports a local rejection through the
-// Rejected outcome instead, which carries the raw wire failure directly.
-//
-// No onion decryption is involved because the failure occurred before the
-// HTLC left our node.
+// LocalFailure represents a failure that originates at the local node. No
+// onion decryption is involved because the failure occurred before the HTLC
+// left our node.
 type LocalFailure struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The raw, serialized `lnwire.FailureMessage`.
