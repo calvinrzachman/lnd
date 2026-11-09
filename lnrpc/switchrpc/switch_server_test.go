@@ -387,17 +387,9 @@ func TestSendOnion(t *testing.T) {
 				return
 			}
 
-			// If we expected OK, assert a nil error and non-nil
-			// response.
-			if tc.expectedErrCode == codes.OK {
-				require.NoError(t, err)
-				require.NotNil(t, resp)
-				return
-			}
-
 			// Otherwise the call itself failed, so we expect a
 			// gRPC status error carrying the code and nothing
-			// else: outcomes no longer ride on errors.
+			// else, since outcomes are carried in the response.
 			require.Error(t, err)
 
 			s, ok := status.FromError(err)

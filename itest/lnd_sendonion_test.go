@@ -100,12 +100,11 @@ func testSendOnion(ht *lntest.HarnessTest) {
 	ht.AssertInvoiceSettled(dave, invoices[0].PaymentAddr)
 }
 
-// testSendOnionTwice tests that the switch correctly rejects a duplicate
-// payment attempt for an HTLC that is already in-flight. It sends an onion,
-// then immediately sends the exact same onion with the same attempt ID. The
-// test asserts that the second attempt is rejected with a DUPLICATE_HTLC
-// error. It also verifies that sending again after the original HTLC has
-// settled is also rejected.
+// testSendOnionTwice tests that the switch never dispatches a second HTLC for
+// an attempt it already holds. It sends an onion, then immediately sends the
+// exact same onion with the same attempt ID. The test asserts that the second
+// call is answered Accepted with already_registered set, both while the first
+// HTLC is in flight and after it has settled.
 func testSendOnionTwice(ht *lntest.HarnessTest) {
 	// Create a four-node context consisting of Alice, Bob, Carol, and
 	// Dave with the following topology:
@@ -175,8 +174,8 @@ func testSendOnionTwice(ht *lntest.HarnessTest) {
 	ht.AssertInvoiceState(invoiceStream, lnrpc.Invoice_ACCEPTED)
 
 	// While the first onion is still in-flight, we'll send the same onion
-	// again with the same attempt ID. This should error as our Switch will
-	// detect duplicate ADDs for *in-flight* HTLCs.
+	// again with the same attempt ID. The switch recognises the attempt and
+	// acknowledges it without dispatching a second HTLC.
 	resp, err = alice.RPC.SendOnion(sendReq)
 	require.NoError(ht, err, "a duplicate dispatch is an acknowledgement, "+
 		"not an error")
@@ -203,8 +202,8 @@ func testSendOnionTwice(ht *lntest.HarnessTest) {
 	require.Equal(ht, preimage[:], trackResp.GetPreimage())
 
 	// Now that the original HTLC attempt has settled, we'll send the same
-	// onion again with the same attempt ID. Confirm that this is also
-	// prevented.
+	// onion again with the same attempt ID. Confirm that it is again
+	// acknowledged rather than dispatched.
 	resp, err = alice.RPC.SendOnion(sendReq)
 	require.NoError(ht, err, "a duplicate dispatch is an acknowledgement, "+
 		"not an error")
@@ -214,7 +213,7 @@ func testSendOnionTwice(ht *lntest.HarnessTest) {
 	require.True(ht, accepted.AlreadyRegistered,
 		"the switch already held this attempt and must say so")
 
-	// Now that we've confirmed that duplicate sends are rejected for
+	// Now that we've confirmed that duplicate sends are acknowledged for
 	// settled attempts, delete the attempt record from the store.
 	deleteReq := &switchrpc.DeleteAttemptsRequest{
 		AttemptIds: []uint64{1},

@@ -10,7 +10,7 @@ import (
 // SwitchClient related RPCs.
 // =====================
 
-// SendOnion makes a RPC call to SendOnion and returns the error.
+// SendOnion makes a RPC call to SendOnion and returns the response and error.
 //
 //nolint:lll
 func (h *HarnessRPC) SendOnion(
