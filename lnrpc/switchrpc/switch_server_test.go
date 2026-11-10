@@ -168,6 +168,27 @@ func TestSendOnion(t *testing.T) {
 			wantAlreadyRegistered: true,
 		},
 		{
+			// A retry of a known attempt is acknowledged even
+			// when the request would fail validation. The attempt
+			// may already be in flight, and its record stays
+			// pending until the result arrives, so failing it
+			// here would report a live HTLC as failed. This pins
+			// that InitAttempt answers before validation runs.
+			name: "known attempt with a malformed request",
+			setup: func(t *testing.T, s *Server,
+				req *SendOnionRequest) {
+
+				store, ok := s.cfg.AttemptStore.(*mockAttemptStore)
+				require.True(t, ok)
+				store.initErr = htlcswitch.ErrPaymentIDAlreadyExists
+
+				req.PaymentHash = nil
+			},
+			expectedOutcome:       outcomeAccepted,
+			wantAlreadyRegistered: true,
+			wantFailCalls:         0,
+		},
+		{
 			// ErrDuplicateAdd from the switch/dispatcher is a
 			// last line of defense against duplicate htlc attempts.
 			// Under normal operation, InitAttempt catches
