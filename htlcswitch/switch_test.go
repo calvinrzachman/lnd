@@ -11,6 +11,7 @@ import (
 	"math"
 	mrand "math/rand"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/lightningnetwork/lnd/graph/db/models"
 	"github.com/lightningnetwork/lnd/htlcswitch/hodl"
 	"github.com/lightningnetwork/lnd/htlcswitch/hop"
+	"github.com/lightningnetwork/lnd/kvdb"
 	"github.com/lightningnetwork/lnd/lntest/mock"
 	"github.com/lightningnetwork/lnd/lntest/wait"
 	"github.com/lightningnetwork/lnd/lntypes"
@@ -6659,4 +6661,129 @@ func TestOnChainResolutionFailure(t *testing.T) {
 			}
 		})
 	}
+}
+
+// failingResultStore is an AttemptStore whose StoreResult always fails.
+type failingResultStore struct {
+	AttemptStore
+}
+
+// StoreResult fails without recording the result.
+func (f *failingResultStore) StoreResult(uint64, *networkResult) error {
+	return errors.New("store result failed")
+}
+
+// countingPackager is a FwdOperator that counts settle and fail acks.
+type countingPackager struct {
+	channeldb.FwdOperator
+
+	acks atomic.Int32
+}
+
+// AckSettleFails counts the call and then acks as usual.
+func (c *countingPackager) AckSettleFails(tx kvdb.RwTx,
+	refs ...channeldb.SettleFailRef) error {
+
+	c.acks.Add(1)
+
+	return c.FwdOperator.AckSettleFails(tx, refs...)
+}
+
+// TestSwitchKeepsCircuitUntilResultStored checks that the switch keeps the
+// circuit of a local send, and does not ack the settle, until the result is
+// stored. If the result cannot be stored, the settle must stay replayable and
+// the circuit must survive a restart. Otherwise the restarted switch would
+// find a pending attempt with no circuit, fail it, and report a settled HTLC
+// as failed to a caller that may then pay again.
+func TestSwitchKeepsCircuitUntilResultStored(t *testing.T) {
+	t.Parallel()
+
+	const attemptID = uint64(1)
+
+	tempPath := t.TempDir()
+	cdb1 := channeldb.OpenForTesting(t, tempPath)
+	s1, err := initSwitchWithDB(0, cdb1)
+	require.NoError(t, err)
+
+	packager := &countingPackager{FwdOperator: s1.cfg.SwitchPackager}
+	s1.cfg.SwitchPackager = packager
+	s1.attemptStore = &failingResultStore{AttemptStore: s1.attemptStore}
+	require.NoError(t, s1.Start())
+
+	alicePeer, err := newMockServer(
+		t, "alice", testStartingHeight, nil, testDefaultDelta,
+	)
+	require.NoError(t, err)
+
+	chanID, _, aliceChanID, _ := genIDs()
+	aliceLink := newMockChannelLink(
+		s1, chanID, aliceChanID, emptyScid, alicePeer, true, false,
+		false, false,
+	)
+	require.NoError(t, s1.AddLink(aliceLink))
+
+	preimage, err := genPreimage()
+	require.NoError(t, err)
+	add := &lnwire.UpdateAddHTLC{
+		PaymentHash: sha256.Sum256(preimage[:]),
+		Amount:      1,
+	}
+
+	// Dispatch the attempt the way switchrpc does, and let the link take
+	// the add so the circuit is open with a keystone.
+	require.NoError(t, s1.attemptStore.InitAttempt(attemptID))
+	require.NoError(t, s1.SendHTLC(aliceLink.ShortChanID(), attemptID, add))
+
+	select {
+	case pkt := <-aliceLink.packets:
+		require.NoError(t, aliceLink.completeCircuit(pkt))
+	case <-time.After(time.Second):
+		t.Fatal("add did not reach the link")
+	}
+
+	outKey := CircuitKey{ChanID: aliceLink.ShortChanID(), HtlcID: 0}
+	require.NotNil(t, s1.circuits.LookupOpenCircuit(outKey))
+
+	// Deliver the settle from the link's forwarding package. Storing its
+	// result will fail.
+	settle := &htlcPacket{
+		outgoingChanID: aliceLink.ShortChanID(),
+		outgoingHTLCID: 0,
+		amount:         1,
+		htlc: &lnwire.UpdateFulfillHTLC{
+			PaymentPreimage: preimage,
+		},
+		destRef: &channeldb.SettleFailRef{
+			Source: aliceLink.ShortChanID(),
+			Height: 1,
+			Index:  0,
+		},
+	}
+	require.NoError(t, s1.ForwardPackets(nil, settle))
+
+	// Stop waits for the switch to finish handling the settle.
+	require.NoError(t, s1.Stop())
+	require.NoError(t, cdb1.Close())
+
+	require.Zero(t, packager.acks.Load(),
+		"the settle was acked although its result was not stored")
+
+	// Restart on the same database. The circuit must still be there, so
+	// the settle can be replayed, and the attempt must still be pending
+	// rather than failed by the startup cleanup.
+	cdb2 := channeldb.OpenForTesting(t, tempPath)
+	t.Cleanup(func() { cdb2.Close() })
+
+	s2, err := initSwitchWithDB(0, cdb2)
+	require.NoError(t, err)
+	require.NoError(t, s2.Start())
+	t.Cleanup(func() { require.NoError(t, s2.Stop()) })
+
+	require.NotNil(t, s2.circuits.LookupOpenCircuit(outKey),
+		"the circuit was removed although the result was not stored")
+
+	_, err = s2.attemptStore.GetResult(attemptID)
+	require.ErrorIs(t, err, ErrAttemptResultPending,
+		"a settled attempt whose result was not stored must stay "+
+			"pending across a restart")
 }
