@@ -1,6 +1,8 @@
 package itest
 
 import (
+	"bytes"
+	"fmt"
 	"sync"
 
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -11,6 +13,8 @@ import (
 	"github.com/lightningnetwork/lnd/lnrpc/invoicesrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/switchrpc"
 	"github.com/lightningnetwork/lnd/lntest"
+	"github.com/lightningnetwork/lnd/lntest/node"
+	"github.com/lightningnetwork/lnd/lntest/wait"
 	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/stretchr/testify/require"
@@ -468,4 +472,118 @@ func testTrackOnion(ht *lntest.HarnessTest) {
 		uint32(clientFwdErr.FailureSourceIdx), "source index mismatch")
 	require.Equal(ht, serverFwdErr.WireMessage(),
 		clientFwdErr.WireMessage(), "wire message mismatch")
+}
+
+// assertPeerHasNoPendingHtlcs asserts that the given node currently holds no
+// pending HTLCs on any channel. We assert on the raw PendingHtlcs slice rather
+// than via AssertNumActiveHtlcs, because the latter only counts LockedIn HTLCs
+// and would miss an ADD that reached the link but was not yet committed.
+func assertPeerHasNoPendingHtlcs(ht *lntest.HarnessTest,
+	hn *node.HarnessNode) {
+
+	err := wait.NoError(func() error {
+		resp := hn.RPC.ListChannels(&lnrpc.ListChannelsRequest{})
+		total := 0
+		for _, c := range resp.Channels {
+			total += len(c.PendingHtlcs)
+		}
+		if total != 0 {
+			return fmt.Errorf("%s has %d pending htlc(s), want 0",
+				hn.Name(), total)
+		}
+
+		return nil
+	}, defaultTimeout)
+	require.NoError(ht, err, "expected no pending htlcs on peer")
+}
+
+// testSendOnionRejectionReachesNoPeer checks that a dispatch the switch rejects
+// before the HTLC leaves the node is reported as Rejected with a decodable wire
+// failure, and that the peer never sees an HTLC. A rejection lets the caller
+// route a new attempt, so it must never be reported for an HTLC that went out.
+// A retry is then acknowledged and tracking returns the recorded failure.
+func testSendOnionRejectionReachesNoPeer(ht *lntest.HarnessTest) {
+	const chanAmt = btcutil.Amount(100000)
+	const numNodes = 2
+	nodeCfgs := make([][]string, numNodes)
+	chanPoints, nodes := ht.CreateSimpleNetwork(
+		nodeCfgs, lntest.OpenChannelParams{Amt: chanAmt},
+	)
+	alice, bob := nodes[0], nodes[1]
+	defer ht.CloseChannel(alice, chanPoints[0])
+
+	ht.AssertChannelInGraph(alice, chanPoints[0])
+
+	const paymentAmt = 10000
+
+	// Build a real onion to a real route to Bob, so the only thing wrong is
+	// the first-hop selection at dispatch time.
+	_, rHashes, invoices := ht.CreatePayReqs(bob, paymentAmt, 1)
+	paymentHash := rHashes[0]
+
+	routes := alice.RPC.QueryRoutes(&lnrpc.QueryRoutesRequest{
+		PubKey: bob.PubKeyStr,
+		Amt:    paymentAmt,
+	})
+	route := routes.Routes[0]
+	finalHop := route.Hops[len(route.Hops)-1]
+	finalHop.MppRecord = &lnrpc.MPPRecord{
+		PaymentAddr:  invoices[0].PaymentAddr,
+		TotalAmtMsat: int64(lnwire.NewMSatFromSatoshis(paymentAmt)),
+	}
+
+	onionResp := alice.RPC.BuildOnion(&switchrpc.BuildOnionRequest{
+		Route:       route,
+		PaymentHash: paymentHash,
+	})
+
+	// Dispatch against a first-hop chan id with no local link. The switch
+	// rejects synchronously inside SendHTLC, before CommitCircuits.
+	const bogusChanID = uint64(0xdeadbeefdeadbeef)
+	sendReq := &switchrpc.SendOnionRequest{
+		FirstHopChanId: bogusChanID,
+		Amount:         route.TotalAmtMsat,
+		Timelock:       route.TotalTimeLock,
+		PaymentHash:    paymentHash,
+		OnionBlob:      onionResp.OnionBlob,
+		AttemptId:      1,
+	}
+
+	resp, err := alice.RPC.SendOnion(sendReq)
+	require.NoError(ht, err, "a rejection is an outcome, not an error")
+
+	rejected := resp.GetRejected()
+	require.NotNilf(ht, rejected, "want rejected, got %v", resp.Outcome)
+
+	failure, err := lnwire.DecodeFailure(
+		bytes.NewReader(rejected.WireFailure), 0,
+	)
+	require.NoError(ht, err, "a rejection must carry a decodable wire "+
+		"failure")
+	require.Equal(ht, lnwire.CodeUnknownNextPeer, failure.Code())
+
+	// Nothing crossed the wire: Bob never saw an incoming HTLC.
+	assertPeerHasNoPendingHtlcs(ht, bob)
+
+	// The attempt was recorded failed, so a retry of the same request is
+	// acknowledged rather than dispatched again.
+	resp, err = alice.RPC.SendOnion(sendReq)
+	require.NoError(ht, err)
+
+	accepted := resp.GetAccepted()
+	require.NotNilf(ht, accepted, "want accepted, got %v", resp.Outcome)
+	require.True(ht, accepted.AlreadyRegistered)
+
+	// Tracking resolves to the recorded failure instead of waiting.
+	trackResp := alice.RPC.TrackOnion(&switchrpc.TrackOnionRequest{
+		AttemptId:   1,
+		PaymentHash: paymentHash,
+		SessionKey:  onionResp.SessionKey,
+		HopPubkeys:  onionResp.HopPubkeys,
+	})
+	require.Empty(ht, trackResp.GetPreimage())
+	require.NotNil(ht, trackResp.GetFailureDetails().GetLocalFailure(),
+		"tracking a rejected attempt must return its local failure")
+
+	assertPeerHasNoPendingHtlcs(ht, bob)
 }
