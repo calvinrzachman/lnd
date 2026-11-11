@@ -1,6 +1,7 @@
 package itest
 
 import (
+	"encoding/binary"
 	"sync"
 
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -15,6 +16,16 @@ import (
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/stretchr/testify/require"
 )
+
+// testAttemptKey returns an attempt key made of an 8-byte prefix followed by
+// the big-endian id, the shape a client that numbers its attempts might use.
+func testAttemptKey(id uint64) *switchrpc.AttemptKey {
+	key := make([]byte, 16)
+	copy(key, "itestkey")
+	binary.BigEndian.PutUint64(key[8:], id)
+
+	return &switchrpc.AttemptKey{Id: key}
+}
 
 // testSendOnion tests the basic success case for the SendOnion RPC. It
 // constructs a multi-hop route from Alice -> Bob -> Carol -> Dave, builds an
@@ -77,7 +88,7 @@ func testSendOnion(ht *lntest.HarnessTest) {
 		Timelock:       route.TotalTimeLock,
 		PaymentHash:    paymentHash,
 		OnionBlob:      onionResp.OnionBlob,
-		AttemptId:      1,
+		Key:            testAttemptKey(1),
 	}
 
 	resp, err := alice.RPC.SendOnion(sendReq)
@@ -88,10 +99,9 @@ func testSendOnion(ht *lntest.HarnessTest) {
 	// Query for the result of the payment via onion and confirm that it
 	// succeeded.
 	trackReq := &switchrpc.TrackOnionRequest{
-		AttemptId:   1,
-		PaymentHash: paymentHash,
-		SessionKey:  onionResp.SessionKey,
-		HopPubkeys:  onionResp.HopPubkeys,
+		Key:        testAttemptKey(1),
+		SessionKey: onionResp.SessionKey,
+		HopPubkeys: onionResp.HopPubkeys,
 	}
 	trackResp := alice.RPC.TrackOnion(trackReq)
 	require.Equal(ht, invoices[0].RPreimage, trackResp.GetPreimage())
@@ -162,7 +172,7 @@ func testSendOnionTwice(ht *lntest.HarnessTest) {
 		Timelock:       route.TotalTimeLock,
 		PaymentHash:    payHash[:],
 		OnionBlob:      onionResp.OnionBlob,
-		AttemptId:      1,
+		Key:            testAttemptKey(1),
 	}
 	resp, err := alice.RPC.SendOnion(sendReq)
 	require.NoError(ht, err, "expected successful onion send")
@@ -193,10 +203,9 @@ func testSendOnionTwice(ht *lntest.HarnessTest) {
 
 	// Track the payment and verify success.
 	trackReq := &switchrpc.TrackOnionRequest{
-		AttemptId:   1,
-		PaymentHash: payHash[:],
-		SessionKey:  onionResp.SessionKey,
-		HopPubkeys:  onionResp.HopPubkeys,
+		Key:        testAttemptKey(1),
+		SessionKey: onionResp.SessionKey,
+		HopPubkeys: onionResp.HopPubkeys,
 	}
 	trackResp := alice.RPC.TrackOnion(trackReq)
 	require.Equal(ht, preimage[:], trackResp.GetPreimage())
@@ -216,7 +225,7 @@ func testSendOnionTwice(ht *lntest.HarnessTest) {
 	// Now that we've confirmed that duplicate sends are acknowledged for
 	// settled attempts, delete the attempt record from the store.
 	deleteReq := &switchrpc.DeleteAttemptsRequest{
-		AttemptIds: []uint64{1},
+		Keys: []*switchrpc.AttemptKey{testAttemptKey(1)},
 	}
 	deleteResp := alice.RPC.DeleteAttempts(deleteReq)
 	require.Len(ht, deleteResp.Results, 1)
@@ -279,14 +288,14 @@ func testSendOnionConcurrency(ht *lntest.HarnessTest) {
 	onionResp := alice.RPC.BuildOnion(onionReq)
 
 	// Create the SendOnion request that all goroutines will use.
-	// The AttemptId MUST be the same for all calls.
+	// The attempt key MUST be the same for all calls.
 	sendReq := &switchrpc.SendOnionRequest{
 		FirstHopChanId: aliceBobChan.ChannelId,
 		Amount:         route.TotalAmtMsat,
 		Timelock:       route.TotalTimeLock,
 		PaymentHash:    paymentHash,
 		OnionBlob:      onionResp.OnionBlob,
-		AttemptId:      42,
+		Key:            testAttemptKey(42),
 	}
 
 	const numConcurrentRequests = 50
@@ -397,7 +406,7 @@ func testTrackOnion(ht *lntest.HarnessTest) {
 		Timelock:       route.TotalTimeLock,
 		PaymentHash:    paymentHash,
 		OnionBlob:      onionResp.OnionBlob,
-		AttemptId:      1,
+		Key:            testAttemptKey(1),
 	}
 
 	resp, err := alice.RPC.SendOnion(sendReq)
@@ -409,10 +418,9 @@ func testTrackOnion(ht *lntest.HarnessTest) {
 	// error decryption to the server. We expect this to fail as Dave is not
 	// expecting payment.
 	trackReq := &switchrpc.TrackOnionRequest{
-		AttemptId:   1,
-		PaymentHash: paymentHash,
-		SessionKey:  onionResp.SessionKey,
-		HopPubkeys:  onionResp.HopPubkeys,
+		Key:        testAttemptKey(1),
+		SessionKey: onionResp.SessionKey,
+		HopPubkeys: onionResp.HopPubkeys,
 	}
 	trackResp := alice.RPC.TrackOnion(trackReq)
 	serverFailure := trackResp.GetFailureDetails()
@@ -424,8 +432,7 @@ func testTrackOnion(ht *lntest.HarnessTest) {
 	// Now we'll track the same payment attempt, but we'll specify that
 	// we want to handle the error decryption ourselves client side.
 	trackReq = &switchrpc.TrackOnionRequest{
-		AttemptId:   1,
-		PaymentHash: paymentHash,
+		Key: testAttemptKey(1),
 	}
 	trackResp = alice.RPC.TrackOnion(trackReq)
 	clientFailure := trackResp.GetFailureDetails()

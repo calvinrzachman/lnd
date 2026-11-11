@@ -639,15 +639,6 @@ type AuxTrafficShaper interface {
 // to avoid collisions of attemptIDs and ensure an unambiguous source of truth
 // for payment state. Concurrent usage by multiple dispatchers is NOT supported.
 type AttemptStore interface {
-	// InitAttempt persists the intent to dispatch a payment attempt,
-	// creating a durable record that serves as an idempotency key. This
-	// method should be called before the HTLC is dispatched to the network.
-	//
-	// NOTE: This method provides a guarantee that only one HTLC can be
-	// initialized for a given attempt ID until the ID is explicitly cleaned
-	// from the store.
-	InitAttempt(attemptID uint64) error
-
 	// StoreResult stores the result of a given payment attempt (identified
 	// by attemptID). This will be called when a result is received from the
 	// network.
@@ -696,11 +687,6 @@ type AttemptStore interface {
 	// those listed in the keepPids map. This allows for a "delete all
 	// except" approach to cleanup.
 	CleanStore(keepPids map[uint64]struct{}) error
-
-	// DeleteAttempts removes terminal (settled or failed) attempt results
-	// from the store. The returned map reports the outcome for each
-	// requested attempt ID.
-	DeleteAttempts(attemptIDs []uint64) (map[uint64]DeletionStatus, error)
 
 	// DisableRemoteRouter checks for attempt entries and, if none are
 	// found, deletes the remote router marker from the database. The
