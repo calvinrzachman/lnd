@@ -31,7 +31,6 @@ import (
 	"github.com/lightningnetwork/lnd/aliasmgr"
 	"github.com/lightningnetwork/lnd/autopilot"
 	"github.com/lightningnetwork/lnd/brontide"
-	"github.com/lightningnetwork/lnd/build"
 	"github.com/lightningnetwork/lnd/chainio"
 	"github.com/lightningnetwork/lnd/chainreg"
 	"github.com/lightningnetwork/lnd/chanacceptor"
@@ -379,6 +378,11 @@ type server struct {
 	graphBuilder *graph.Builder
 
 	chanRouter *routing.ChannelRouter
+
+	// paymentSequencer allocates attempt IDs. It is shared by the router
+	// and the switch RPC server, so that every attempt ID in the switch
+	// comes from one allocator.
+	paymentSequencer htlcswitch.Sequencer
 
 	controlTower routing.ControlTower
 
@@ -959,24 +963,23 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 
 			peer.HandleLocalCloseChanReqs(request)
 		},
-		FwdingLog:                dbs.ChanStateDB.ForwardingLog(),
-		SwitchPackager:           channeldb.NewSwitchPackager(),
-		ExtractErrorEncrypter:    s.sphinxPayment.ExtractErrorEncrypter,
-		FetchLastChannelUpdate:   s.fetchLastChanUpdate(),
-		Notifier:                 s.cc.ChainNotifier,
-		HtlcNotifier:             s.htlcNotifier,
-		ReputationManager:        repMgrIface,
-		FwdEventTicker:           ticker.New(htlcswitch.DefaultFwdEventInterval),
-		LogEventTicker:           ticker.New(htlcswitch.DefaultLogInterval),
-		AckEventTicker:           ticker.New(htlcswitch.DefaultAckInterval),
-		AllowCircularRoute:       cfg.AllowCircularRoute,
-		RejectHTLC:               cfg.RejectHTLC,
-		Clock:                    clock.NewDefaultClock(),
-		MailboxDeliveryTimeout:   cfg.Htlcswitch.MailboxDeliveryTimeout,
-		MaxFeeExposure:           thresholdMSats,
-		SignAliasUpdate:          s.signAliasUpdate,
-		IsAlias:                  aliasmgr.IsAlias,
-		ExternalPaymentLifecycle: build.SwitchRPC,
+		FwdingLog:              dbs.ChanStateDB.ForwardingLog(),
+		SwitchPackager:         channeldb.NewSwitchPackager(),
+		ExtractErrorEncrypter:  s.sphinxPayment.ExtractErrorEncrypter,
+		FetchLastChannelUpdate: s.fetchLastChanUpdate(),
+		Notifier:               s.cc.ChainNotifier,
+		HtlcNotifier:           s.htlcNotifier,
+		ReputationManager:      repMgrIface,
+		FwdEventTicker:         ticker.New(htlcswitch.DefaultFwdEventInterval),
+		LogEventTicker:         ticker.New(htlcswitch.DefaultLogInterval),
+		AckEventTicker:         ticker.New(htlcswitch.DefaultAckInterval),
+		AllowCircularRoute:     cfg.AllowCircularRoute,
+		RejectHTLC:             cfg.RejectHTLC,
+		Clock:                  clock.NewDefaultClock(),
+		MailboxDeliveryTimeout: cfg.Htlcswitch.MailboxDeliveryTimeout,
+		MaxFeeExposure:         thresholdMSats,
+		SignAliasUpdate:        s.signAliasUpdate,
+		IsAlias:                aliasmgr.IsAlias,
 	}, uint32(currentHeight))
 	if err != nil {
 		return nil, err
@@ -1069,6 +1072,7 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 	if err != nil {
 		return nil, err
 	}
+	s.paymentSequencer = sequencer
 
 	// Instantiate mission control with config from the sub server.
 	//
@@ -1208,7 +1212,6 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 		ClosedSCIDs:               s.fetchClosedChannelSCIDs(),
 		TrafficShaper:             implCfg.TrafficShaper,
 		KeepFailedPaymentAttempts: cfg.KeepFailedPaymentAttempts,
-		ExternalPaymentLifecycle:  build.SwitchRPC,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("can't create router: %w", err)

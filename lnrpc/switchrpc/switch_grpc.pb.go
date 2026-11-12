@@ -21,28 +21,44 @@ type SwitchClient interface {
 	//
 	//SendOnion dispatches a pre-formed onion packet. It is the primary entry
 	//point for a remote router and is idempotent. A client can and should
-	//retry it after a timeout or disconnection, reusing the same attempt_id so
+	//retry it after a timeout or disconnection, reusing the same attempt key so
 	//the server recognises the retry rather than sending a second HTLC.
 	//
+	//An attempt is named by its AttemptKey, which the client chooses. The
+	//server maps the key to an internal attempt of its own, so the key never
+	//collides with attempts made by lnd's own router. The client MUST follow
+	//four rules:
+	//
+	//1. The key is unique among all callers of this node and is never reused.
+	//2. The key is persisted, with the request, before the first SendOnion.
+	//3. A retry repeats the same key and the exact same request, including the
+	//same onion bytes.
+	//4. The key is 16 to 64 bytes long.
+	//
+	//The server enforces only the length. A retry under the same key whose
+	//request differs in a field that defines the HTLC is answered Mismatch.
+	//
 	//The outcome is carried in the response, never in a gRPC error. Exactly one
-	//of Accepted, Rejected or Ambiguous is set, and each documents the action it
-	//obliges the caller to take. An outcome the client does not recognise, or a
-	//response with none set, MUST be treated as Ambiguous.
+	//of Accepted, Rejected, Ambiguous or Mismatch is set, and each documents the
+	//action it obliges the caller to take. An outcome the client does not
+	//recognise, or a response with none set, MUST be treated as Ambiguous.
 	//
 	//A gRPC error means the call failed rather than the HTLC. The cause may be
 	//a malformed request, an auth failure, a transport problem, or a server not
 	//running this sub-server. The error describes only that call, and an
-	//earlier call with the same attempt_id may already have dispatched the
+	//earlier call with the same attempt key may already have dispatched the
 	//HTLC. After any gRPC error the client MUST NOT conclude that the HTLC was
-	//not dispatched. It may retry the same attempt_id, or stop and alert, but
-	//MUST NOT send a replacement under a new attempt_id until this one is
-	//answered Rejected or TrackOnion reports it failed.
+	//not dispatched. It may retry the same attempt key, or stop and alert, but
+	//MUST NOT send a replacement under a new attempt key until this one is
+	//answered Rejected or, once Accepted, TrackOnion reports it failed.
 	//
-	//A malformed request is answered with InvalidArgument and the attempt is
-	//recorded as failed. Retrying the same attempt_id is still safe, because the
-	//server answers Accepted and TrackOnion returns the recorded failure. Only
-	//once the attempt is known to have failed may the client send a corrected
-	//request under a new attempt_id.
+	//A malformed request is answered with InvalidArgument. A request whose key
+	//is missing or out of bounds records nothing. Any other malformed request
+	//is rejected after the key was registered, and the attempt is recorded as
+	//failed, so a retry of it is answered Accepted with already_registered set
+	//and TrackOnion returns a local failure. Only once the attempt is known to
+	//have failed may the client send a corrected request under a new attempt
+	//key.
 	SendOnion(ctx context.Context, in *SendOnionRequest, opts ...grpc.CallOption) (*SendOnionResponse, error)
 	//
 	//TrackOnion allows callers to query whether or not a payment dispatched via
@@ -71,36 +87,47 @@ type SwitchClient interface {
 	//decryption.
 	//
 	//3. QUERY FAILURE (gRPC error status): The query itself could not be
-	//completed. NotFound indicates the payment ID is unknown. Unavailable
+	//completed. NotFound indicates the attempt key is unknown. Unavailable
 	//signals the switch is shutting down. Canceled or DeadlineExceeded
 	//reflects client-side timeouts. These are safe to retry.
+	//
+	//NotFound is also returned when the attempt key is registered but the
+	//server no longer holds a record for its attempt, for example because a
+	//build that does not know attempt keys cleaned the store. Retrying then
+	//returns the same answer. A client that receives NotFound for an attempt
+	//the server acknowledged MUST NOT treat the attempt as failed, since it
+	//may have settled, and should resolve the payment by other means and
+	//alert an operator.
 	TrackOnion(ctx context.Context, in *TrackOnionRequest, opts ...grpc.CallOption) (*TrackOnionResponse, error)
 	//
 	//BuildOnion attempts to build an onion packet for the specified route.
 	BuildOnion(ctx context.Context, in *BuildOnionRequest, opts ...grpc.CallOption) (*BuildOnionResponse, error)
 	//
 	//DeleteAttempts removes terminal (settled or failed) payment attempt records
-	//from the server's attempt store. The client explicitly names the attempt
-	//IDs to delete, enabling online garbage collection of completed attempt
-	//data.
+	//from the server's attempt store. The client explicitly names the attempts
+	//to delete by their attempt keys, enabling online garbage collection of
+	//completed attempt data.
 	//
-	//The server processes each attempt ID independently and reports per-ID
+	//The server processes each attempt independently and reports per-attempt
 	//results. Pending (in-flight) attempts are never deleted; they are reported
-	//with a DELETION_PENDING status. Unknown attempt IDs are reported with
+	//with a DELETION_PENDING status. Unknown attempt keys are reported with
 	//DELETION_NOT_FOUND. Unprocessable records are reported with
 	//DELETION_FAILED. The overall RPC succeeds (gRPC OK) as long as the
 	//request could be processed, even if individual attempts were not deleted.
 	//
+	//Results follow the order of the keys in the request, and a key repeated
+	//in the request is reported once, so pair results with requests by their
+	//key, not by position. DELETION_OK is the zero value of the status enum.
+	//
 	//Clients MUST only delete attempts whose outcome (settled or failed) has
 	//been durably recorded and will never need to be retried. Deleting an
-	//attempt removes the server's idempotency protection for that attempt ID.
-	DeleteAttempts(ctx context.Context, in *DeleteAttemptsRequest, opts ...grpc.CallOption) (*DeleteAttemptsResponse, error)
+	//attempt removes the server's idempotency protection for that attempt key:
+	//the server forgets the key, and a SendOnion that names it again
+	//dispatches a new HTLC. A deleted key MUST never be sent again.
 	//
-	//DisableRemoteRouter marks the database as no longer being used by a remote
-	//router. This is useful for migrating from a remote router setup back to the
-	//default embedded router. This RPC will fail if there are any attempt entries
-	//remaining in the network result store.
-	DisableRemoteRouter(ctx context.Context, in *DisableRemoteRouterRequest, opts ...grpc.CallOption) (*DisableRemoteRouterResponse, error)
+	//An invalid key anywhere in the request fails the whole call with
+	//InvalidArgument, and nothing is deleted.
+	DeleteAttempts(ctx context.Context, in *DeleteAttemptsRequest, opts ...grpc.CallOption) (*DeleteAttemptsResponse, error)
 }
 
 type switchClient struct {
@@ -147,15 +174,6 @@ func (c *switchClient) DeleteAttempts(ctx context.Context, in *DeleteAttemptsReq
 	return out, nil
 }
 
-func (c *switchClient) DisableRemoteRouter(ctx context.Context, in *DisableRemoteRouterRequest, opts ...grpc.CallOption) (*DisableRemoteRouterResponse, error) {
-	out := new(DisableRemoteRouterResponse)
-	err := c.cc.Invoke(ctx, "/switchrpc.Switch/DisableRemoteRouter", in, out, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 // SwitchServer is the server API for Switch service.
 // All implementations must embed UnimplementedSwitchServer
 // for forward compatibility
@@ -163,28 +181,44 @@ type SwitchServer interface {
 	//
 	//SendOnion dispatches a pre-formed onion packet. It is the primary entry
 	//point for a remote router and is idempotent. A client can and should
-	//retry it after a timeout or disconnection, reusing the same attempt_id so
+	//retry it after a timeout or disconnection, reusing the same attempt key so
 	//the server recognises the retry rather than sending a second HTLC.
 	//
+	//An attempt is named by its AttemptKey, which the client chooses. The
+	//server maps the key to an internal attempt of its own, so the key never
+	//collides with attempts made by lnd's own router. The client MUST follow
+	//four rules:
+	//
+	//1. The key is unique among all callers of this node and is never reused.
+	//2. The key is persisted, with the request, before the first SendOnion.
+	//3. A retry repeats the same key and the exact same request, including the
+	//same onion bytes.
+	//4. The key is 16 to 64 bytes long.
+	//
+	//The server enforces only the length. A retry under the same key whose
+	//request differs in a field that defines the HTLC is answered Mismatch.
+	//
 	//The outcome is carried in the response, never in a gRPC error. Exactly one
-	//of Accepted, Rejected or Ambiguous is set, and each documents the action it
-	//obliges the caller to take. An outcome the client does not recognise, or a
-	//response with none set, MUST be treated as Ambiguous.
+	//of Accepted, Rejected, Ambiguous or Mismatch is set, and each documents the
+	//action it obliges the caller to take. An outcome the client does not
+	//recognise, or a response with none set, MUST be treated as Ambiguous.
 	//
 	//A gRPC error means the call failed rather than the HTLC. The cause may be
 	//a malformed request, an auth failure, a transport problem, or a server not
 	//running this sub-server. The error describes only that call, and an
-	//earlier call with the same attempt_id may already have dispatched the
+	//earlier call with the same attempt key may already have dispatched the
 	//HTLC. After any gRPC error the client MUST NOT conclude that the HTLC was
-	//not dispatched. It may retry the same attempt_id, or stop and alert, but
-	//MUST NOT send a replacement under a new attempt_id until this one is
-	//answered Rejected or TrackOnion reports it failed.
+	//not dispatched. It may retry the same attempt key, or stop and alert, but
+	//MUST NOT send a replacement under a new attempt key until this one is
+	//answered Rejected or, once Accepted, TrackOnion reports it failed.
 	//
-	//A malformed request is answered with InvalidArgument and the attempt is
-	//recorded as failed. Retrying the same attempt_id is still safe, because the
-	//server answers Accepted and TrackOnion returns the recorded failure. Only
-	//once the attempt is known to have failed may the client send a corrected
-	//request under a new attempt_id.
+	//A malformed request is answered with InvalidArgument. A request whose key
+	//is missing or out of bounds records nothing. Any other malformed request
+	//is rejected after the key was registered, and the attempt is recorded as
+	//failed, so a retry of it is answered Accepted with already_registered set
+	//and TrackOnion returns a local failure. Only once the attempt is known to
+	//have failed may the client send a corrected request under a new attempt
+	//key.
 	SendOnion(context.Context, *SendOnionRequest) (*SendOnionResponse, error)
 	//
 	//TrackOnion allows callers to query whether or not a payment dispatched via
@@ -213,36 +247,47 @@ type SwitchServer interface {
 	//decryption.
 	//
 	//3. QUERY FAILURE (gRPC error status): The query itself could not be
-	//completed. NotFound indicates the payment ID is unknown. Unavailable
+	//completed. NotFound indicates the attempt key is unknown. Unavailable
 	//signals the switch is shutting down. Canceled or DeadlineExceeded
 	//reflects client-side timeouts. These are safe to retry.
+	//
+	//NotFound is also returned when the attempt key is registered but the
+	//server no longer holds a record for its attempt, for example because a
+	//build that does not know attempt keys cleaned the store. Retrying then
+	//returns the same answer. A client that receives NotFound for an attempt
+	//the server acknowledged MUST NOT treat the attempt as failed, since it
+	//may have settled, and should resolve the payment by other means and
+	//alert an operator.
 	TrackOnion(context.Context, *TrackOnionRequest) (*TrackOnionResponse, error)
 	//
 	//BuildOnion attempts to build an onion packet for the specified route.
 	BuildOnion(context.Context, *BuildOnionRequest) (*BuildOnionResponse, error)
 	//
 	//DeleteAttempts removes terminal (settled or failed) payment attempt records
-	//from the server's attempt store. The client explicitly names the attempt
-	//IDs to delete, enabling online garbage collection of completed attempt
-	//data.
+	//from the server's attempt store. The client explicitly names the attempts
+	//to delete by their attempt keys, enabling online garbage collection of
+	//completed attempt data.
 	//
-	//The server processes each attempt ID independently and reports per-ID
+	//The server processes each attempt independently and reports per-attempt
 	//results. Pending (in-flight) attempts are never deleted; they are reported
-	//with a DELETION_PENDING status. Unknown attempt IDs are reported with
+	//with a DELETION_PENDING status. Unknown attempt keys are reported with
 	//DELETION_NOT_FOUND. Unprocessable records are reported with
 	//DELETION_FAILED. The overall RPC succeeds (gRPC OK) as long as the
 	//request could be processed, even if individual attempts were not deleted.
 	//
+	//Results follow the order of the keys in the request, and a key repeated
+	//in the request is reported once, so pair results with requests by their
+	//key, not by position. DELETION_OK is the zero value of the status enum.
+	//
 	//Clients MUST only delete attempts whose outcome (settled or failed) has
 	//been durably recorded and will never need to be retried. Deleting an
-	//attempt removes the server's idempotency protection for that attempt ID.
-	DeleteAttempts(context.Context, *DeleteAttemptsRequest) (*DeleteAttemptsResponse, error)
+	//attempt removes the server's idempotency protection for that attempt key:
+	//the server forgets the key, and a SendOnion that names it again
+	//dispatches a new HTLC. A deleted key MUST never be sent again.
 	//
-	//DisableRemoteRouter marks the database as no longer being used by a remote
-	//router. This is useful for migrating from a remote router setup back to the
-	//default embedded router. This RPC will fail if there are any attempt entries
-	//remaining in the network result store.
-	DisableRemoteRouter(context.Context, *DisableRemoteRouterRequest) (*DisableRemoteRouterResponse, error)
+	//An invalid key anywhere in the request fails the whole call with
+	//InvalidArgument, and nothing is deleted.
+	DeleteAttempts(context.Context, *DeleteAttemptsRequest) (*DeleteAttemptsResponse, error)
 	mustEmbedUnimplementedSwitchServer()
 }
 
@@ -261,9 +306,6 @@ func (UnimplementedSwitchServer) BuildOnion(context.Context, *BuildOnionRequest)
 }
 func (UnimplementedSwitchServer) DeleteAttempts(context.Context, *DeleteAttemptsRequest) (*DeleteAttemptsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DeleteAttempts not implemented")
-}
-func (UnimplementedSwitchServer) DisableRemoteRouter(context.Context, *DisableRemoteRouterRequest) (*DisableRemoteRouterResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method DisableRemoteRouter not implemented")
 }
 func (UnimplementedSwitchServer) mustEmbedUnimplementedSwitchServer() {}
 
@@ -350,24 +392,6 @@ func _Switch_DeleteAttempts_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Switch_DisableRemoteRouter_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(DisableRemoteRouterRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(SwitchServer).DisableRemoteRouter(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: "/switchrpc.Switch/DisableRemoteRouter",
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(SwitchServer).DisableRemoteRouter(ctx, req.(*DisableRemoteRouterRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 // Switch_ServiceDesc is the grpc.ServiceDesc for Switch service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -390,10 +414,6 @@ var Switch_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteAttempts",
 			Handler:    _Switch_DeleteAttempts_Handler,
-		},
-		{
-			MethodName: "DisableRemoteRouter",
-			Handler:    _Switch_DisableRemoteRouter_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

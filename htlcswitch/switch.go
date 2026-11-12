@@ -314,11 +314,6 @@ type Config struct {
 
 	// IsAlias returns whether or not a given SCID is an alias.
 	IsAlias func(scid lnwire.ShortChannelID) bool
-
-	// ExternalPaymentLifecycle indicates that the payment lifecycle is
-	// managed by an external entity, and the dispatcher's payment store
-	// should not be cleaned on startup.
-	ExternalPaymentLifecycle bool
 }
 
 // Switch is the central messaging bus for all incoming/outgoing HTLCs.
@@ -350,7 +345,7 @@ type Switch struct {
 	// user of the result when they are complete. Each payment attempt
 	// should be given a unique integer ID when it is created, otherwise
 	// results might be overwritten.
-	attemptStore AttemptStore
+	attemptStore *networkResultStore
 
 	// circuits is storage for payment circuits which are used to
 	// forward the settle/fail htlc updates back to the add htlc initiator.
@@ -475,12 +470,13 @@ func New(cfg Config, currentHeight uint32) (*Switch, error) {
 		return nil, err
 	}
 
-	networkResultStore, err := newNetworkResultStore(
-		cfg.DB, cfg.ExternalPaymentLifecycle,
-	)
-	if err != nil {
+	// Refuse a result store that a switchrpc build without attempt keys
+	// left records in, before anything can fail or clean those records.
+	if err := checkLegacyLifecycleMarker(cfg.DB); err != nil {
 		return nil, err
 	}
+
+	networkResultStore := newNetworkResultStore(cfg.DB)
 
 	s := &Switch{
 		bestHeight:        currentHeight,
@@ -677,11 +673,10 @@ func (s *Switch) AttemptStore() AttemptStore {
 	return s.attemptStore
 }
 
-// DisableRemoteRouter calls the underlying result store, telling it to check
-// for attempt entries and if none are found, to delete the remote router
-// marker from the database.
-func (s *Switch) DisableRemoteRouter() error {
-	return s.attemptStore.DisableRemoteRouter()
+// ExternalAttemptStore provides access to the index of attempts dispatched by
+// an external router.
+func (s *Switch) ExternalAttemptStore() ExternalAttemptStore {
+	return s.attemptStore
 }
 
 // SendHTLC is used by other subsystems which aren't belong to htlc switch
